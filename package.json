@@ -1,0 +1,28 @@
+{
+  "name": "elite-spaces",
+  "version": "1.0.0",
+  "description": "ELITE Spaces v1 - check-in, sessions, enrollment and parent updates for ELITE Spaces locations",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "seed": "node --no-warnings scripts/seed.js",
+    "test": "node --no-warnings tests/run.js",
+    "mutate": "node --no-warnings tests/mutate.js",
+    "coverage": "node --no-warnings tests/coverage.js",
+    "gate": "npm test --silent && npm run mutate --silent && npm run coverage --silent"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.3.0",
+    "jsqr": "^1.4.0",
+    "luxon": "^3.7.2",
+    "pdfkit": "^0.20.2",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

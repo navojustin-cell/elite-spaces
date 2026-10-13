@@ -1,0 +1,66 @@
+{
+  "_about": "Every requirement in the ELITE Spaces PRD v1 (Oct 6, 2026). CI/SC/EN/MB/AN/DN/AT IDs are the PRD's own. AC (users and roles) and NF (platform and non-functional) IDs are derived from those PRD sections because the PRD did not number them. gate 'test' = coverage.js requires, for EACH listed module, at least one test tagged with the ID in tests/<module>.test.js AND at least one mutation covering it in tests/mutations/<module>.js. gate 'critic' = judged by the integration critic in the browser, not automatable.",
+  "requirements": [
+    { "id": "AC-1", "modules": ["accounts"], "gate": "test", "text": "A parent creates the family account and invites each student by email or phone." },
+    { "id": "AC-2", "modules": ["accounts"], "gate": "test", "text": "One parent account can hold several students. A student can have more than one linked parent (for example, two guardians), and each sees the same records." },
+    { "id": "AC-3", "modules": ["accounts"], "gate": "test", "text": "Students are minors: a parent creates the account and approves the student link before the student can use the app." },
+    { "id": "AC-4", "modules": ["accounts"], "gate": "test", "text": "Branch directors manage staff accounts for their location." },
+    { "id": "AC-5", "modules": ["accounts"], "gate": "test", "text": "HQ admins create locations and assign directors." },
+    { "id": "AC-6", "modules": ["accounts"], "gate": "test", "text": "Each role inherits the one below it within its scope (director > staff); HQ sees the whole network." },
+
+    { "id": "CI-1", "modules": ["checkin"], "gate": "test", "text": "Each location displays a QR code at its entrance. The code rotates daily at a set time, and yesterday's code stops working." },
+    { "id": "CI-2", "modules": ["checkin"], "gate": "test", "text": "Students check in by opening the app and scanning the code. The app also checks the phone's location and rejects scans from outside the building's radius." },
+    { "id": "CI-3", "modules": ["checkin"], "gate": "test", "text": "Check-in links the visit to the student's enrolled session for that time slot. A student with no enrollment at that time gets a clear message and cannot check in (staff can override; see CI-7)." },
+    { "id": "CI-4", "modules": ["checkin"], "gate": "test", "text": "Students check out by scanning the same code." },
+    { "id": "CI-5", "modules": ["checkin"], "gate": "test", "text": "If a student hasn't checked out by the end of their enrolled session or the location's closing time, whichever comes first, the system checks them out automatically and flags the visit for staff review." },
+    { "id": "CI-6", "modules": ["checkin"], "gate": "test", "text": "Parents get a push notification at each check-in and check-out, including auto-checkouts (labeled as such)." },
+    { "id": "CI-7", "modules": ["checkin"], "gate": "test", "text": "Staff can view a live 'in the building' list and manually check a student in or out (for example, a dead phone). Manual entries are logged with the staff member's name." },
+
+    { "id": "SC-1", "modules": ["sessions"], "gate": "test", "text": "Directors create sessions: open study blocks of 2-3 hours on set days and times (for example, Mon/Wed/Fri 1-4pm)." },
+    { "id": "SC-2", "modules": ["sessions"], "gate": "test", "text": "Each session has a capacity based on the facility's total study space. Inside the building, students choose their own spot; the app does not assign seats." },
+    { "id": "SC-3", "modules": ["sessions"], "gate": "test", "text": "Directors set terms (start and end dates) and holiday closures. Closures cancel affected sessions and notify enrolled families." },
+    { "id": "SC-4", "modules": ["sessions"], "gate": "test", "text": "Directors can edit or cancel a session; enrolled families are notified automatically." },
+
+    { "id": "EN-1", "modules": ["enrollment"], "gate": "test", "text": "Enrollment is recurring only: a family enrolls in a weekly slot for the rest of the term." },
+    { "id": "EN-2", "modules": ["enrollment"], "gate": "test", "text": "Parents can enroll their students directly." },
+    { "id": "EN-3", "modules": ["enrollment"], "gate": "test", "text": "Students can request a session. The request goes to their parent(s) to approve or decline, and the student is notified of the result." },
+    { "id": "EN-4", "modules": ["enrollment"], "gate": "test", "text": "Enrollment is blocked if the membership is inactive or expired, or if it would exceed the membership's weekly session cap (hard cap)." },
+    { "id": "EN-5", "modules": ["enrollment"], "gate": "test", "text": "When a session is full, families can join a waitlist. When a seat opens, the first eligible family on the list is enrolled automatically and notified." },
+    { "id": "EN-6", "modules": ["enrollment"], "gate": "test", "text": "Parents can drop a recurring enrollment at any time, freeing the seat for the waitlist." },
+    { "id": "EN-7", "modules": ["enrollment"], "gate": "test", "text": "No cancellation cutoffs or no-show penalties. A missed session is simply recorded as absent." },
+
+    { "id": "MB-1", "modules": ["membership"], "gate": "test", "text": "Each student has a membership record: status (active / inactive), weekly session cap (for example, 3 or 4 per week), start date, and expiration date." },
+    { "id": "MB-2", "modules": ["membership"], "gate": "test", "text": "Location staff enter and update membership records manually. The app holds no payment data." },
+    { "id": "MB-3", "modules": ["membership"], "gate": "test", "text": "Parents and students can see the membership status, cap and expiration date." },
+    { "id": "MB-4", "modules": ["membership"], "gate": "test", "text": "Parents get a reminder before the membership expires (14 and 3 days before)." },
+    { "id": "MB-5", "modules": ["membership"], "gate": "test", "text": "On expiration or deactivation, future enrollments are paused, not deleted, so they can be restored if the membership is renewed." },
+
+    { "id": "AN-1", "modules": ["announcements"], "gate": "test", "text": "Directors post announcements to their location: events, workshops, holidays, session offerings and general news." },
+    { "id": "AN-2", "modules": ["announcements"], "gate": "test", "text": "HQ admins post network-wide announcements to all locations or a chosen set." },
+    { "id": "AN-3", "modules": ["announcements"], "gate": "test", "text": "Announcements go out as push notifications and stay in an in-app feed. Posts can be scheduled ahead of time." },
+    { "id": "AN-4", "modules": ["announcements"], "gate": "test", "text": "Audience targeting: all families, parents only, students only, or families enrolled in a specific session." },
+    { "id": "AN-5", "modules": ["announcements"], "gate": "test", "text": "Emergency alerts are a separate, high-priority type: visually distinct, cannot be muted, and go to everyone at the affected location(s). Directors (own location) and HQ (any) can send them." },
+    { "id": "AN-6", "modules": ["announcements"], "gate": "test", "text": "Senders can see delivery and read counts." },
+
+    { "id": "DN-1", "modules": ["notes"], "gate": "test", "text": "Staff complete a short daily note for each student who attended that day." },
+    { "id": "DN-2", "modules": ["notes"], "gate": "test", "text": "The note has a quick rating checklist with the same items at every location: On time, Focused, Respectful of others / not distracting, Productive use of time. Each is rated on a simple 3-point scale. HQ can edit the checklist items." },
+    { "id": "DN-3", "modules": ["notes"], "gate": "test", "text": "The note has an optional freeform comment." },
+    { "id": "DN-4", "modules": ["notes"], "gate": "test", "text": "Staff can complete notes quickly from the day's attendance list, with ratings defaulting to blank until set." },
+    { "id": "DN-5", "modules": ["notes"], "gate": "test", "text": "Parents get a notification when a note is posted and can browse past notes by date. Students do not see notes in v1." },
+
+    { "id": "AT-1", "modules": ["attendance"], "gate": "test", "text": "Every visit records check-in time, check-out time, total time, the session, and how check-out happened (scan, auto, staff)." },
+    { "id": "AT-2", "modules": ["attendance"], "gate": "test", "text": "Parents can view attendance history by week, month or term." },
+    { "id": "AT-3", "modules": ["attendance"], "gate": "test", "text": "Parents can export an attendance and hours log for a chosen date range as PDF or CSV, suitable for homeschool record-keeping." },
+    { "id": "AT-4", "modules": ["attendance"], "gate": "test", "text": "Directors and HQ can view and export attendance reports by location, session and date range." },
+
+    { "id": "NF-1", "modules": ["accounts", "checkin", "sessions", "enrollment", "membership", "announcements", "notes", "attendance"], "gate": "test", "text": "Families see only their own data. Staff see only their location's families. HQ sees all. Every module's endpoints enforce this." },
+    { "id": "NF-2", "modules": ["checkin", "membership"], "gate": "test", "text": "All staff edits (manual check-ins, membership changes) are logged." },
+    { "id": "NF-3", "modules": ["enrollment"], "gate": "test", "text": "Waitlist promotion runs reliably, with no double-booking when two families take the last seat at once." },
+    { "id": "NF-4", "modules": ["checkin", "sessions"], "gate": "test", "text": "Each location runs on its own time zone for sessions, closing times and QR rotation." },
+    { "id": "NF-5", "modules": ["checkin"], "gate": "test", "text": "Location is checked only at the moment of a scan, never tracked in the background (scan coordinates are not stored)." },
+    { "id": "NF-6", "modules": ["checkin"], "gate": "test", "text": "A check-in scan completes in under 2 seconds." },
+    { "id": "NF-7", "modules": [], "gate": "critic", "text": "Meets WCAG 2.1 AA for contrast, text size and screen-reader labels." },
+    { "id": "NF-8", "modules": [], "gate": "critic", "text": "Mobile-first installable web app for students and parents (QR scanning through the camera, location check, notifications); the same app laid out for desktop for staff, directors and HQ. iOS onboarding walks families through Add to Home Screen." },
+    { "id": "NF-9", "modules": [], "gate": "critic", "text": "v1 succeeds if pilot locations can run day-to-day operations entirely in the app, with no paper sign-ins or spreadsheet schedules." }
+  ]
+}
