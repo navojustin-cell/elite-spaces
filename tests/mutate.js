@@ -65,7 +65,7 @@ function copyTree(dst) {
   fs.mkdirSync(WORK, { recursive: true });
   const results = new Array(MUTATIONS.length);
   let next = 0;
-  const workers = Math.max(1, Math.min(6, os.cpus().length - 1));
+  const workers = Number(process.env.ELITE_MUTATE_WORKERS) || Math.max(1, Math.min(6, os.cpus().length - 1));
 
   async function worker(w) {
     while (next < MUTATIONS.length) {
