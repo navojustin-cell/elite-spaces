@@ -16,6 +16,10 @@ const only = args.filter(a => !a.startsWith('--'));
 const files = fs.readdirSync(__dirname).filter(f => f.endsWith('.test.js'))
   .filter(f => !only.length || only.includes(f.replace(/\.test\.js$/, ''))).sort();
 
+// Scoped runs load only the named modules into the app, so one module's
+// half-finished code cannot break another module's tests. A full run loads all.
+if (only.length) process.env.ELITE_MODULES = only.filter(n => n !== 'core').join(',');
+
 for (const f of files) { lib.setFile(f); require(path.join(__dirname, f)); }
 
 if (list) {

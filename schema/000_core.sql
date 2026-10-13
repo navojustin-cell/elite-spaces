@@ -103,6 +103,22 @@ CREATE TABLE IF NOT EXISTS enrollments (
 CREATE UNIQUE INDEX IF NOT EXISTS enrollments_one_live
   ON enrollments(student_id, session_id, weekday) WHERE status IN ('active','paused');
 
+-- Per-slot waitlist (EN-5). Shared because membership renewal (D-16) can put a
+-- student back at the front. Order: priority DESC, created_at ASC, id ASC.
+CREATE TABLE IF NOT EXISTS waitlist (
+  id            INTEGER PRIMARY KEY,
+  student_id    INTEGER NOT NULL REFERENCES users(id),
+  session_id    INTEGER NOT NULL REFERENCES sessions(id),
+  weekday       INTEGER NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting','enrolled','removed')),
+  priority      INTEGER NOT NULL DEFAULT 0,    -- 1 = front of the line (renewed membership)
+  created_by    INTEGER REFERENCES users(id),
+  created_at    INTEGER NOT NULL,
+  resolved_at   INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS waitlist_one_waiting
+  ON waitlist(student_id, session_id, weekday) WHERE status = 'waiting';
+
 CREATE TABLE IF NOT EXISTS visits (
   id              INTEGER PRIMARY KEY,
   student_id      INTEGER NOT NULL REFERENCES users(id),

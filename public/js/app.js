@@ -88,6 +88,30 @@
   App.go = (id, ...params) => { location.hash = '#/' + [id, ...params].map(encodeURIComponent).join('/'); };
   App.refresh = () => render();
 
+  // ---------- home (foundation view, filled by module cards) ----------
+  // App.card({ id, roles, order, render(el) }) adds a card to the Home screen.
+  // Each module contributes its own (today's check-in status, latest note, ...).
+  App.cards = [];
+  App.card = c => { App.cards.push(Object.assign({ order: 50 }, c)); App.cards.sort((a, b) => a.order - b.order); };
+  App.register({
+    id: 'home', title: 'Home', icon: '🏠', order: 0,
+    async render(el) {
+      const u = App.me.user;
+      const hour = Number(new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone: App.tz() }).format(App.now()));
+      el.append(h('div', { class: 'page-head' }, h('div', null,
+        h('h1', null, (hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening') + ', ' + u.name.split(' ')[0]),
+        h('p', null, App.fmtDate(App.now(), { weekday: 'long', month: 'long', day: 'numeric' })))));
+      const cards = App.cards.filter(c => App.allowed(c.roles));
+      if (!cards.length) return el.append(h('div', { class: 'card empty' }, 'Nothing to show yet.'));
+      // Cards render independently; one failing card must not blank the page.
+      await Promise.all(cards.map(async c => {
+        const box = h('section', { class: 'home-card', 'data-card': c.id });
+        el.append(box);
+        try { await c.render(box); } catch (e) { box.replaceChildren(h('div', { class: 'notice notice-danger' }, e.message)); }
+      }));
+    },
+  });
+
   // ---------- inbox (foundation view) ----------
   App.register({
     id: 'inbox', title: 'Inbox', icon: '🔔', order: 90, nav: false,

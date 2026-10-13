@@ -23,7 +23,9 @@ const { execFile } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const MDIR = path.join(__dirname, 'mutations');
-const WORK = path.join(ROOT, '.mutants'); // inside the project so node_modules resolves
+// Inside the project so node_modules resolves; one folder per run so parallel
+// runs (several builders at once) never overwrite each other's mutants.
+const WORK = path.join(ROOT, '.mutants', 'p' + process.pid);
 const COPY = ['src', 'schema', 'public'];
 
 const only = process.argv.slice(2).filter(a => !a.startsWith('--'));
