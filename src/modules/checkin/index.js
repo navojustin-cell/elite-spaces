@@ -96,7 +96,7 @@ function router(ctx) {
     }
 
     if (!svc.membershipOk(ctx, student.id, today)) {
-      throw refuse('membership_inactive', "Your membership isn't active right now. Ask a parent or the front desk.");
+      throw refuse('membership_inactive', `Your membership isn't active, so your sessions are paused. Ask a parent or the front desk at ${loc.name} to renew it.`);
     }
     const slot = svc.slotNow(ctx, loc, student.id, now);
     if (!slot) throw refuse('no_session', svc.noSessionMessage(ctx, loc, student.id, now));

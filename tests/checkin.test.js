@@ -271,6 +271,19 @@ test(['CI-3'], 'no check-in without a live enrollment that day: paused, other we
   assert.equal(visitsOf(t, t.fam.student).length, 0);
 });
 
+test(['CI-3', 'NF-1'], 'status tells a student their sessions are paused by a lapsed membership, and only for that student', async () => {
+  const t = await setup();
+  const lapsed = kid(t, t.loc, 'Dan Lapsed', t.sess, [1], { status: 'inactive' });
+  t.db.prepare("UPDATE enrollments SET status = 'paused' WHERE student_id = ?").run(lapsed.id);
+  const mine = await t.as(lapsed).get('/api/checkin/status');
+  assert.equal(mine.status, 200);
+  assert.equal(mine.body.students.length, 1);
+  assert.equal(mine.body.students[0].paused, true);
+  assert.equal(mine.body.students[0].next, null);
+  const other = await t.as(t.fam.student).get('/api/checkin/status');
+  assert.equal(other.body.students[0].paused, false);
+});
+
 test(['CI-3'], 'an inactive or expired membership is refused with its own message; the last valid day still works', async () => {
   const t = await setup();
   const inactive = kid(t, t.loc, 'Ina Active', t.sess, [3], { status: 'inactive' });
@@ -280,7 +293,7 @@ test(['CI-3'], 'an inactive or expired membership is refused with its own messag
     const r = await t.scan(s);
     assert.equal(r.status, 403, s.name);
     assert.equal(r.body.error, 'membership_inactive', s.name);
-    assert.equal(r.body.message, "Your membership isn't active right now. Ask a parent or the front desk.");
+    assert.equal(r.body.message, "Your membership isn't active, so your sessions are paused. Ask a parent or the front desk at Irvine to renew it.");
     assert.equal(visitsOf(t, s).length, 0);
   }
   const ok = await t.scan(lastDay);

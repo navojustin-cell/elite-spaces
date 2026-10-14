@@ -240,6 +240,8 @@ function status(ctx, student, ms) {
   return {
     id: student.id, name: student.name, location: publicLocation(loc),
     state: !v ? 'none' : v.check_out_at == null ? 'here' : 'left',
+    // Sessions paused by a lapsed membership (MB-5), so the screen can say why none are coming up.
+    paused: !!ctx.db.prepare("SELECT 1 FROM enrollments WHERE student_id = ? AND status = 'paused'").get(student.id),
     visit: v ? {
       id: v.id, check_in_at: v.check_in_at, check_out_at: v.check_out_at, checkin_method: v.checkin_method,
       checkout_method: v.checkout_method, session_name: v.session_name, ends_at: v.end_time ? time.toMs(loc, today, v.end_time) : null,

@@ -71,6 +71,10 @@
       const how = v.checkout_method === 'auto' ? ' (checked out automatically)' : v.checkout_method === 'staff' ? ' (checked out by staff)' : '';
       return `Left at ${App.fmtTime(v.check_out_at, tz)}${how}` + (nextText ? ' · ' + nextText : '');
     }
+    if (!nextText && s.paused) {
+      return you ? `Your membership isn't active, so your sessions are paused. Ask a parent or the front desk at ${s.location.name} to renew it.`
+        : `${first(s.name)}'s membership isn't active, so sessions are paused.`;
+    }
     return nextText || (you ? 'No sessions coming up. Ask a parent to enroll you in one.' : 'No sessions coming up.');
   }
   function stateBadge(s) {

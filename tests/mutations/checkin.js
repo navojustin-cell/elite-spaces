@@ -267,4 +267,8 @@ module.exports = [
     find: 'membership_active: svc.membershipOk(ctx, s.id, today),', repl: 'membership_active: true,' },
   { name: 'expected list says every membership is active', covers: ['CI-7'], file: SVC,
     find: 'membership_active: membershipOk(ctx, s.student_id, today) });', repl: 'membership_active: true });' },
+  { name: 'status never reports paused sessions', covers: ['CI-3'], file: SVC,
+    find: "paused: !!ctx.db.prepare(\"SELECT 1 FROM enrollments WHERE student_id = ? AND status = 'paused'\").get(student.id),", repl: 'paused: false,' },
+  { name: 'status reports paused for everyone', covers: ['CI-3'], file: SVC,
+    find: "WHERE student_id = ? AND status = 'paused'\").get(student.id)", repl: "WHERE status = 'paused'\").get()" },
 ];
