@@ -49,8 +49,26 @@ A module may `require('../<other>/...')` only for read-only helpers that the oth
 on purpose. Notifications go through `src/notify.js`, staff edits through `src/audit.js`, and scope
 checks through `src/auth.js`. Sign-in sessions start with `auth.startSession(ctx, res, userId)`.
 The shared contracts between modules (membership audit rows, the enrollment status log, check-in
-notification kinds) are in `docs/decisions.md` D-26. Shell hooks for views: `App.boot()` redraws
-after a module signs someone in, `App.inboxLink(refType, route)` makes Inbox items open a view.
+notification kinds) are in `docs/decisions.md` D-26.
+
+Shell hooks for views (`public/js/app.js`):
+- `App.boot()` redraws after a module signs someone in.
+- `App.inboxLink(refType, route)` makes Inbox items whose `ref_type` matches open a view. `route` is a
+  view id with optional params (`'notes'`, `'schedule/12'`) or a function of the notification returning
+  one. Several modules may register one ref type; the first route the signed-in role can open wins.
+  Ref types sent today: `visit` (checkin), `closure`, `session` (sessions), `enrollment`,
+  `enrollment_request` (enrollment), `membership` (membership), `announcement` (announcements),
+  `daily_note` (notes), `user`, `location` (accounts).
+- `await App.confirm({ anchor | el, title, body, confirmLabel, cancelLabel, danger })` asks before a
+  consequential action and resolves `true` or `false`. Labels are verb-first and name the thing
+  (`confirmLabel: 'Deactivate Sam'`, `cancelLabel: 'Keep active'`); `danger: true` makes the confirm
+  button red. `anchor` opens the box right after that element; `el` swaps that element's content for
+  the box until it closes; with neither, it opens after the focused button. It is an inline
+  `role="alertdialog"` labelled by its title: the safe button comes first and gets focus, Escape picks
+  it, and focus returns afterward to `opener` (optional), else the element focused when it opened,
+  else `anchor`. Safari doesn't focus a tapped button, so pass the button as `anchor` or `opener`.
+  Never use `window.confirm` or `alert`.
+- `App.toast(msg, 'error'?)` and `App.run(btn, fn)` (disables `btn`, shows errors as toasts).
 
 ## Rules
 - **Every behavior arrives with a test that fails when the behavior is reverted**, plus a mutation

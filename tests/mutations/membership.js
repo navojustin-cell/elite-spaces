@@ -2,6 +2,7 @@
 // Membership mutations: each breaks one membership rule; membership.test.js must catch it.
 const R = 'src/modules/membership/index.js';
 const S = 'src/modules/membership/service.js';
+const V = 'public/js/views/membership.js';
 
 module.exports = [
   // MB-1: the record and its state
@@ -133,4 +134,24 @@ module.exports = [
   // MB-1: the last day must be a real calendar date.
   { name: 'accept a last day that is not a real date', covers: ['MB-1'], file: R,
     find: "if (!isDate(b.expires_on)) throw bad('expires_on'", repl: "if (false) throw bad('expires_on'" },
+
+  // MB-1: the roster names each account's state as People's roster decides it.
+  { name: 'every account no parent approved yet is called waiting for approval', covers: ['MB-1'], file: R,
+    find: "account: ps.length ? 'active' : s.accepted ? 'awaiting_approval' : 'invited',", repl: "account: ps.length ? 'active' : 'awaiting_approval'," },
+
+  // ---- the Members screen and Home card (views/membership.js) ----
+  { name: 'Members words an unapproved account its own way, not as People does', covers: ['MB-1'], file: V,
+    find: "const ACCOUNT = { awaiting_approval: 'Waiting for parent approval', invited: 'Invited, not set up yet' };",
+    repl: "const ACCOUNT = { awaiting_approval: 'Waiting for a parent to approve the account', invited: 'Waiting for a parent to approve the account' };" },
+  { name: 'the Members table cannot be scrolled from the keyboard', covers: ['MB-1'], file: V,
+    find: "tabindex: '0', role: 'region', 'aria-label': title }", repl: "role: 'region', 'aria-label': title }" },
+  { name: 'the Members table scroll box has no name', covers: ['MB-1'], file: V,
+    find: "tabindex: '0', role: 'region', 'aria-label': title }", repl: "tabindex: '0', role: 'region' }" },
+  { name: 'the Members filter tabs wrap their labels onto several lines', covers: ['MB-1'], file: V,
+    find: '.mb-tabs button { flex: none; white-space: nowrap;', repl: '.mb-tabs button {' },
+  { name: 'the Members filter tabs lose their one-row style', covers: ['MB-1'], file: V,
+    find: "class: 'tabs mb-tabs'", repl: "class: 'tabs'" },
+  { name: "a student's Home card words a lapse differently from Schedule", covers: ['MB-3', 'MB-5'], file: V,
+    find: "? (paused ? 'Your membership isn\\'t active, so your sessions are paused. ' : 'Your membership isn\\'t active. ') + renew",
+    repl: "? 'Your membership isn\\'t active right now. ' + renew" },
 ];

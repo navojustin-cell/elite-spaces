@@ -98,8 +98,9 @@ const left = doc => doc.page.margins.left;
 const innerWidth = doc => doc.page.width - doc.page.margins.left - doc.page.margins.right;
 const room = (doc, h) => { if (doc.y + h > doc.page.height - doc.page.margins.bottom) doc.addPage(); };
 
-// A table with a shaded header row that repeats on every page.
-function table(doc, columns, rows) {
+// A table with a shaded header row that repeats on every page. `keep` is room the
+// last row needs below it (the closing note), so the two always share a page.
+function table(doc, columns, rows, keep = 0) {
   const x0 = left(doc), width = innerWidth(doc);
   const widths = columns.map(c => c.w * width);
   const pad = 4;
@@ -114,22 +115,27 @@ function table(doc, columns, rows) {
     doc.y = y + hgt;
   };
   header();
-  for (const row of rows) {
+  rows.forEach((row, r) => {
     doc.font('Body').fontSize(9);
     const hgt = Math.max(...columns.map((c, i) => doc.heightOfString(String(row[i] ?? ''), plain({ width: widths[i] - 2 * pad })))) + 2 * pad;
-    if (doc.y + hgt > doc.page.height - doc.page.margins.bottom) { doc.addPage(); header(); doc.font('Body').fontSize(9); }
+    const need = hgt + (r === rows.length - 1 ? keep : 0);
+    if (doc.y + need > doc.page.height - doc.page.margins.bottom) { doc.addPage(); header(); doc.font('Body').fontSize(9); }
     const y = doc.y;
     let x = x0;
     doc.fillColor(INK);
     columns.forEach((c, i) => { doc.text(String(row[i] ?? ''), x + pad, y + pad, plain({ width: widths[i] - 2 * pad, align: c.align || 'left' })); x += widths[i]; });
     doc.moveTo(x0, y + hgt).lineTo(x0 + width, y + hgt).lineWidth(0.5).strokeColor(LINE).stroke();
     doc.y = y + hgt;
-  }
+  });
   doc.x = x0;
 }
 
+const NOTE_GAP = 14; // space above the closing note
+
 // Title, labelled details, summary boxes, then each section as a table (or its
-// empty sentence), a note, and "Page n of m" footers.
+// empty sentence), a note, and "Page n of m" footers. The note never sits alone
+// on a last page: the last section's final row (or its sentence, with its
+// heading) moves to the next page with it.
 function layout(doc, { title, details, summary, sections, note, footer }) {
   const x0 = left(doc), width = innerWidth(doc);
   doc.fillColor(INK).font('Bold').fontSize(18).text(title, x0, doc.y, plain());
@@ -147,17 +153,18 @@ function layout(doc, { title, details, summary, sections, note, footer }) {
   });
   doc.y = y + boxH + 6;
 
-  for (const s of sections) {
+  const noteHeight = note ? NOTE_GAP + doc.font('Body').fontSize(8.5).heightOfString(note, plain({ width })) : 0;
+  sections.forEach((s, i) => {
+    const keep = i === sections.length - 1 ? noteHeight : 0;
     doc.moveDown(0.9);
-    room(doc, 60);
+    room(doc, 60 + (s.rows.length > 1 ? 0 : keep));
     doc.fillColor(INK).font('Bold').fontSize(12).text(s.heading, x0, doc.y, plain());
     doc.moveDown(0.3);
-    if (s.rows.length) table(doc, s.columns, s.rows);
+    if (s.rows.length) table(doc, s.columns, s.rows, keep);
     else doc.fillColor(MUTED).font('Body').fontSize(10).text(s.empty, x0, doc.y, plain({ width }));
-  }
+  });
   if (note) {
-    doc.moveDown(1);
-    room(doc, 30);
+    doc.y += NOTE_GAP;
     doc.fillColor(MUTED).font('Body').fontSize(8.5).text(note, x0, doc.y, plain({ width }));
   }
 
@@ -186,7 +193,15 @@ const absenceRow = (a, withStudent) => [longDate(a.date), ...(withStudent ? [a.s
   hhmm(a.start_time) + ' – ' + hhmm(a.end_time)];
 // The hours box: decimal hours large, hours and minutes in the label.
 const hoursBox = t => ['Total hours · ' + duration(t.minutes), decimalHours(t.minutes)];
+// "Oct 14, 2026, 10:30 PM PDT": a local time always names its zone.
 const stamp = (ms, zone) => local(ms, zone).toFormat('LLL d, yyyy, h:mm a ZZZZ');
+// Across every location there is no one local time, so each zone's is given with
+// the locations in it: "Oct 14, 2026, 10:30 PM PDT (Arcadia, Irvine) · Oct 15, 2026, 1:30 AM EDT (Toronto)".
+function stampEach(ms, locations) {
+  const names = new Map(); // zone -> its locations, in the order given
+  for (const l of locations) names.set(l.timezone, [...(names.get(l.timezone) || []), l.name]);
+  return [...names].map(([zone, list]) => `${stamp(ms, zone)} (${list.join(', ')})`).join(' · ');
+}
 
 // AT-3: one student's attendance and hours log.
 function familyPdf({ student, from, to, label, log, now }) {
@@ -217,16 +232,16 @@ function familyPdf({ student, from, to, label, log, now }) {
 }
 
 // AT-4: a director/HQ report for a location (or all), a session (or all) and a date range.
-function reportPdf({ filters, label, log, byStudent, now }) {
+// `locations`: for an all-locations report, every location it covers, by name.
+function reportPdf({ filters, label, log, byStudent, now, locations = [] }) {
   const all = !filters.location;
-  const zone = all ? 'UTC' : filters.location.timezone;
   return render(doc => layout(doc, {
     title: 'Attendance report',
     details: [
       ['Location', all ? 'All locations' : filters.location.name],
       ['Session', filters.session ? filters.session.label : 'All sessions'],
       ['Dates', label],
-      ['Generated', stamp(now, zone)],
+      ['Generated', all ? stampEach(now, locations) : stamp(now, filters.location.timezone)],
     ],
     summary: [['Visits', String(log.totals.visits)], hoursBox(log.totals), ['Students', String(log.totals.students)],
       ['Absences', String(log.totals.absences)], ['Needs review', String(log.totals.needs_review)]],

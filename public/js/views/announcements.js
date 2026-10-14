@@ -1,6 +1,7 @@
 /* Announcements and emergency alerts (PRD 5, AN-1..AN-6).
    - News (#/news): the caller's feed, pinned emergency alerts, scheduled posts and
-     delivery/read numbers for senders, and the family mute setting.
+     delivery/read numbers for senders, and the family mute setting. #/news/<id>
+     (from an Inbox item) brings that post into view.
    - #/news/new: compose an announcement (audience, schedule, review step).
    - #/news/emergency: the separate emergency alert flow with a confirm step.
    - Home card: active emergency alerts and the latest announcement. */
@@ -29,6 +30,7 @@
       .ann-actions .btn { flex: 1 1 auto; }
       .ann-head { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin-bottom: .25rem; }
       .ann-head h3 { margin: 0; flex: 1 1 100%; }
+      .view-news [data-target] { box-shadow: 0 0 0 3px var(--focus); }
       @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .emergency.ann-alert, :root:not([data-theme="light"]) .btn-danger.ann-danger { background: #8f1d14; border-color: #ff8b80; } }
       :root[data-theme="dark"] .emergency.ann-alert, :root[data-theme="dark"] .btn-danger.ann-danger { background: #8f1d14; border-color: #ff8b80; }
     `));
@@ -77,16 +79,19 @@
     return h('p', { class: 'ann-meta' }, 'Questions? Ask the ' + l.name + ' front desk' + (l.address ? ' at ' + l.address : '') + '.');
   }
 
+  // Delivered counts a notification delivered, or (for someone with notifications
+  // off) the post seen in News; Read counts a post seen in News, opened from the
+  // Inbox or acknowledged on the alert pop-up. Both are out of Sent to (AN-6).
   function statsBlock(p) {
     const box = h('div', { class: 'ann-stats' });
     const live = h('span', { class: 'sr-only', 'aria-live': 'polite' });
     const item = (n, label) => h('div', null, h('b', null, String(n)), h('span', { class: 'stat-label' }, label));
     const fill = s => box.replaceChildren(...[
       item(s.recipients, 'Sent to'),
-      item(s.delivered, 'Notified'),
+      item(s.delivered, 'Delivered'),
       item(s.read, 'Read'),
       s.muted && item(s.muted, 'Notifications off'),
-      h('button', { class: 'btn btn-ghost', type: 'button', onclick: e => App.run(e.currentTarget, async () => {
+      h('button', { class: 'btn btn-ghost', type: 'button', 'aria-label': 'Refresh numbers for ' + p.title, onclick: e => App.run(e.currentTarget, async () => {
         const fresh = await App.api.get(API + '/' + p.id + '/stats');
         fill(fresh);
         live.textContent = 'Updated: ' + fresh.read + ' of ' + fresh.recipients + ' have read it.';
@@ -98,10 +103,12 @@
   }
 
   // One post, as its readers see it. Emergency alerts are red, labeled and iconed (AN-5).
-  function postCard(p, { pinned = false, onHide = null } = {}) {
+  // target: the post an Inbox item opened, focusable so the view can bring it into view.
+  function postCard(p, { pinned = false, onHide = null, target = false } = {}) {
     const meta = h('p', { class: 'ann-meta' }, fromText(p) + ' · ' + (p.when_text || App.fmtDateTime(p.published_at || p.publish_at, p.tz)));
+    const at = target ? { tabindex: '-1', 'data-target': '' } : {};
     if (p.type === 'emergency') {
-      return h('article', { class: 'emergency ann-alert', 'aria-label': 'Emergency alert: ' + p.title },
+      return h('article', Object.assign({ class: 'emergency ann-alert', 'aria-label': 'Emergency alert: ' + p.title }, at),
         h('div', { class: 'label' }, h('span', { 'aria-hidden': 'true' }, '⚠ '), pinned ? 'Emergency alert · active now' : 'Emergency alert'),
         h('h3', { style: 'margin:.2rem 0 0' }, p.title),
         h('p', { class: 'ann-body' }, p.body),
@@ -111,7 +118,7 @@
         p.stats && statsBlock(p),
         onHide && h('div', { style: 'margin-top:.6rem' }, h('button', { class: 'btn', type: 'button', onclick: onHide, 'aria-label': 'Hide this alert from Home' }, 'Hide from Home')));
     }
-    return h('article', { class: 'card', 'aria-label': p.title },
+    return h('article', Object.assign({ class: 'card', 'aria-label': p.title }, at),
       h('div', { class: 'ann-head' },
         p.category_label && h('span', { class: 'badge' }, p.category_label),
         p.unread && h('span', { class: 'badge badge-accent' }, 'New'),
@@ -124,8 +131,9 @@
   }
 
   // ---------- News feed ----------
-  async function renderFeed(el) {
-    const f = await App.api.get(API + '/feed');
+  // focusId: the post an Inbox item opened (#/news/<id>).
+  async function renderFeed(el, focusId = null) {
+    const f = await App.api.get(API + '/feed' + (focusId ? '?limit=100' : ''));
     const place = App.me.location ? App.me.location.name : 'every ELITE Spaces location';
     el.append(h('div', { class: 'page-head' },
       h('div', null, h('h1', null, 'News'), h('p', null, isFamily() ? 'Announcements from ' + place + '.' : 'Announcements and alerts for ' + place + '.')),
@@ -133,20 +141,26 @@
         h('a', { class: 'btn btn-primary', href: '#/news/new' }, 'New announcement'),
         h('a', { class: 'btn btn-danger ann-danger', href: '#/news/emergency' }, h('span', { 'aria-hidden': 'true' }, '⚠'), 'Send emergency alert'))));
 
-    for (const p of f.active_emergencies) el.append(postCard(p, { pinned: true }));
+    const found = !focusId || [...f.active_emergencies, ...f.posts].some(p => p.id === focusId);
+    if (!found) el.append(h('div', { class: 'notice', role: 'status' }, 'That announcement is no longer in your News. Here is everything that is.'));
+
+    for (const p of f.active_emergencies) el.append(postCard(p, { pinned: true, target: p.id === focusId }));
 
     if (f.scheduled.length) {
       const list = h('ul', { class: 'list' });
       for (const p of f.scheduled) {
+        const cancel = h('button', { class: 'btn', type: 'button', 'aria-label': 'Cancel scheduled post: ' + p.title }, 'Cancel');
+        cancel.addEventListener('click', async () => {
+          const ok = await App.confirm({ anchor: cancel, opener: cancel, title: 'Cancel "' + p.title + '"?',
+            body: 'It will not be sent, and families will never see it.', confirmLabel: 'Cancel post', cancelLabel: 'Keep scheduled', danger: true });
+          if (ok) App.run(cancel, async () => { await App.api.del(API + '/' + p.id); App.toast('Scheduled post cancelled.'); App.refresh(); });
+        });
         list.append(h('li', null,
           h('div', { class: 'grow' },
             h('strong', null, p.title),
             h('div', { class: 'muted small' }, 'Goes out ' + App.fmtDateTime(p.publish_at, p.tz) + ' (' + (p.locations[0] ? p.locations[0].name + ' time' : 'local time') + ')'),
             h('div', { class: 'muted small' }, (p.category_label ? p.category_label + ' · ' : '') + audienceText(p) + (App.role() === 'hq' ? ' · ' + fromText(p) : ''))),
-          h('button', { class: 'btn', type: 'button', 'aria-label': 'Cancel scheduled post: ' + p.title, onclick: e => {
-            if (!confirm('Cancel "' + p.title + '"? It will not be sent, and families will never see it.')) return;
-            App.run(e.currentTarget, async () => { await App.api.del(API + '/' + p.id); App.toast('Scheduled post cancelled.'); App.refresh(); });
-          } }, 'Cancel')));
+          cancel));
       }
       el.append(h('section', { class: 'card', 'aria-labelledby': 'ann-sched' }, h('h2', { id: 'ann-sched' }, 'Scheduled'), list));
     }
@@ -159,8 +173,12 @@
         ? 'Nothing posted yet. Use New announcement to share events, workshops, holidays or session news with families.'
         : 'No announcements yet. When ' + (App.me.location ? App.me.location.name : 'your location') + ' shares news, like events, workshops or closures, it will show up here.'));
     }
-    for (const p of posts) feed.append(postCard(p));
+    for (const p of posts) feed.append(postCard(p, { target: p.id === focusId }));
     el.append(feed);
+
+    // The view goes on screen right after this returns; then bring the opened post into view.
+    const target = focusId && el.querySelector('[data-target]');
+    if (target) setTimeout(() => { if (target.isConnected) { target.scrollIntoView({ block: 'center' }); target.focus({ preventScroll: true }); } }, 0);
 
     // Seeing a post in News counts as reading it (AN-6).
     for (const p of [...f.active_emergencies, ...f.posts]) if (p.unread) App.api.post(API + '/' + p.id + '/read').catch(() => {});
@@ -377,13 +395,18 @@
     sync();
   }
 
+  // The News feed and the Home card on screen now, kept current by the live updates below.
+  let feedBox = null, homeBox = null;
+
   App.register({
     id: 'news', title: 'News', icon: '📣', order: 50,
     async render(el, params) {
       const mode = params && params[0];
+      feedBox = null;
       if (mode === 'new') return renderCompose(el, false);
       if (mode === 'emergency') return renderCompose(el, true);
-      return renderFeed(el);
+      feedBox = el;
+      return renderFeed(el, /^\d+$/.test(mode || '') ? Number(mode) : null);
     },
   });
 
@@ -391,36 +414,76 @@
   App.card({
     id: 'announcements', order: 1,
     async render(el) {
-      const f = await App.api.get(API + '/feed?limit=10');
-      const hidden = store.get(hiddenKey(), []);
-      for (const p of f.active_emergencies) {
-        if (hidden.includes(p.id)) continue;
-        const banner = postCard(p, { pinned: true, onHide: () => {
-          store.set(hiddenKey(), [...store.get(hiddenKey(), []), p.id].slice(-50));
-          banner.remove();
-          App.toast('Alert hidden from Home. It stays in News.');
-        } });
-        el.append(banner);
-      }
-      const latest = f.posts.find(p => p.type !== 'emergency');
-      const where = App.me.location ? App.me.location.name : 'your locations';
-      el.append(h('section', { class: 'card', 'aria-labelledby': 'home-news-h' },
-        h('div', { class: 'row between' },
-          h('h2', { id: 'home-news-h', style: 'margin:0' }, 'Latest news'),
-          h('a', { class: 'btn btn-ghost', href: '#/news' }, 'See all news')),
-        latest
-          ? h('div', { style: 'margin-top:.5rem' },
-            h('div', { class: 'ann-head' }, latest.category_label && h('span', { class: 'badge' }, latest.category_label),
-              latest.unread && h('span', { class: 'badge badge-accent' }, 'New'), h('h3', null, latest.title)),
-            h('p', { class: 'ann-body' }, latest.body.length > 200 ? latest.body.slice(0, 197).trimEnd() + '…' : latest.body),
-            h('p', { class: 'ann-meta' }, fromText(latest) + ' · ' + App.fmtDateTime(latest.published_at, latest.tz)))
-          : h('p', { class: 'muted', style: 'margin:.5rem 0 0' }, 'No announcements yet. News from ' + where + ' will show up here.'),
-        isComposer() && h('div', { class: 'ann-actions', style: 'margin-top:.75rem' },
-          h('a', { class: 'btn btn-primary', href: '#/news/new' }, 'New announcement'),
-          h('a', { class: 'btn btn-danger ann-danger', href: '#/news/emergency' }, h('span', { 'aria-hidden': 'true' }, '⚠'), 'Send emergency alert'))));
+      homeBox = el;
+      return renderHomeCard(el);
     },
   });
 
-  // An announcement or alert in the Inbox opens the News feed.
-  App.inboxLink('announcement', 'news');
+  async function renderHomeCard(el) {
+    const f = await App.api.get(API + '/feed?limit=10');
+    const hidden = store.get(hiddenKey(), []);
+    for (const p of f.active_emergencies) {
+      if (hidden.includes(p.id)) continue;
+      const banner = postCard(p, { pinned: true, onHide: () => {
+        store.set(hiddenKey(), [...store.get(hiddenKey(), []), p.id].slice(-50));
+        banner.remove();
+        App.toast('Alert hidden from Home. It stays in News.');
+      } });
+      el.append(banner);
+    }
+    const latest = f.posts.find(p => p.type !== 'emergency');
+    const where = App.me.location ? App.me.location.name : 'your locations';
+    el.append(h('section', { class: 'card', 'aria-labelledby': 'home-news-h' },
+      h('div', { class: 'row between' },
+        h('h2', { id: 'home-news-h', style: 'margin:0' }, 'Latest news'),
+        h('a', { class: 'btn btn-ghost', href: '#/news' }, 'See all news')),
+      latest
+        ? h('div', { style: 'margin-top:.5rem' },
+          h('div', { class: 'ann-head' }, latest.category_label && h('span', { class: 'badge' }, latest.category_label),
+            latest.unread && h('span', { class: 'badge badge-accent' }, 'New'), h('h3', null, latest.title)),
+          h('p', { class: 'ann-body' }, latest.body.length > 200 ? latest.body.slice(0, 197).trimEnd() + '…' : latest.body),
+          h('p', { class: 'ann-meta' }, fromText(latest) + ' · ' + App.fmtDateTime(latest.published_at, latest.tz)))
+        : h('p', { class: 'muted', style: 'margin:.5rem 0 0' }, 'No announcements yet. News from ' + where + ' will show up here.'),
+      isComposer() && h('div', { class: 'ann-actions', style: 'margin-top:.75rem' },
+        h('a', { class: 'btn btn-primary', href: '#/news/new' }, 'New announcement'),
+        h('a', { class: 'btn btn-danger ann-danger', href: '#/news/emergency' }, h('span', { 'aria-hidden': 'true' }, '⚠'), 'Send emergency alert'))));
+  }
+
+  // ---------- live updates (AN-5, AN-6) ----------
+  // The shell pops up every emergency alert that streams in (showEmergency in
+  // app.js, a .emergency alertdialog on <body>) and removes it when the person
+  // taps "I have read this". Watching for that pop-up keeps the pinned alerts on
+  // Home and News current without a reload, and the tap counts as reading the
+  // alert, so the sender's read count includes it.
+  let redraws = 0;
+  async function redrawLive() {
+    const seq = ++redraws;
+    for (const [box, draw] of [[homeBox, renderHomeCard], [feedBox, renderFeed]]) {
+      if (!box || !box.isConnected) continue;
+      const fresh = h('div');
+      try { await draw(fresh); } catch (_) { continue; } // keep what is on screen
+      if (seq === redraws && box.isConnected) box.replaceChildren(...fresh.childNodes);
+    }
+  }
+  // The pop-up shows the alert's title; the person's newest unread alert with
+  // that title is the one they just acknowledged.
+  async function acknowledge(popup) {
+    const title = (popup.querySelector('h3') || {}).textContent;
+    try {
+      const { notifications } = await App.api.get('/api/notifications');
+      const n = notifications.find(x => x.priority === 'emergency' && x.ref_type === 'announcement' && x.title === title && !x.read_at);
+      if (n) await App.api.post(API + '/' + n.ref_id + '/read');
+    } catch (_) { /* signed out, or no longer theirs: nothing to count */ }
+  }
+  const isAlertPopup = n => n.nodeType === 1 && n.matches('.emergency[role="alertdialog"]');
+  new MutationObserver(records => {
+    if (!App.me) return;
+    const arrived = records.some(r => [...r.addedNodes].some(isAlertPopup));
+    const acknowledged = records.flatMap(r => [...r.removedNodes].filter(isAlertPopup));
+    if (acknowledged.length) Promise.all(acknowledged.map(acknowledge)).then(redrawLive);
+    else if (arrived) redrawLive();
+  }).observe(document.body, { childList: true });
+
+  // An announcement or alert in the Inbox opens that post in News.
+  App.inboxLink('announcement', n => (n.ref_id ? 'news/' + n.ref_id : 'news'));
 })();

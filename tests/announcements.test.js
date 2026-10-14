@@ -299,6 +299,29 @@ test(['AN-3'], 'a schedule time that has already passed is refused instead of se
   assert.equal(w.t.db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, 0);
 });
 
+test(['AN-3'], 'the review step refuses a schedule time that has already passed, with the same message as sending', async () => {
+  const w = await world();
+  const past = post({ publish_at: '2026-10-14T08:00' });
+  const review = await w.t.as(w.dirA).post(API + '/preview', past);
+  assert.equal(review.status, 400);
+  assert.equal(review.body.error, 'publish_at');
+  assert.equal(review.body.message, 'That time has already passed. Pick a later time, or send it now.');
+  const send = await w.t.as(w.dirA).post(API, past);
+  assert.equal(send.status, 400);
+  assert.equal(review.body.message, send.body.message);
+  // Read in the location's own zone: 12:30 is still ahead in Irvine (10:00 now) but past in Toronto (13:00 now).
+  assert.equal((await w.t.as(w.dirA).post(API + '/preview', post({ publish_at: '2026-10-14T12:30' }))).status, 200);
+  assert.equal((await w.t.as(w.dirB).post(API + '/preview', post({ publish_at: '2026-10-14T12:30' }))).status, 400);
+  const junk = await w.t.as(w.dirA).post(API + '/preview', post({ publish_at: 'tomorrow' }));
+  assert.equal(junk.status, 400);
+  assert.equal(junk.body.error, 'publish_at');
+  // A later time, or none, reviews fine; an emergency alert has no schedule, so its review ignores one.
+  assert.equal((await w.t.as(w.dirA).post(API + '/preview', post({ publish_at: '2026-10-14T15:00' }))).status, 200);
+  assert.equal((await w.t.as(w.dirA).post(API + '/preview', post())).status, 200);
+  assert.equal((await w.t.as(w.dirA).post(API + '/preview', alert({ type: 'emergency', publish_at: '2026-10-14T08:00' }))).status, 200);
+  assert.equal(countAnnouncements(w.t), 0);
+});
+
 test(['AN-3'], 'a schedule time must be a real clock time within the next year', async () => {
   const w = await world();
   const now = w.t.clock.now();
@@ -415,6 +438,49 @@ test(['AN-4'], 'students whose parent has not approved them, and deactivated acc
   // The parent of the pending student is still a family at this location.
   assert.ok(ids.includes(pending.parent.id));
   assert.equal(ids.length, 5);
+});
+
+test(['AN-4', 'NF-1'], 'a parent who joins later, with no students set up yet, sees the location\'s all-families and parents-only posts', async () => {
+  const w = await world();
+  const { t, A } = w;
+  const byId = ids => [...ids].sort((x, y) => x - y);
+  const s = t.fx.session(A);
+  t.fx.enroll(w.famA.student, s, 1);
+  const families = (await t.as(w.dirA).post(API, post({ title: 'Open house' }))).body.announcement.id;
+  const parents = (await t.as(w.dirA).post(API, post({ audience: 'parents', title: 'Parent night' }))).body.announcement.id;
+  const students = (await t.as(w.dirA).post(API, post({ audience: 'students', title: 'Study jam' }))).body.announcement.id;
+  const session = (await t.as(w.dirA).post(API, post({ audience: 'session', session_id: s.id }))).body.announcement.id;
+  const atB = (await t.as(w.dirB).post(API, post())).body.announcement.id;
+  const em = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  const network = (await t.as(w.hq).post(API, post({ locations: 'all', audience: 'parents', title: 'Welcome' }))).body.announcement.id;
+  t.clock.advance(60000);
+
+  // Signed up just now at Irvine: no students, no enrollment, never a recipient.
+  const newParent = t.fx.user('parent', { location: A });
+  const feed = (await t.as(newParent).get(API + '/feed')).body;
+  assert.deepEqual(byId(feed.posts.map(p => p.id)), byId([families, parents, em, network]));
+  assert.deepEqual(feed.active_emergencies.map(p => p.id), [em]);
+  assert.ok(feed.posts.every(p => p.unread), 'all new to them');
+  assert.ok(!feed.posts.some(p => [students, session, atB].includes(p.id)));
+  const net = feed.posts.find(p => p.id === network);
+  assert.deepEqual(net.locations.map(l => l.name), ['Irvine']);
+  // Home's card reads the same feed.
+  const home = (await t.as(newParent).get(API + '/feed?limit=10')).body;
+  assert.ok(home.posts.some(p => p.id === families));
+  // Seeing a post is recorded for them, but it was never sent to them: the sender's numbers stay as sent.
+  const before = (await t.as(w.dirA).get(API + '/' + families + '/stats')).body;
+  assert.equal((await t.as(newParent).post(API + '/' + families + '/read')).status, 200);
+  assert.deepEqual((await t.as(w.dirA).get(API + '/' + families + '/stats')).body, before);
+  assert.equal((await t.as(newParent).get(API + '/feed')).body.posts.find(p => p.id === families).unread, false);
+  assert.equal((await t.as(newParent).post(API + '/' + students + '/read')).status, 404);
+
+  // A student approved later sees all-families and students-only posts, not parents-only ones.
+  const late = t.fx.family(A, { linked: false });
+  t.db.prepare("UPDATE family_links SET status = 'active' WHERE student_id = ?").run(late.student.id);
+  assert.deepEqual(byId(await feedIds(t, late.student)), byId([families, students, em]));
+  // Toronto's families see none of Irvine's posts.
+  const newB = t.fx.user('parent', { location: w.B });
+  assert.deepEqual(byId(await feedIds(t, newB)), byId([atB, network]));
 });
 
 test(['AN-4'], 'preview says who a post would reach without sending anything', async () => {
@@ -552,6 +618,41 @@ test(['AN-6'], 'the sender and HQ see delivered and read counts taken from the n
   const parentView = (await w.t.as(w.famA.parent).get(API + '/feed')).body.posts[0];
   assert.equal(parentView.stats, null);
   assert.equal((await w.t.as(w.staffA).get(API + '/feed')).body.posts[0].stats, null);
+});
+
+test(['AN-6'], 'a recipient with notifications off who sees the post in News counts as delivered and read', async () => {
+  const w = await world();
+  await w.t.as(w.famA2.parent).put(API + '/prefs', { muted: true });
+  const id = (await w.t.as(w.dirA).post(API, post())).body.announcement.id;
+  const stats = async () => (await w.t.as(w.dirA).get(API + '/' + id + '/stats')).body;
+  assert.deepEqual(await stats(), { recipients: 4, delivered: 3, read: 0, muted: 1 });
+  // News shows it to them as new, so the app records seeing it (there is no notification to mark).
+  assert.equal((await w.t.as(w.famA2.parent).get(API + '/feed')).body.posts[0].unread, true);
+  assert.equal((await w.t.as(w.famA2.parent).post(API + '/' + id + '/read')).status, 200);
+  assert.deepEqual(await stats(), { recipients: 4, delivered: 4, read: 1, muted: 1 });
+  assert.equal((await w.t.as(w.famA2.parent).get(API + '/feed')).body.posts[0].unread, false);
+  assert.equal(w.t.fx.notifications(w.famA2.parent).length, 0, 'still no notification');
+  // Once everyone has read it, read and delivered both reach everyone it was sent to.
+  for (const u of [w.famA.parent, w.famA.student, w.famA2.student, w.famA2.parent]) await w.t.as(u).post(API + '/' + id + '/read');
+  assert.deepEqual(await stats(), { recipients: 4, delivered: 4, read: 4, muted: 1 });
+});
+
+test(['AN-5', 'AN-6'], '"I have read this" on the emergency pop-up counts toward the sender\'s read number', async () => {
+  const w = await world();
+  const id = (await w.t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  const stats = async () => (await w.t.as(w.dirA).get(API + '/' + id + '/stats')).body;
+  assert.deepEqual(await stats(), { recipients: 6, delivered: 6, read: 0, muted: 0 });
+  // The pop-up holds the streamed notification row; its id marks the alert read.
+  const n = w.t.fx.notifications(w.famA.parent, 'emergency_alert')[0];
+  assert.equal((await w.t.as(w.famA.parent).post('/api/notifications/' + n.id + '/read')).status, 200);
+  assert.deepEqual(await stats(), { recipients: 6, delivered: 6, read: 1, muted: 0 });
+  // Marked by the alert's own id (News, or the view acknowledging the pop-up) counts the same way.
+  assert.equal((await w.t.as(w.staffA).post(API + '/' + id + '/read')).status, 200);
+  assert.deepEqual(await stats(), { recipients: 6, delivered: 6, read: 2, muted: 0 });
+  // The pinned alert is no longer new for those two, and still is for everyone else.
+  assert.equal((await w.t.as(w.famA.parent).get(API + '/feed')).body.active_emergencies[0].unread, false);
+  assert.equal((await w.t.as(w.staffA).get(API + '/feed')).body.active_emergencies[0].unread, false);
+  assert.equal((await w.t.as(w.famA2.parent).get(API + '/feed')).body.active_emergencies[0].unread, true);
 });
 
 test(['AN-6', 'NF-1'], 'only the sender or HQ can see delivery numbers', async () => {

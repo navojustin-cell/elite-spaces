@@ -17,7 +17,9 @@
 //   GET   /day?location=&date=         the day's attendance list with each note (staff at that location, HQ)
 //   PUT   /students/:studentId/:date   save a draft, post, or edit a posted note
 //   GET   /feed?student=&from=&to=&limit=   posted notes, newest date first (parents)
-//   GET   /today                       today's posted note for each linked student (parents)
+//   GET   /note/:id                    one posted note, so a "note is ready" notification opens its day (parents)
+//   GET   /today                       today's posted note for each linked student, and whether the day's
+//                                      session is still to come (parents)
 
 const express = require('express');
 const { DateTime } = require('luxon');
@@ -91,6 +93,16 @@ function dayEntry(db, student, loc, date) {
     note: note ? { id: note.id, posted_at: note.posted_at, posted_by_name: note.posted_by_name, edited_at: note.edited_at,
       edited_by_name: note.edited_by_name, updated_at: note.updated_at } : null,
   };
+}
+
+// When the student's enrolled slots at their home location end on `date` (UTC
+// ms, in the location's zone): active enrollments in active sessions on that
+// weekday, inside the term, and none on a closure day (D-1, D-10, D-19).
+function slotEnds(db, s, date) {
+  if (db.prepare('SELECT 1 FROM closures WHERE location_id = ? AND date = ?').get(s.location_id, date)) return [];
+  return db.prepare(`SELECT se.end_time FROM enrollments e JOIN sessions se ON se.id = e.session_id JOIN terms t ON t.id = se.term_id
+    WHERE e.student_id = ? AND e.status = 'active' AND e.weekday = ? AND se.status = 'active' AND t.start_date <= ? AND t.end_date >= ?`)
+    .all(s.id, time.weekdayOfDate(date), date, date).map(r => time.toMs(s, date, r.end_time));
 }
 
 // What a parent sees (DN-5): date, location, visits, ratings in words, comment, who posted, "Edited".
@@ -281,17 +293,32 @@ module.exports = {
       res.json({ students, notes: rows.slice(0, limit).map(n => parentNote(db, n)), more: rows.length > limit });
     });
 
-    // Today (in each student's home location zone): the posted note, if any.
+    // One posted note of the parent's own student: a "note is ready" notification
+    // carries only the note's id, and this gives its student and day.
+    r.get('/note/:id', auth.requireRole('parent'), (req, res) => {
+      const n = db.prepare(`${PARENT_NOTE} WHERE n.id = ? AND n.status = 'posted'`).get(Number(req.params.id));
+      if (!n) throw notFound('That note is not available.');
+      if (!auth.linkedStudentIds(ctx, req.user.id).includes(n.student_id)) throw forbidden();
+      res.json({ note: parentNote(db, n) });
+    });
+
+    // Today (in each student's home location zone): the posted note, if any, and
+    // what the day still holds, so the card never says a student wasn't in while
+    // they are in the building or today's session hasn't ended yet.
     r.get('/today', auth.requireRole('parent'), (req, res) => {
+      const now = ctx.clock.now();
       const students = [];
       for (const id of auth.linkedStudentIds(ctx, req.user.id)) {
-        const s = db.prepare(`SELECT u.id, u.name, l.timezone FROM users u JOIN locations l ON l.id = u.location_id WHERE u.id = ?`).get(id);
+        const s = db.prepare(`SELECT u.id, u.name, u.location_id, l.timezone FROM users u JOIN locations l ON l.id = u.location_id WHERE u.id = ?`).get(id);
         if (!s) continue;
-        const date = time.localDate(s, ctx.clock.now());
+        const date = time.localDate(s, now);
         const visited = !!db.prepare('SELECT 1 FROM visits WHERE student_id = ? AND local_date = ?').get(id, date);
+        const inBuilding = !!db.prepare('SELECT 1 FROM visits WHERE student_id = ? AND local_date = ? AND check_out_at IS NULL').get(id, date);
+        const ends = slotEnds(db, s, date);
         const n = db.prepare(`${PARENT_NOTE}
           WHERE n.student_id = ? AND n.local_date = ? AND n.status = 'posted'`).get(id, date);
-        students.push({ id: s.id, name: s.name, date, visited, note: n ? parentNote(db, n) : null });
+        students.push({ id: s.id, name: s.name, date, visited, in_building: inBuilding,
+          session_today: ends.length > 0, session_later: ends.some(end => end > now), note: n ? parentNote(db, n) : null });
       }
       students.sort((a, b) => a.name.localeCompare(b.name));
       res.json({ students });

@@ -2,7 +2,11 @@
 // Membership: records (MB-1), staff edits with an audit trail and no payment
 // data (MB-2, NF-2, D-22), family read access (MB-3), expiry reminders (MB-4),
 // pausing and restoring enrollments (MB-5, D-16), and scope on every route (NF-1).
-const { test, makeApp, assert, at } = require('./lib');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const crypto = require('crypto');
+const { test, makeApp, assert, at, ROOT } = require('./lib');
 
 const LA = 'America/Los_Angeles', TOR = 'America/Toronto';
 
@@ -747,4 +751,135 @@ test('MB-5', 'pausing leaves slots from a term that has ended alone, so the fami
   t.jobs();
   assert.deepEqual([enr(t, bNow).status, enr(t, bOld).status], ['paused', 'active']);
   assert.match(kinds(t, b.parent, 'membership_expired')[0].body, /\. 1 weekly session is paused and saved/);
+});
+
+// ---------------- the Members roster: each account's state, as People decides it ----------------
+
+// A student linked to a parent; one who set a password and waits for a parent's
+// approval; and one invited who hasn't set up the account (no password yet).
+function accountWorld(t, loc) {
+  const linked = fam(t, loc, { name: 'A Linked' });
+  const waiting = t.fx.user('student', { location: loc, name: 'B Waiting' });
+  t.fx.link(t.fx.user('parent', { location: loc }), waiting, 'pending');
+  const invited = t.fx.user('student', { location: loc, name: 'C Invited' });
+  t.db.prepare('UPDATE users SET password_hash = NULL WHERE id = ?').run(invited.id);
+  t.fx.link(t.fx.user('parent', { location: loc }), invited, 'pending');
+  return { linked, waiting, invited };
+}
+
+test('MB-1', 'the roster gives each student\'s account state the way People does: active, waiting for parent approval, or invited', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  accountWorld(t, loc);
+  const r = await t.as(t.fx.staff(loc)).get('/api/membership/roster');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.students.map(s => [s.name, s.account, s.linked]),
+    [['A Linked', 'active', true], ['B Waiting', 'awaiting_approval', false], ['C Invited', 'invited', false]]);
+});
+
+// ---------------- the Members screen and the Home card in a browser tab ----------------
+
+// Just enough DOM for public/js/app.js and this module's view, as in core.test.js:
+// one tree under <html>; focus, bubbling events and isConnected work as in a browser.
+class El {
+  constructor(doc, tag, data = '') { Object.assign(this, { doc, tag, data, childNodes: [], attrs: new Map(), on: {}, parentNode: null }); }
+  get textContent() { return this.tag ? this.childNodes.map(c => c.textContent).join('') : this.data; }
+  set textContent(s) { this.replaceChildren(String(s)); }
+  get className() { return this.getAttribute('class') || ''; }
+  set className(v) { this.setAttribute('class', v); }
+  setAttribute(k, v) { this.attrs.set(k, String(v)); }
+  getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
+  get id() { return this.getAttribute('id') || ''; }
+  get hidden() { return this.attrs.has('hidden'); }
+  set hidden(v) { if (v) this.attrs.set('hidden', ''); else this.attrs.delete('hidden'); }
+  get cls() { return this.className.split(/\s+/).filter(Boolean); }
+  get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === this.doc.documentElement; }
+  addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
+  dispatch(type, props) {
+    const ev = Object.assign({ type, target: this, stopped: false, preventDefault() {}, stopPropagation() { this.stopped = true; } }, props);
+    for (let n = this; n && !ev.stopped; n = n.parentNode) { ev.currentTarget = n; for (const fn of n.on[type] || []) fn(ev); }
+  }
+  click() { this.dispatch('click'); }
+  focus() { this.doc.focused = this; }
+  adopt(kids) { return kids.map(k => { const n = k instanceof El ? k : new El(this.doc, null, String(k)); n.remove(); n.parentNode = this; return n; }); }
+  append(...kids) { this.childNodes.push(...this.adopt(kids)); }
+  appendChild(k) { this.append(k); return k; }
+  prepend(...kids) { this.childNodes.unshift(...this.adopt(kids)); }
+  after(...kids) { const p = this.parentNode, ns = p.adopt(kids); p.childNodes.splice(p.childNodes.indexOf(this) + 1, 0, ...ns); }
+  replaceChildren(...kids) { this.childNodes.forEach(c => { c.parentNode = null; }); this.childNodes = []; this.append(...kids); }
+  remove() { if (this.parentNode) this.parentNode.childNodes = this.parentNode.childNodes.filter(c => c !== this); this.parentNode = null; }
+  contains(n) { for (; n; n = n.parentNode) if (n === this) return true; return false; }
+  all() { return this.childNodes.flatMap(c => [c, ...c.all()]); }
+  find(pred) { return this.all().find(pred); }
+  findAll(pred) { return this.all().filter(pred); }
+}
+
+// One tab running the real shell and membership view (read from ROOT, so the
+// mutation runner's copy is the one exercised), signed in as `user` at `hash`.
+async function openTab(t, user, hash) {
+  const token = crypto.randomBytes(16).toString('hex');
+  t.ctx.sessions.set(token, user.id);
+  const pending = new Set();
+  const track = p => { pending.add(p); const done = () => pending.delete(p); p.then(done, done); return p; };
+  const doc = { title: '', hidden: false, addEventListener() {} };
+  const el = (tag, attrs = {}) => { const n = new El(doc, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; };
+  doc.documentElement = el('html');
+  doc.head = el('head');
+  doc.body = el('body');
+  doc.documentElement.append(doc.head, doc.body);
+  const shell = el('div', { id: 'shell' });
+  shell.append(el('nav', { id: 'nav', hidden: '' }), el('main', { id: 'main', tabindex: '-1' }));
+  doc.body.append(el('div', { id: 'devbar', hidden: '' }), el('header', { id: 'topbar', hidden: '' }), el('div', { id: 'toasts' }), shell);
+  Object.assign(doc, {
+    createElement: tag => new El(doc, tag), createTextNode: s => new El(doc, null, String(s)),
+    getElementById: id => doc.documentElement.find(n => n.id === id) || null,
+  });
+  Object.defineProperty(doc, 'activeElement', { get: () => (doc.focused && doc.focused.isConnected ? doc.focused : doc.body) });
+  const fetchAs = (url, opts = {}) => track(fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie: 'sid=' + token }) }))
+    .then(async r => new Response(await r.arrayBuffer(), { status: r.status, headers: r.headers })));
+  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, console, navigator: {}, location: { hash },
+    EventSource: class { close() {} }, history: { replaceState() {} }, addEventListener() {}, setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
+  win.window = win;
+  vm.createContext(win);
+  for (const f of ['public/js/app.js', 'public/js/views/membership.js']) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
+  win.App.start();
+  do {
+    await Promise.allSettled([...pending]);
+    for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+  } while (pending.size);
+  return doc;
+}
+const words = n => n.all().filter(c => !c.tag).map(c => c.data).join(' ').replace(/\s+/g, ' ').trim();
+
+test(['MB-1', 'MB-2', 'NF-7'], 'Members on a phone: an unapproved account reads as it does on People, the filter tabs stay one-line tabs in one row, and the table scrolls from the keyboard', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine' });
+  const { linked } = accountWorld(t, loc);
+  const doc = await openTab(t, t.fx.staff(loc), '#/members');
+  const main = doc.getElementById('main');
+  const rows = main.findAll(n => n.tag === 'tr').slice(1).map(tr => words(tr.childNodes[0]));
+  const parent = t.db.prepare('SELECT p.name FROM family_links fl JOIN users p ON p.id = fl.parent_id WHERE fl.student_id = ?').get(linked.student.id).name;
+  assert.deepEqual(rows, ['A Linked Parent: ' + parent, 'B Waiting Waiting for parent approval', 'C Invited Invited, not set up yet']);
+
+  const tabs = main.find(n => n.getAttribute('role') === 'tablist');
+  assert.ok(tabs.cls.includes('mb-tabs'), tabs.className);
+  const css = doc.head.findAll(n => n.tag === 'style').map(s => s.textContent.replace(/\s+/g, ' ')).join(' ');
+  assert.match(css, /\.mb-tabs button \{ flex: none; white-space: nowrap;/, 'each tab keeps its width and its label stays on one line');
+
+  const wrap = main.find(n => n.cls.includes('table-wrap'));
+  assert.deepEqual([wrap.getAttribute('tabindex'), wrap.getAttribute('role'), wrap.getAttribute('aria-label')], ['0', 'region', 'Memberships at Irvine']);
+});
+
+test(['MB-3', 'MB-5'], "a student whose membership lapsed reads on Home the same words Schedule uses: it isn't active, the sessions are paused, and who renews it", async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine' });
+  const sess = t.fx.session(loc);
+  const lapsed = fam(t, loc, { name: 'Daniel Kim', membership: { status: 'inactive' } });
+  t.fx.enroll(lapsed.student, sess, 1, { status: 'paused' });
+  const expired = fam(t, loc, { name: 'Ana Ruiz', membership: { expires: '2026-10-13' } });
+  const card = async u => words((await openTab(t, u, '#/home')).getElementById('main').find(n => n.getAttribute('data-card') === 'membership'));
+  assert.match(await card(lapsed.student), /Your membership isn't active, so your sessions are paused\. Ask a parent or the front desk at Irvine to renew it\.$/);
+  assert.match(await card(expired.student), /Last day: Tue, Oct 13, 2026 Your membership isn't active\. Ask a parent or the front desk at Irvine to renew it\.$/);
+  // Parents still get the details and what renewing does.
+  assert.match(await card(lapsed.parent), /Daniel's membership isn't active right now\. 1 weekly session is paused and saved\. Renew with the front desk at Irvine to bring it back\.$/);
 });

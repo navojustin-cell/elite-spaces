@@ -48,7 +48,8 @@ function toUnicode(cmap) {
 // text as hex inside TJ arrays in Flate streams: 2-byte glyph codes read
 // through the font's ToUnicode map for an embedded font, WinAnsi bytes for a
 // built-in one (Helvetica).
-function pdfText(buf) {
+// `only` picks which objects' streams to read (default: all).
+function pdfText(buf, only = () => true) {
   const objs = pdfObjects(buf);
   const byId = new Map(objs.map(o => [o.id, o]));
   const unicode = new Map(); // font object id -> its ToUnicode map
@@ -61,7 +62,7 @@ function pdfText(buf) {
   const dec = new TextDecoder('windows-1252');
   const out = [];
   for (const o of objs) {
-    if (!o.data) continue;
+    if (!o.data || !only(o)) continue;
     let font;
     for (const t of o.data.toString('latin1').matchAll(/\/(F\d+) [\d.]+ Tf|\[(.*?)\] TJ/g)) {
       if (t[1]) { font = fonts.get(t[1]); continue; }
@@ -71,6 +72,15 @@ function pdfText(buf) {
     }
   }
   return out.join(' ').replace(/\s+/g, ' ');
+}
+
+// Each page's text in page order: the page's own content stream, footer included.
+function pdfPages(buf) {
+  const objs = pdfObjects(buf);
+  const byId = new Map(objs.map(o => [o.id, o]));
+  const kids = /\/Kids \[([^\]]*)\]/.exec(objs.find(o => /\/Type \/Pages\b/.test(o.dict)).dict)[1];
+  return [...kids.matchAll(/(\d+) 0 R/g)].map(k => Number(/\/Contents (\d+) 0 R/.exec(byId.get(Number(k[1])).dict)[1]))
+    .map(id => pdfText(buf, o => o.id === id));
 }
 
 // What each glyph code of every embedded font stands for (its ToUnicode entries).
@@ -638,6 +648,30 @@ test(['AT-3'], 'an empty range still exports: header and a zero total in the CSV
   assert.ok(text.includes('No absences in this range.'), text);
 });
 
+// However many rows come before it, the closing note ("Times are local time at ...")
+// shares its page with the last row of the table above it, or with the last section's
+// heading and sentence: a last page holding only the note (or the end of it) looks like a stray sheet.
+test(['AT-3'], 'a PDF\'s closing note is never left alone or split onto the last page, after a table of absences or after "No absences"', async () => {
+  const w = await world();
+  const p = w.t.as(w.parent);
+  const NOTE = 'Times are local time at Irvine';
+  const lonely = [];
+  // Maya enrolled Mon Sep 28. Sep 1 - Oct 9 has her six missed afternoons, so the note
+  // follows the absences table; Sep 1-27 has none, so it follows "No absences in this
+  // range." With 17-20 and 23-25 visits above them, page 1 ends right where the note goes.
+  for (let n = 1; n <= 25; n++) {
+    w.visit(`2026-09-${String(1 + n).padStart(2, '0')}`, '13:00', '15:00', { session: null });
+    if (n < 17 || n === 21 || n === 22) continue;
+    const q = n <= 20 ? 'from=2026-09-01&to=2026-10-09' : 'from=2026-09-01&to=2026-09-27';
+    const pages = pdfPages((await p.get(`${A}/students/${w.kid.id}/log.pdf?${q}`)).body);
+    assert.ok(pages[0].startsWith('Attendance and hours log'), pages[0]);
+    // The note starts on the last page, whole, below something else: not alone, not split.
+    const last = pages[pages.length - 1];
+    if (!(last.indexOf(NOTE) > 0)) lonely.push(`${n} visits, ${q}: ${pages.slice(-2).join(' | ')}`);
+  }
+  assert.deepEqual(lonely, []);
+});
+
 test(['AT-3'], 'CSV cells are quoted, and text that looks like a spreadsheet formula is defused', async () => {
   const w = await world();
   rename(w.t, w.kid, 'Leo "Lion" O\'Neil, Jr.');
@@ -956,6 +990,50 @@ test(['AT-4'], 'report PDF: filters, totals including needs review, per-student 
   assert.ok(all.includes('Mon, Oct 5, 2026 Zoe Park Arcadia Arcadia Study 1:00 PM 3:00 PM 2h 0m Scanned out'), all);
 });
 
+// 10:30pm Wednesday in California is already Thursday in Toronto, and 5:30am Thursday in UTC.
+test(['AT-3', 'AT-4'], 'every PDF says when it was made in a named local zone: across all locations, each zone\'s own time with its locations, never UTC', async () => {
+  const w = await reportWorld();
+  const tor = w.t.fx.location({ name: 'Toronto', timezone: TOR, lat: 43.65, lng: -79.38 });
+  w.t.clock.set(at(LA, '2026-10-14', '22:30'));
+  const q = 'from=2026-10-05&to=2026-10-09';
+  const pdf = async (who, url) => pdfText((await w.t.as(who).get(url)).body);
+
+  const all = await pdf(w.hq, `${A}/report.pdf?location=all&${q}`);
+  assert.ok(all.includes('Generated: Oct 14, 2026, 10:30 PM PDT (Arcadia, Irvine) · Oct 15, 2026, 1:30 AM EDT (Toronto) '), all);
+  assert.ok(!/UTC|GMT/.test(all), all);
+  // One location: its own time, as its visit times are.
+  assert.ok((await pdf(w.hq, `${A}/report.pdf?location=${tor.id}&${q}`)).includes('Generated: Oct 15, 2026, 1:30 AM EDT '));
+  assert.ok((await pdf(w.director, `${A}/report.pdf?${q}`)).includes('Generated: Oct 14, 2026, 10:30 PM PDT '));
+  assert.ok((await pdf(w.parent, `${A}/students/${w.kid.id}/log.pdf?${q}`)).includes('Generated: Oct 14, 2026, 10:30 PM PDT '));
+});
+
+// D-15 counts only sessions that have ended, so the screen needs to know whether a
+// range has begun before it says nobody missed anything.
+test(['AT-4'], 'a report says whether its range is still ahead, under way or over, by each location\'s own date', async () => {
+  const w = await reportWorld();
+  const tor = w.t.fx.location({ name: 'Toronto', timezone: TOR, lat: 43.65, lng: -79.38 });
+  const timing = async (who, q) => {
+    const r = await w.t.as(who).get(`${A}/report?${q}`);
+    assert.equal(r.status, 200, q);
+    return r.body.timing;
+  };
+  // Wed Oct 14, 10am in Irvine.
+  assert.equal(await timing(w.director, 'from=2026-10-05&to=2026-10-13'), 'past');
+  assert.equal(await timing(w.director, 'from=2026-10-12&to=2026-10-18'), 'current');
+  assert.equal(await timing(w.director, 'from=2026-10-14&to=2026-10-14'), 'current');
+  assert.equal(await timing(w.director, 'from=2026-10-15&to=2026-10-21'), 'upcoming');
+  // 10:30pm in Irvine is Thursday in Toronto. A range from Thursday is still ahead in
+  // Irvine but under way in Toronto, so across all locations it has begun.
+  w.t.clock.set(at(LA, '2026-10-14', '22:30'));
+  assert.equal(await timing(w.director, 'from=2026-10-15&to=2026-10-21'), 'upcoming');
+  assert.equal(await timing(w.hq, `location=${tor.id}&from=2026-10-15&to=2026-10-21`), 'current');
+  assert.equal(await timing(w.hq, 'location=all&from=2026-10-15&to=2026-10-21'), 'current');
+  // A range ending Wednesday is over in Toronto, not yet in Irvine, so not yet across all locations.
+  assert.equal(await timing(w.hq, `location=${tor.id}&from=2026-10-12&to=2026-10-14`), 'past');
+  assert.equal(await timing(w.director, 'from=2026-10-12&to=2026-10-14'), 'current');
+  assert.equal(await timing(w.hq, 'location=all&from=2026-10-12&to=2026-10-14'), 'current');
+});
+
 // ---------------------------------------------------------------- AT-4: the Reports screen in a browser tab
 
 // Just enough DOM for public/js/app.js and the attendance view. As in a browser,
@@ -1035,17 +1113,26 @@ function browserTab(t) {
     } while (pending.size);
   };
   return {
-    requests, settle, toasts: () => document.getElementById('toasts'),
+    requests, settle, toasts: () => document.getElementById('toasts'), hash: () => win.location.hash,
+    // As App.boot() does after a sign-in, App.me says who is signed in.
     signIn(user) {
       const token = crypto.randomBytes(16).toString('hex');
       t.ctx.sessions.set(token, user.id);
       cookie = 'sid=' + token;
+      win.App.me = { user: { id: user.id, role: user.role, name: user.name, location_id: user.location_id } };
     },
     async open(id) {
       const el = new FakeNode('div');
       await win.App.views.find(v => v.id === id).render(el);
       await settle();
       return el;
+    },
+    // A Home card, as Home draws it.
+    async card(id) {
+      const box = new FakeNode('section');
+      await win.App.cards.find(c => c.id === id).render(box);
+      await settle();
+      return box;
     },
   };
 }
@@ -1078,7 +1165,7 @@ test(['AT-4'], 'Reports in a tab HQ used first: the director who signs in next g
   await tab.settle();
   assert.deepEqual(tab.requests.at(-1), { url: `${R}?location=${w.arcadia.id}&session=${w.arcSession.id}&from=2026-10-05&to=2026-10-09`, status: 200 });
   assert.equal(words(reportBox(hq)), 'Oct 5 – Oct 9, 2026 Arcadia · Arcadia Study · Mon/Wed/Fri 1:00 PM–4:00 PM Download CSV Download PDF ' +
-    '1 visit 2 hours 1 student 1 absence By student Visits Absences Student Visits Hours Absences Zoe Park 1 2.00 1');
+    '1 visit 2.00 hours 1 student 1 absence By student Visits Absences Student Visits Hours Absences Zoe Park 1 2.00 1');
 
   // Same tab ("Switch user"): the Irvine director signs in and opens Reports.
   tab.signIn(w.director);
@@ -1091,7 +1178,7 @@ test(['AT-4'], 'Reports in a tab HQ used first: the director who signs in next g
   const box = reportBox(view);
   assert.ok(!box.find(n => n.getAttribute('role') === 'alert'), words(box));
   // This month so far: Maya missed Fri Oct 2, Fri Oct 9 and Mon Oct 12; Ben missed Tue Oct 13.
-  const head = 'Oct 1 – Oct 31, 2026 Irvine · All sessions Download CSV Download PDF 3 visits 8.5 hours 2 students 4 absences ';
+  const head = 'Oct 1 – Oct 31, 2026 Irvine · All sessions Download CSV Download PDF 3 visits 8.50 hours 2 students 4 absences ';
   const byStudent = 'By student Visits Absences Student Visits Hours Absences Ben Cole 1 2.50 1 Maya Johnson 2 6.00 3';
   assert.equal(words(box), head + '1 visit needs review. These students didn\'t scan out and were checked out automatically. ' +
     'Confirm or fix the times from the In the building list. ' + byStudent);
@@ -1113,7 +1200,169 @@ test(['AT-4'], 'Reports in a tab HQ used first: the director who signs in next g
   assert.equal(words(reportBox(view)), head + byStudent);
 });
 
+const STALE = 'The filters have changed. Tap Show report to update the report and its downloads.';
+const statusOf = view => words(view.find(n => n.getAttribute('role') === 'status'));
+const submit = view => view.find(n => n.tag === 'form').dispatch('submit');
+function choose(view, values) {
+  for (const [label, v] of Object.entries(values)) {
+    const input = label === 'Session' ? byId(view, 'rep-session') : label === 'Location' ? byId(view, 'rep-location') : field(view, label);
+    input.value = v;
+    input.dispatch('change');
+  }
+}
+
+test(['AT-4'], 'Reports: a changed filter marks the report out of date and holds its downloads until Show report; "no absences" says whether the range has begun; review links to In the building', async () => {
+  const w = await reportWorld();
+  const tab = browserTab(w.t);
+  const R = `${A}/report`;
+  tab.signIn(w.director);
+  const view = await tab.open('reports');
+  // Whether each download button is held: [CSV, PDF].
+  const held = () => ['Download CSV', 'Download PDF'].map(l => button(reportBox(view), l).disabled === true);
+  const month = `location=${w.loc.id}&from=2026-10-01&to=2026-10-31`;
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}?${month}`, status: 200 });
+  assert.deepEqual([statusOf(view), held()], ['', [false, false]]);
+  // The review notice opens In the building at the report's location.
+  const link = reportBox(view).find(n => n.tag === 'a');
+  assert.deepEqual([link.textContent, link.getAttribute('href')], ['In the building', `#/building/${w.loc.id}`]);
+
+  // Another session: out of date, downloads held, nothing fetched. Back to all sessions: current again.
+  const asked = tab.requests.length;
+  choose(view, { Session: String(w.am.id) });
+  assert.deepEqual([statusOf(view), held()], [STALE, [true, true]]);
+  choose(view, { Session: '' });
+  assert.deepEqual([statusOf(view), held()], ['', [false, false]]);
+  // Dates typed or picked from a shortcut, the same.
+  choose(view, { From: '2026-10-05' });
+  assert.deepEqual([statusOf(view), held()], [STALE, [true, true]]);
+  button(view, 'This month').click();
+  assert.deepEqual([statusOf(view), held()], ['', [false, false]]);
+  await tab.settle();
+  assert.equal(tab.requests.length, asked);
+
+  // A download under way when the dates change: it's the report it was asked for, and its button comes back held.
+  button(reportBox(view), 'Download CSV').click();
+  button(view, 'This week').click();
+  await tab.settle();
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}.csv?${month}`, status: 200 });
+  assert.deepEqual([statusOf(view), held()], [STALE, [true, true]]);
+
+  // Show report: this week's report, current, and its downloads are this week's.
+  submit(view);
+  await tab.settle();
+  const week = `location=${w.loc.id}&from=2026-10-12&to=2026-10-18`;
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}?${week}`, status: 200 });
+  assert.deepEqual([statusOf(view), held()], ['', [false, false]]);
+  button(reportBox(view), 'Download PDF').click();
+  await tab.settle();
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}.pdf?${week}`, status: 200 });
+
+  // No absences (Wed Oct 14, 10am): a range still ahead hasn't happened; today's is only
+  // "so far" (Maya's 1pm session hasn't ended); an earlier week's Morning Focus had every check-in.
+  const absences = async values => {
+    choose(view, values);
+    submit(view);
+    await tab.settle();
+    button(reportBox(view), 'Absences').click();
+    return words(byId(view, 'rep-panel'));
+  };
+  assert.equal(await absences({ Session: '', From: '2026-10-19', To: '2026-10-25' }),
+    'No sessions in this range have happened yet, so nobody has missed one.');
+  assert.equal(await absences({ From: '2026-10-14', To: '2026-10-14' }),
+    'No absences so far. Every session that has ended had a check-in, or was a closure day.');
+  assert.equal(await absences({ Session: String(w.am.id), From: '2026-10-05', To: '2026-10-09' }),
+    'No absences in this range. Every scheduled session had a check-in, or was a closure day.');
+});
+
+test(['AT-4'], 'Reports: HQ signing in after a director starts over on all locations; each session names its location; the Home card opens Reports on what it shows', async () => {
+  const w = await reportWorld();
+  const tab = browserTab(w.t);
+  const R = `${A}/report`;
+  const filters = view => [byId(view, 'rep-location').value, byId(view, 'rep-session').value, field(view, 'From').value, field(view, 'To').value];
+
+  // The Irvine director narrows the report to Morning Focus, Oct 5-9, and the Visits tab.
+  tab.signIn(w.director);
+  const d = await tab.open('reports');
+  choose(d, { Session: String(w.am.id), From: '2026-10-05', To: '2026-10-09' });
+  submit(d);
+  await tab.settle();
+  button(reportBox(d), 'Visits').click();
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}?location=${w.loc.id}&session=${w.am.id}&from=2026-10-05&to=2026-10-09`, status: 200 });
+
+  // Same tab: HQ signs in, and gets all locations, all sessions, this month and By student.
+  tab.signIn(w.hq);
+  const view = await tab.open('reports');
+  assert.deepEqual(tab.requests.slice(-2), [{ url: `${R}/options`, status: 200 }, { url: `${R}?location=all&from=2026-10-01&to=2026-10-31`, status: 200 }]);
+  assert.deepEqual(filters(view), ['all', '', '2026-10-01', '2026-10-31']);
+  assert.equal(byId(view, 'rep-tab-students').getAttribute('aria-selected'), 'true');
+  // Across all locations, the review notice opens In the building, where HQ picks one.
+  assert.equal(reportBox(view).find(n => n.tag === 'a').getAttribute('href'), '#/building');
+
+  // With all locations, every session says where it is; with one location chosen, it needn't.
+  const sessions = () => byId(view, 'rep-session').all().filter(n => n.tag === 'option').map(o => o.textContent);
+  assert.deepEqual(sessions(), ['All sessions', 'Arcadia · Arcadia Study · Mon/Wed/Fri 1:00 PM–4:00 PM',
+    'Irvine · Afternoon Study · Mon/Wed/Fri 1:00 PM–4:00 PM', 'Irvine · Morning Focus · Tue/Thu 9:30 AM–12:00 PM']);
+  choose(view, { Location: String(w.arcadia.id) });
+  assert.deepEqual(sessions(), ['All sessions', 'Arcadia Study · Mon/Wed/Fri 1:00 PM–4:00 PM']);
+  // A new location leaves the report on screen out of date too, until Show report.
+  assert.equal(statusOf(view), STALE);
+  submit(view);
+  await tab.settle();
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}?location=${w.arcadia.id}&from=2026-10-01&to=2026-10-31`, status: 200 });
+  assert.equal(statusOf(view), '');
+
+  // Home: the card is all locations this week, and Open reports opens exactly that.
+  const card = await tab.card('attendance-report');
+  assert.match(words(card), /^Attendance this week All locations · Oct 12 – Oct 18, 2026 Open reports /);
+  button(card, 'Open reports').click();
+  assert.equal(tab.hash(), '#/reports');
+  const opened = await tab.open('reports');
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}?location=all&from=2026-10-12&to=2026-10-18`, status: 200 });
+  assert.deepEqual(filters(opened), ['all', '', '2026-10-12', '2026-10-18']);
+});
+
+test(['AT-4'], 'Reports: a director moved to another location while signed in starts over there, not on the old location\'s filters', async () => {
+  const w = await reportWorld();
+  const tab = browserTab(w.t);
+  const R = `${A}/report`;
+  tab.signIn(w.director);
+  const before = await tab.open('reports');
+  choose(before, { Session: String(w.am.id), From: '2026-10-05', To: '2026-10-09' });
+  submit(before);
+  await tab.settle();
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}?location=${w.loc.id}&session=${w.am.id}&from=2026-10-05&to=2026-10-09`, status: 200 });
+
+  // HQ moves them to Arcadia; the app re-reads who they are and redraws.
+  w.t.db.prepare('UPDATE users SET location_id = ? WHERE id = ?').run(w.arcadia.id, w.director.id);
+  tab.signIn(Object.assign({}, w.director, { location_id: w.arcadia.id }));
+  const after = await tab.open('reports');
+  assert.deepEqual(tab.requests.slice(-2), [{ url: `${R}/options`, status: 200 }, { url: `${R}?location=${w.arcadia.id}&from=2026-10-01&to=2026-10-31`, status: 200 }]);
+  assert.match(words(after), /Location: Arcadia/);
+  assert.equal(byId(after, 'rep-session').value, '');
+});
+
 // ---------------------------------------------------------------- AT-2, AT-3: the Hours screen in a browser tab
+
+test(['AT-2', 'AT-3'], 'Hours: another parent signing in on the same tab starts on their own student, this week and this month', async () => {
+  const w = await world();
+  const other = w.t.fx.family(w.loc);
+  const S = `${A}/students`;
+  const tab = browserTab(w.t);
+  tab.signIn(w.parent);
+  const mine = await tab.open('hours');
+  button(mine, 'Month').click();
+  choose(mine, { From: '2026-09-28', To: '2026-10-09' });
+  await tab.settle();
+  assert.deepEqual(tab.requests.at(-1), { url: `${S}/${w.kid.id}/log?from=2026-09-28&to=2026-10-09`, status: 200 });
+
+  tab.signIn(other.parent);
+  const asked = tab.requests.length;
+  const theirs = await tab.open('hours');
+  assert.deepEqual(tab.requests.slice(asked).map(r => `${r.status} ${r.url}`).sort(),
+    [`200 ${S}`, `200 ${S}/${other.student.id}/history?period=week`, `200 ${S}/${other.student.id}/log?from=2026-10-01&to=2026-10-31`].sort());
+  assert.equal(byId(theirs, 'att-tab-week').getAttribute('aria-selected'), 'true');
+  assert.deepEqual([field(theirs, 'From').value, field(theirs, 'To').value], ['2026-10-01', '2026-10-31']);
+});
 
 test(['AT-2', 'AT-3'], 'Hours in a browser tab: a parent of two picks a student, pages through week, month and term, and downloads that student\'s log for the dates chosen', async () => {
   const w = await world();
@@ -1141,14 +1390,14 @@ test(['AT-2', 'AT-3'], 'Hours in a browser tab: a parent of two picks a student,
   // Ava sorts first, so she shows first: this week, and this month's log preview.
   assert.deepEqual(after(0), [`200 ${S}`, `200 ${S}/${ava.id}/history?period=week`, `200 ${S}/${ava.id}/log?from=2026-10-01&to=2026-10-31`].sort());
   assert.equal(field(view, 'Student').value, String(ava.id));
-  assert.deepEqual(shown(), { label: 'Oct 12 – Oct 18, 2026', totals: '1 visit 2.5 hours 0 absences' });
-  assert.equal(preview(), 'Oct 1 – Oct 31, 2026: 1 visit · 2.5 hours · 0 absences');
+  assert.deepEqual(shown(), { label: 'Oct 12 – Oct 18, 2026', totals: '1 visit 2.50 hours 0 absences' });
+  assert.equal(preview(), 'Oct 1 – Oct 31, 2026: 1 visit · 2.50 hours · 0 absences');
 
   // Picking Maya redraws her history and her log preview.
   const pick = field(view, 'Student');
   assert.deepEqual(await act(() => { pick.value = String(w.kid.id); pick.dispatch('change'); }),
     [`200 ${S}/${w.kid.id}/history?period=week`, `200 ${S}/${w.kid.id}/log?from=2026-10-01&to=2026-10-31`].sort());
-  assert.equal(words(history), '‹ Oct 12 – Oct 18, 2026 › 1 visit 3 hours 0 absences ' +
+  assert.equal(words(history), '‹ Oct 12 – Oct 18, 2026 › 1 visit 3.00 hours 0 absences ' +
     'Mon, Oct 12 · Afternoon Study 1:00 PM – 4:00 PM · 3h 0m Scanned out ' +
     'Times are Irvine time. An absence is a scheduled session with no check-in; closure days don\'t count.');
   assert.equal(preview(), 'Oct 1 – Oct 31, 2026: 2 visits · 5.93 hours · 3 absences');
@@ -1159,11 +1408,11 @@ test(['AT-2', 'AT-3'], 'Hours in a browser tab: a parent of two picks a student,
   assert.equal(button(view, 'Month').getAttribute('aria-selected'), 'true');
   assert.deepEqual(await act(() => view.find(n => n.getAttribute('aria-label') === 'Previous month').click()),
     [`200 ${S}/${w.kid.id}/history?period=month&date=2026-09-01`]);
-  assert.deepEqual(shown(), { label: 'September 2026', totals: '1 visit 2.5 hours 1 absence' });
+  assert.deepEqual(shown(), { label: 'September 2026', totals: '1 visit 2.50 hours 1 absence' });
   assert.deepEqual(await act(() => button(view, 'Term').click()), [`200 ${S}/${w.kid.id}/history?period=term`]);
   assert.deepEqual(shown(), { label: 'Fall 2026 Aug 17 – Dec 18, 2026', totals: '3 visits 8.43 hours 4 absences' });
   assert.deepEqual(await act(() => button(view, 'Week').click()), [`200 ${S}/${w.kid.id}/history?period=week`]);
-  assert.deepEqual(shown(), { label: 'Oct 12 – Oct 18, 2026', totals: '1 visit 3 hours 0 absences' });
+  assert.deepEqual(shown(), { label: 'Oct 12 – Oct 18, 2026', totals: '1 visit 3.00 hours 0 absences' });
 
   // Her own dates, then both downloads for exactly those dates.
   assert.deepEqual(await act(() => {

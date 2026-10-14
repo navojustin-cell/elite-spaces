@@ -158,7 +158,7 @@ test(['CI-2', 'NF-1'], 'only students scan, and only at their home location (D-1
   const r = await t.scan(visitor);
   assert.equal(r.status, 403);
   assert.equal(r.body.error, 'wrong_location');
-  assert.equal(r.body.message, "This code is for Irvine. You're a member at Arcadia.");
+  assert.equal(r.body.message, "This code is for Irvine. You're a member at Arcadia. Scan the code at Arcadia, or ask staff at the front desk.");
   for (const u of [t.fam.parent, t.staff, t.fx.director(t.loc), t.fx.hq()]) {
     const x = await t.as(u).post('/api/checkin/scan', Object.assign({ locationId: t.loc.id, code: t.code() }, north(t.loc, 10)));
     assert.equal(x.status, 403, u.role);
@@ -343,6 +343,58 @@ test(['CI-4'], 'a second scan within five minutes of checking in asks before che
   assert.equal(visitsOf(t, t.fam.student)[0].check_out_at, at(LA, '2026-10-14', '13:08'));
 });
 
+test(['CI-4', 'CI-6'], 'a second scan within five minutes of checking out asks before checking back in, and tells nobody until confirmed', async () => {
+  const t = await setup();
+  await t.scan();
+  setClock(t, '15:50');
+  assert.equal((await t.scan()).body.action, 'checkout');
+  for (const hm of ['15:52', '15:54']) {
+    setClock(t, hm);
+    const ask = await t.scan();
+    assert.equal(ask.status, 409, hm);
+    assert.equal(ask.body.error, 'confirm_checkin', hm);
+    assert.equal(ask.body.message, 'You checked out at 3:50 PM. Check back in?', hm);
+  }
+  assert.equal(visitsOf(t, t.fam.student).length, 1, 'no phantom visit');
+  assert.equal(t.fx.notifications(t.fam.parent, 'checkin').length, 1, 'no second "checked in" notice');
+  const status = await t.as(t.fam.parent).get('/api/checkin/status');
+  assert.equal(status.body.students[0].state, 'left');
+  const yes = await t.scan(undefined, { confirm: true });
+  assert.equal(yes.status, 200);
+  assert.equal(yes.body.action, 'checkin');
+  const vs = visitsOf(t, t.fam.student);
+  assert.equal(vs.length, 2);
+  assert.deepEqual([vs[1].check_in_at, vs[1].check_out_at], [at(LA, '2026-10-14', '15:54'), null]);
+  assert.equal(t.fx.notifications(t.fam.parent, 'checkin').length, 2);
+  // the question is about the latest check-out of the day
+  setClock(t, '15:58');
+  assert.equal((await t.scan(undefined, { confirm: true })).body.action, 'checkout');
+  setClock(t, '16:00');
+  const again = await t.scan();
+  assert.equal(again.body.error, 'confirm_checkin');
+  assert.equal(again.body.message, 'You checked out at 3:58 PM. Check back in?');
+  assert.equal(visitsOf(t, t.fam.student).length, 2);
+});
+
+test(['CI-4'], 'a scan check-out names the session and the total time; a visit with no session names none', async () => {
+  const t = await setup();
+  await t.scan();
+  setClock(t, '15:50');
+  const out = await t.scan();
+  assert.equal(out.status, 200);
+  assert.equal(out.body.action, 'checkout');
+  assert.deepEqual(out.body.session, { id: t.sess.id, name: 'Afternoon Study', start_at: at(LA, '2026-10-14', '13:00'), end_at: at(LA, '2026-10-14', '16:00') });
+  assert.equal(out.body.total_minutes, 165);
+  // a staff override check-in has no session, so the check-out names none
+  const leo = kid(t, t.loc, 'Leo Garcia');
+  assert.equal((await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: leo.id, override: true })).status, 200);
+  setClock(t, '16:30');
+  const leoOut = await t.scan(leo);
+  assert.equal(leoOut.body.action, 'checkout');
+  assert.equal(leoOut.body.session, null);
+  assert.equal(leoOut.body.total_minutes, 40);
+});
+
 // ---------------------------------------------------------------- CI-5 auto-checkout
 
 test(['CI-5'], 'an open visit is checked out automatically at the session end and flagged for review', async () => {
@@ -491,7 +543,7 @@ test(['CI-7', 'NF-1'], 'In the building lists who is here, who is still expected
   setClock(t, '13:20');
   await t.scan(leo);
   await t.scan(rae); // out...
-  await t.scan(rae); // ...and back in
+  await t.scan(rae, { confirm: true }); // ...and back in, confirmed (a scan this soon after checking out asks first)
   const r = await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`);
   assert.equal(r.status, 200);
   assert.equal(r.body.today, '2026-10-14');
@@ -622,6 +674,67 @@ test(['CI-7', 'NF-2'], 'flagged visits wait for review; staff confirm them or fi
   assert.equal(notFlagged.status, 409);
   assert.equal(notFlagged.body.error, 'not_flagged');
   assert.equal(t.fx.audit('checkin.review').length, 2);
+});
+
+test(['CI-7', 'NF-2'], 'In the building names who checked a visit in or out by hand and why, in Here, Left today and Needs review', async () => {
+  const t = await setup();
+  const dir = t.fx.director(t.loc, { name: 'Dana Park' });
+  const leo = kid(t, t.loc, 'Leo Garcia');
+  const ivy = kid(t, t.loc, 'Ivy Chen', t.sess, [3]);
+  const ana = kid(t, t.loc, 'Ana Lopez', t.sess, [3]);
+  await t.scan(); // Maya scans in herself
+  assert.equal((await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: leo.id, override: true, reason: 'Phone is dead' })).status, 200);
+  assert.equal((await t.as(dir).post('/api/checkin/manual-checkin', { studentId: ivy.id, reason: 'Picked up from the dentist' })).status, 200);
+  assert.equal((await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: ana.id })).status, 200); // no reason given
+  setClock(t, '14:00');
+  const [ivyVisit] = visitsOf(t, ivy);
+  assert.equal((await t.as(t.staff).post(`/api/checkin/visits/${ivyVisit.id}/checkout`, { reason: 'Leaving early' })).status, 200);
+  const by = v => [v.name, v.checked_in_by_name, v.checkin_reason, v.checked_out_by_name, v.checkout_reason];
+  const b = (await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`)).body;
+  assert.deepEqual(b.here.map(by), [
+    ['Maya Johnson', null, null, null, null],
+    ['Leo Garcia', 'Chris Ortiz', 'Phone is dead', null, null],
+    ['Ana Lopez', 'Chris Ortiz', null, null, null],
+  ]);
+  assert.deepEqual(b.left.map(by), [['Ivy Chen', 'Dana Park', 'Picked up from the dentist', 'Chris Ortiz', 'Leaving early']]);
+  // Leo is never scanned out: the auto-checkout flags the visit, and Needs review still says who checked him in and why
+  setClock(t, '20:30');
+  t.jobs();
+  const r = (await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`)).body.needs_review;
+  const leoRow = r.find(v => v.student_id === leo.id);
+  assert.deepEqual([leoRow.checkin_method, ...by(leoRow)], ['staff', 'Leo Garcia', 'Chris Ortiz', 'Phone is dead', null, null]);
+  assert.deepEqual(by(r.find(v => v.student_id === t.fam.student.id)), ['Maya Johnson', null, null, null, null]);
+  assert.equal(r.find(v => v.student_id === t.fam.student.id).checkin_method, 'scan');
+});
+
+test(['CI-7'], "a manual check-in warns when the student's membership isn't active, and goes through only when staff confirm", async () => {
+  const t = await setup();
+  const daniel = kid(t, t.loc, 'Daniel Kim', t.sess, [3], { status: 'inactive' });
+  const ed = kid(t, t.loc, 'Ed Expired', t.sess, [3], { expires: '2026-10-13' });
+  const lu = kid(t, t.loc, 'Lu Lastday', t.sess, [3], { expires: '2026-10-14' });
+  // staff see it before they open the dialog: in the search and in the expected list
+  const found = await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/students?q=`);
+  assert.deepEqual(found.body.students.filter(s => [daniel.id, ed.id, lu.id, t.fam.student.id].includes(s.id)).map(s => [s.name, s.membership_active]),
+    [['Daniel Kim', false], ['Ed Expired', false], ['Lu Lastday', true], ['Maya Johnson', true]]);
+  const b = (await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`)).body;
+  assert.deepEqual(b.expected.map(e => [e.name, e.membership_active]).sort(),
+    [['Daniel Kim', false], ['Ed Expired', false], ['Lu Lastday', true], ['Maya Johnson', true]]);
+  for (const s of [daniel, ed]) {
+    const ask = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: s.id, reason: 'Phone is dead' });
+    assert.equal(ask.status, 409, s.name);
+    assert.equal(ask.body.error, 'membership_inactive', s.name);
+    assert.equal(ask.body.message, `${s.name.split(' ')[0]}'s membership isn't active. Check in anyway?`);
+    assert.equal(visitsOf(t, s).length, 0, s.name);
+  }
+  assert.equal(t.fx.audit('checkin.manual_checkin').length, 0);
+  assert.equal(t.fx.notifications(daniel.parent).length, 0);
+  // the last valid day is still active (D-16)
+  assert.equal((await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: lu.id })).status, 200);
+  const yes = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: daniel.id, reason: 'Phone is dead', override: true });
+  assert.equal(yes.status, 200);
+  const [v] = visitsOf(t, daniel);
+  assert.deepEqual([v.checkin_method, v.checked_in_by, v.session_id], ['staff', t.staff.id, t.sess.id]);
+  assert.equal(t.fx.audit('checkin.manual_checkin').length, 2);
 });
 
 test(['CI-7', 'NF-1'], "staff search finds only their own location's students, with whether each is here or has a session now", async () => {
@@ -898,6 +1011,7 @@ test(['CI-2', 'CI-4'], 'checking out needs the phone inside the radius too; a sc
   const far = await t.scan(t.fam.student, north(t.loc, 165)); // radius 150 m
   assert.equal(far.status, 403);
   assert.equal(far.body.error, 'outside_radius');
+  assert.equal(far.body.message, 'You need to be inside Irvine to check out. If you are, ask staff to check you out.');
   const [v] = visitsOf(t, t.fam.student);
   assert.deepEqual([v.check_out_at, v.checkout_method], [null, null]);
   assert.equal(t.fx.notifications(t.fam.parent, 'checkout').length, 0);

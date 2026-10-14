@@ -31,7 +31,8 @@
 
   const qs = o => Object.entries(o).filter(([, v]) => v != null && v !== '')
     .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
-  const hours = minutes => String(Math.round((minutes / 60) * 100) / 100);
+  // Decimal hours always with two places, as the PDF and CSV print them: "8.50".
+  const hours = minutes => (minutes / 60).toFixed(2);
   const count = (n, one, many) => n + ' ' + (n === 1 ? one : many);
   const longDate = iso => App.fmtDate(iso, { weekday: undefined, year: 'numeric' });
   const first = name => String(name || '').split(' ')[0];
@@ -88,12 +89,17 @@
 
   // ===================================================================== parent: Hours
 
-  const hoursState = { studentId: null, period: 'week', date: null, from: null, to: null };
+  // Lives as long as the tab, but belongs to whoever chose it (`owner`, a user id).
+  const hoursState = { owner: null, studentId: null, period: 'week', date: null, from: null, to: null };
   const PERIODS = [['week', 'Week'], ['month', 'Month'], ['term', 'Term']];
 
   App.register({
     id: 'hours', title: 'Hours', icon: '⏱️', roles: ['parent'], order: 40,
     async render(el) {
+      // Someone else signed in on this tab: start from this week and this month.
+      if (hoursState.owner !== App.me.user.id) {
+        Object.assign(hoursState, { owner: App.me.user.id, studentId: null, period: 'week', date: null, from: null, to: null });
+      }
       const { students } = await App.api.get(API + '/students');
       el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Hours'),
         h('p', null, 'Visits, study hours and absences, ready for your homeschool records.'))));
@@ -232,7 +238,16 @@
 
   // ===================================================================== directors and HQ: Reports
 
-  const repState = { location: null, session: '', from: null, to: null, tab: 'students' };
+  // The filters live as long as the tab, but belong to whoever chose them (`owner`, a user id).
+  const repState = { owner: null, location: null, session: '', from: null, to: null, tab: 'students' };
+
+  // When a report has no absences, the Absences tab says why, by where its range
+  // stands against today (the report's `timing`): a session still ahead can't be missed.
+  const NO_ABSENCES = {
+    upcoming: 'No sessions in this range have happened yet, so nobody has missed one.',
+    current: 'No absences so far. Every session that has ended had a check-in, or was a closure day.',
+    past: 'No absences in this range. Every scheduled session had a check-in, or was a closure day.',
+  };
 
   App.register({
     id: 'reports', title: 'Reports', icon: '📊', roles: ['director'], order: 40,
@@ -244,8 +259,10 @@
         el.append(h('div', { class: 'card empty' }, 'There are no locations to report on yet.'));
         return;
       }
-      // The filters live as long as the tab, across sign-outs. When they name a location
-      // this person can't report on (HQ chose it, then a director signed in), start over.
+      // Someone else signed in on this tab (HQ after a director, or the other way): start over.
+      if (repState.owner !== App.me.user.id) Object.assign(repState, { owner: App.me.user.id, location: null, tab: 'students' });
+      // Start over too when the filters name a location this person can't report on
+      // (a director moved to another location).
       const canReport = (opts.all_locations && repState.location === 'all') || opts.locations.some(l => String(l.id) === repState.location);
       if (!canReport) {
         Object.assign(repState, { location: opts.all_locations ? 'all' : String(opts.locations[0].id), session: '', from: null, to: null });
@@ -257,13 +274,28 @@
         repState.to = month.to;
       }
 
-      const sessionOption = s => h('option', { value: s.id }, s.label + (s.status === 'cancelled' ? ' (cancelled)' : ''));
-      const pickSession = h('select', { id: 'rep-session', onchange: () => { repState.session = pickSession.value; } });
+      // A changed filter leaves the report on screen as it was until Show report: it
+      // says it's out of date and its downloads wait, so a file is never a different
+      // report from the one the filters name. `shown`: the filters of the report on screen.
+      const status = h('div', { role: 'status' });
+      let shown = null, downloads = [];
+      const chosen = () => qs({ location: repState.location, session: repState.session, from: repState.from, to: repState.to });
+      function markStale() {
+        const stale = shown != null && shown !== chosen();
+        downloads.forEach(b => { b.disabled = stale; });
+        status.replaceChildren(stale ? h('div', { class: 'notice notice-warn' },
+          'The filters have changed. Tap Show report to update the report and its downloads.') : '');
+      }
+
+      // With every location, each session says where it is: two locations can run one by the same name.
+      const sessionOption = (s, loc) => h('option', { value: s.id },
+        (loc ? loc.name + ' · ' : '') + s.label + (s.status === 'cancelled' ? ' (cancelled)' : ''));
+      const pickSession = h('select', { id: 'rep-session', onchange: () => { repState.session = pickSession.value; markStale(); } });
       const fillSessions = () => {
-        const groups = repState.location === 'all'
-          ? opts.locations.filter(l => l.sessions.length).map(l => h('optgroup', { label: l.name }, l.sessions.map(sessionOption)))
-          : locOf().sessions.map(sessionOption);
-        pickSession.replaceChildren(h('option', { value: '' }, 'All sessions'), ...groups);
+        const options = repState.location === 'all'
+          ? opts.locations.flatMap(l => l.sessions.map(s => sessionOption(s, l)))
+          : locOf().sessions.map(s => sessionOption(s));
+        pickSession.replaceChildren(h('option', { value: '' }, 'All sessions'), ...options);
         pickSession.value = repState.session;
         if (pickSession.value !== String(repState.session)) { repState.session = ''; pickSession.value = ''; }
       };
@@ -271,8 +303,9 @@
 
       let locationField;
       if (opts.all_locations) {
-        const pickLocation = h('select', { id: 'rep-location', onchange: () => { repState.location = pickLocation.value; repState.session = ''; fillSessions(); } },
-          h('option', { value: 'all' }, 'All locations'), opts.locations.map(l => h('option', { value: l.id }, l.name)));
+        const pickLocation = h('select', { id: 'rep-location', onchange: () => {
+          repState.location = pickLocation.value; repState.session = ''; fillSessions(); markStale();
+        } }, h('option', { value: 'all' }, 'All locations'), opts.locations.map(l => h('option', { value: l.id }, l.name)));
         pickLocation.value = repState.location;
         locationField = h('label', { class: 'field' }, h('span', null, 'Location'), pickLocation);
       } else {
@@ -282,9 +315,9 @@
       const results = h('section', { 'aria-busy': 'false', 'aria-label': 'Report' });
       const form = h('form', { class: 'card', onsubmit: e => { e.preventDefault(); draw(); } },
         h('div', { class: 'att-filters' }, locationField, h('label', { class: 'field' }, h('span', null, 'Session'), pickSession)),
-        rangePicker(locOf().presets, repState, () => {}),
+        rangePicker(locOf().presets, repState, markStale),
         h('button', { type: 'submit', class: 'btn btn-primary' }, 'Show report'));
-      el.append(form, results);
+      el.append(form, status, results);
 
       let seq = 0;
       async function draw() {
@@ -293,7 +326,11 @@
         const filter = { location: repState.location, session: repState.session, from: repState.from, to: repState.to };
         let rep;
         try { rep = await App.api.get(API + '/report?' + qs(filter)); } catch (e) {
-          if (mine === seq) { results.replaceChildren(h('div', { class: 'notice notice-warn', role: 'alert' }, e.message)); results.setAttribute('aria-busy', 'false'); }
+          if (mine === seq) {
+            results.replaceChildren(h('div', { class: 'notice notice-warn', role: 'alert' }, e.message));
+            results.setAttribute('aria-busy', 'false');
+            shown = null; downloads = []; markStale();
+          }
           return;
         }
         if (mine !== seq) return;
@@ -302,6 +339,13 @@
         const where = (all ? 'All locations' : rep.filters.location.name) + ' · ' + (rep.filters.session ? rep.filters.session.label : 'All sessions');
         const t = rep.totals;
         const file = ext => `${API}/report.${ext}?` + qs(filter);
+        // App.run turns a button back on when it's done; a report gone out of date meanwhile turns it off again.
+        const dl = (label, ext) => h('button', { type: 'button', class: 'btn',
+          onclick: e => App.run(e.currentTarget, () => download(file(ext))).then(markStale) }, label);
+        shown = qs(filter);
+        downloads = [dl('Download CSV', 'csv'), dl('Download PDF', 'pdf')];
+        // Staff and directors confirm automatic check-outs on In the building, at the report's location.
+        const building = h('a', { href: '#/building' + (all ? '' : '/' + rep.filters.location.id) }, 'In the building');
         const panel = h('div', { id: 'rep-panel', role: 'tabpanel' });
         const TABS = [['students', 'By student'], ['visits', 'Visits'], ['absences', 'Absences']];
         const tabs = TABS.map(([k, label]) => h('button', { type: 'button', role: 'tab', id: 'rep-tab-' + k, 'aria-controls': 'rep-panel',
@@ -313,7 +357,7 @@
           panel.setAttribute('aria-labelledby', 'rep-tab-' + repState.tab);
           if (repState.tab === 'students') {
             panel.replaceChildren(rep.by_student.length ? table(['Student', 'Visits', 'Hours', 'Absences'],
-              rep.by_student.map(s => [s.student_name, s.visits, (s.minutes / 60).toFixed(2), s.absences])) : h('div', { class: 'card empty' }, noVisits));
+              rep.by_student.map(s => [s.student_name, s.visits, hours(s.minutes), s.absences])) : h('div', { class: 'card empty' }, noVisits));
           } else if (repState.tab === 'visits') {
             panel.replaceChildren(rep.visits.length ? table(
               ['Date', 'Student', ...(all ? ['Location'] : []), 'Session', 'In', 'Out', 'Total', 'Check-out'],
@@ -328,23 +372,22 @@
             panel.replaceChildren(rep.absences.length ? table(['Date', 'Student', ...(all ? ['Location'] : []), 'Session', 'Scheduled'],
               rep.absences.map(a => [App.fmtDate(a.date), a.student_name, ...(all ? [a.location_name] : []), a.session_name,
                 App.hhmm(a.start_time) + '–' + App.hhmm(a.end_time)]))
-              : h('div', { class: 'card empty' }, 'No absences in this range. Every scheduled session had a check-in, or was a closure day.'));
+              : h('div', { class: 'card empty' }, NO_ABSENCES[rep.timing]));
           }
         };
 
         results.replaceChildren(
           h('div', { class: 'page-head' }, h('div', null, h('h2', null, rep.label), h('p', { class: 'small' }, where)),
-            h('div', { class: 'row' },
-              h('button', { type: 'button', class: 'btn', onclick: e => App.run(e.currentTarget, () => download(file('csv'))) }, 'Download CSV'),
-              h('button', { type: 'button', class: 'btn', onclick: e => App.run(e.currentTarget, () => download(file('pdf'))) }, 'Download PDF'))),
+            h('div', { class: 'row' }, downloads)),
           h('div', { class: 'card att-stats att-four' }, stat(t.visits, t.visits === 1 ? 'visit' : 'visits'), stat(hours(t.minutes), 'hours'),
             stat(t.students, t.students === 1 ? 'student' : 'students'), stat(t.absences, t.absences === 1 ? 'absence' : 'absences')),
           // A ternary, not &&: replaceChildren would print a bare false as the word "false".
           t.needs_review > 0 ? h('div', { class: 'notice notice-warn' }, h('strong', null, count(t.needs_review, 'visit needs', 'visits need') + ' review. '),
-            'These students didn\'t scan out and were checked out automatically. Confirm or fix the times from the In the building list.') : '',
+            'These students didn\'t scan out and were checked out automatically. Confirm or fix the times from the ', building, ' list.') : '',
           h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Report detail' }, tabs),
           panel);
         showTab();
+        markStale();
       }
 
       // Dates, times and numbers stay on one line; a wide table scrolls inside its card.
@@ -367,13 +410,19 @@
       const opts = await App.api.get(API + '/report/options');
       if (!opts.locations.length) { box.hidden = true; return; }
       const week = opts.locations[0].presets.find(p => p.id === 'this_week');
-      const rep = await App.api.get(API + '/report?' + qs({ location: opts.all_locations ? 'all' : opts.locations[0].id, from: week.from, to: week.to }));
+      const filters = { location: opts.all_locations ? 'all' : String(opts.locations[0].id), from: week.from, to: week.to };
+      const rep = await App.api.get(API + '/report?' + qs(filters));
       const t = rep.totals;
+      // Reports opens on what this card shows: the same location (or all), every session, this week.
+      const open = () => {
+        Object.assign(repState, filters, { owner: App.me.user.id, session: '', tab: 'students' });
+        App.go('reports');
+      };
       box.append(h('div', { class: 'card' },
         h('div', { class: 'row between' },
           h('div', null, h('h2', { style: 'margin:0' }, 'Attendance this week'),
             h('div', { class: 'muted small' }, (opts.all_locations ? 'All locations' : opts.locations[0].name) + ' · ' + rep.label)),
-          h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => App.go('reports') }, 'Open reports')),
+          h('button', { type: 'button', class: 'btn btn-ghost', onclick: open }, 'Open reports')),
         h('div', { class: 'att-stats', style: 'margin-top:.75rem' }, stat(t.visits, t.visits === 1 ? 'visit' : 'visits'),
           stat(hours(t.minutes), 'hours'), stat(t.absences, t.absences === 1 ? 'absence' : 'absences')),
         t.needs_review > 0 && h('div', { class: 'notice notice-warn', style: 'margin:.75rem 0 0' },

@@ -5,18 +5,28 @@
 //   GET    /feed        posts the caller is an audience of (NF-1), active emergency alerts,
 //                       the caller's scheduled posts (director: own, HQ: all) and their mute setting
 //   GET    /options     compose helpers for directors/HQ: categories and the sessions they can target
-//   POST   /preview     who a post would reach, without sending it (the review step)
+//   POST   /preview     who a post would reach, without sending it (the review step); a schedule
+//                       time is checked here too, so a past time is refused before Schedule post
 //   POST   /            post or schedule an announcement (director: own location; HQ: all or a set)
 //   POST   /emergency   send an emergency alert right now (director: own location; HQ: any)
 //   DELETE /:id         cancel a scheduled post (its sender, or HQ)
 //   GET    /:id/stats   delivered and read counts (its sender, or HQ)
-//   POST   /:id/read    mark the caller's notification for a post as read
+//   POST   /:id/read    the caller has seen a post: records the read and marks their notification read
 //   PUT    /prefs       { muted } turns announcement notifications off or on for the caller
 // Job: publish-scheduled sends each due scheduled post exactly once.
 //
 // Who a post reaches is fixed when it is published and stored in
-// announcement_recipients; a family member's feed is exactly those posts.
+// announcement_recipients; that is who it notifies and who its counts are over.
+// A family member's feed is those posts plus their own location's later
+// all-families / parents-only / students-only posts and alerts that include
+// their role (a family that joins later still sees them; see scope()).
 // Staff and directors see every post sent to their own location; HQ sees all.
+//
+// Reading counts from either place a read lands (AN-6): a row in
+// announcement_reads (seen in News, which is the only record for a muted
+// recipient) or the read_at of the person's notification (opened from the
+// Inbox, or "I have read this" on the emergency pop-up through
+// POST /api/notifications/:id/read with the pop-up's notification id).
 
 const express = require('express');
 const { tx } = require('../../db');
@@ -209,29 +219,55 @@ function publish(ctx, id) {
 
 // ---------- reading ----------
 
+// The audiences that include a family role (AN-4, AN-5). For these, who is in
+// the audience goes by location, not by having a student set up or enrolled.
+const FAMILY_AUDIENCES = { parent: ['families', 'parents', 'everyone'], student: ['families', 'students', 'everyone'] };
+
 // SQL that limits announcements `a` to what this user may see (NF-1).
-function scope(user) {
+// A family member sees every post they were sent, and every post at their own
+// location(s) whose audience includes their role, including ones published
+// before they joined: a new parent whose students are not set up yet still
+// sees the location's all-families and parents-only posts. A session post stays
+// with the families it was sent to.
+function scope(ctx, user) {
   if (user.role === 'hq') return { sql: '1 = 1', args: [] };
   if (auth.atLeast(user, 'staff')) {
     return { sql: 'EXISTS (SELECT 1 FROM announcement_locations al WHERE al.announcement_id = a.id AND al.location_id = ?)', args: [user.location_id] };
   }
-  return { sql: 'EXISTS (SELECT 1 FROM announcement_recipients r WHERE r.announcement_id = a.id AND r.user_id = ?)', args: [user.id] };
+  const auds = FAMILY_AUDIENCES[user.role] || [];
+  const locs = [...ownLocationIds(ctx, user)].filter(Boolean);
+  const marks = list => list.map(() => '?').join(',') || 'NULL';
+  return {
+    sql: `(EXISTS (SELECT 1 FROM announcement_recipients r WHERE r.announcement_id = a.id AND r.user_id = ?)
+      OR (a.audience IN (${marks(auds)}) AND EXISTS (SELECT 1 FROM announcement_locations fl WHERE fl.announcement_id = a.id AND fl.location_id IN (${marks(locs)}))))`,
+    args: [user.id, ...auds, ...locs],
+  };
 }
 
 function visible(ctx, user, where = '', args = [], limit = 100) {
-  const s = scope(user);
+  const s = scope(ctx, user);
   return ctx.db.prepare(`SELECT a.* FROM announcements a WHERE a.status = 'published' AND ${s.sql}${where}
     ORDER BY a.published_at DESC, a.id DESC LIMIT ?`).all(...s.args, ...args, limit);
 }
 
 const senderOrHq = (user, a) => user.role === 'hq' || a.created_by === user.id;
 
-// Delivery and read counts come from the notifications rows (AN-6).
+// Delivery and read counts (AN-6), each over the people the post was sent to:
+//   read       has seen it: in News, from the Inbox, or "I have read this" on the alert pop-up
+//   delivered  it reached them: a notification was delivered, or (notifications off) they saw it
+//              in News. So read <= delivered <= recipients, with muted readers counted in both.
+//   muted      got no notification because they turned announcement notifications off
 function stats(ctx, id) {
-  const n = ctx.db.prepare(`SELECT COUNT(*) AS delivered, COUNT(read_at) AS read FROM notifications
-    WHERE ref_type = 'announcement' AND ref_id = ? AND delivered_at IS NOT NULL`).get(id);
-  const recipients = ctx.db.prepare('SELECT COUNT(*) AS n FROM announcement_recipients WHERE announcement_id = ?').get(id).n;
-  return { recipients, delivered: n.delivered, read: n.read, muted: Math.max(0, recipients - n.delivered) };
+  const s = ctx.db.prepare(`SELECT COUNT(*) AS recipients, COALESCE(SUM(notified), 0) AS notified,
+      COALESCE(SUM(seen), 0) AS read, COALESCE(SUM(notified OR seen), 0) AS delivered
+    FROM (SELECT
+        EXISTS (SELECT 1 FROM notifications n WHERE n.user_id = r.user_id AND n.ref_type = 'announcement'
+          AND n.ref_id = r.announcement_id AND n.delivered_at IS NOT NULL) AS notified,
+        (EXISTS (SELECT 1 FROM announcement_reads ar WHERE ar.announcement_id = r.announcement_id AND ar.user_id = r.user_id)
+          OR EXISTS (SELECT 1 FROM notifications n WHERE n.user_id = r.user_id AND n.ref_type = 'announcement'
+            AND n.ref_id = r.announcement_id AND n.read_at IS NOT NULL)) AS seen
+      FROM announcement_recipients r WHERE r.announcement_id = ?)`).get(id);
+  return { recipients: s.recipients, delivered: s.delivered, read: s.read, muted: s.recipients - s.notified };
 }
 
 // A non-HQ user's own locations: their home, plus each linked student's for a parent.
@@ -253,6 +289,10 @@ function shape(ctx, user, a) {
   const sender = db.prepare('SELECT name, role FROM users WHERE id = ?').get(a.created_by) || { name: 'ELITE Spaces', role: null };
   const session = a.session_id ? db.prepare('SELECT id, name, weekdays, start_time, end_time FROM sessions WHERE id = ?').get(a.session_id) : null;
   const note = db.prepare("SELECT read_at FROM notifications WHERE user_id = ? AND ref_type = 'announcement' AND ref_id = ? ORDER BY id LIMIT 1").get(user.id, a.id);
+  const seen = !!db.prepare('SELECT 1 FROM announcement_reads WHERE announcement_id = ? AND user_id = ?').get(a.id, user.id);
+  // New until read, for anyone the post is for: a family member (muted or not)
+  // or a recipient on staff. Everything else staff and HQ see is just a listing.
+  const forMe = !auth.atLeast(user, 'staff') || !!db.prepare('SELECT 1 FROM announcement_recipients WHERE announcement_id = ? AND user_id = ?').get(a.id, user.id);
   return {
     id: a.id, type: a.type, category: a.category, category_label: a.category ? CATEGORIES[a.category] : null,
     title: a.title, body: a.body, audience: a.audience, status: a.status,
@@ -261,7 +301,7 @@ function shape(ctx, user, a) {
     tz: (shown[0] || locs[0] || {}).timezone || null,
     sender: { name: sender.name, role: sender.role },
     mine: a.created_by === user.id,
-    unread: !!note && !note.read_at,
+    unread: forMe && !seen && !(note && note.read_at),
     stats: senderOrHq(user, a) ? stats(ctx, a.id) : null,
   };
 }
@@ -306,6 +346,8 @@ function router(ctx) {
     const b = req.body || {};
     const emergency = b.type === 'emergency';
     const target = resolveTarget(ctx, req.user, b, emergency);
+    // A schedule time gets the same check as sending, so a past one is refused at Review.
+    if (!emergency) parsePublishAt(ctx, b.publish_at, target.locationIds[0]);
     const users = audienceUsers(ctx, target);
     const muted = mutedIds(ctx);
     const mutedCount = emergency ? 0 : users.filter(x => muted.has(x.id)).length;
@@ -368,8 +410,13 @@ function router(ctx) {
   r.post('/:id/read', auth.requireRole(), (req, res) => {
     const [a] = visible(ctx, req.user, ' AND a.id = ?', [Number(req.params.id) || 0], 1);
     if (!a) throw notFound('That announcement is not available.');
-    db.prepare("UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE user_id = ? AND ref_type = 'announcement' AND ref_id = ?")
-      .run(ctx.clock.now(), req.user.id, a.id);
+    const now = ctx.clock.now();
+    tx(db, () => {
+      // The read itself, which is the only record for someone with notifications off (AN-6).
+      db.prepare('INSERT OR IGNORE INTO announcement_reads (announcement_id, user_id, read_at) VALUES (?, ?, ?)').run(a.id, req.user.id, now);
+      db.prepare("UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE user_id = ? AND ref_type = 'announcement' AND ref_id = ?")
+        .run(now, req.user.id, a.id);
+    });
     res.json({ ok: true });
   });
 

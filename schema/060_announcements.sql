@@ -31,15 +31,28 @@ CREATE TABLE IF NOT EXISTS announcement_locations (
 );
 CREATE INDEX IF NOT EXISTS announcement_locations_loc ON announcement_locations(location_id);
 
--- Who the post was for, fixed when it is published. A family member's News
--- feed shows exactly the posts they are a recipient of (NF-1). Muted users are
--- recipients too: they see the post in the feed but get no notification.
+-- Who the post was for, fixed when it is published: the sender's "Sent to"
+-- number and the people its delivery and read counts are taken over (AN-6).
+-- Muted users are recipients too: they see the post in the feed but get no
+-- notification. A family member's News feed shows these posts, plus any later
+-- all-families, parents-only or students-only post (or alert) at their own
+-- location that includes their role, so a family that joins later still sees it.
 CREATE TABLE IF NOT EXISTS announcement_recipients (
   announcement_id INTEGER NOT NULL REFERENCES announcements(id),
   user_id         INTEGER NOT NULL REFERENCES users(id),
   PRIMARY KEY (announcement_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS announcement_recipients_user ON announcement_recipients(user_id);
+
+-- Who has seen a post in News (or tapped "I have read this" on an alert), one
+-- row per person per post. Muted recipients have no notification row to mark,
+-- so this is what counts their reads (AN-6).
+CREATE TABLE IF NOT EXISTS announcement_reads (
+  announcement_id INTEGER NOT NULL REFERENCES announcements(id),
+  user_id         INTEGER NOT NULL REFERENCES users(id),
+  read_at         INTEGER NOT NULL,
+  PRIMARY KEY (announcement_id, user_id)
+);
 
 -- Per-user setting: muted = 1 turns off notifications for normal
 -- announcements. Emergency alerts ignore it (AN-5).

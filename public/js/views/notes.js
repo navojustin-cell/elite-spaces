@@ -26,6 +26,8 @@
     .note-controls { align-items: flex-end; margin-bottom: 12px; }
     .note-controls .field { margin: 0; }
     .note-actions { margin-top: .5rem; }
+    .note-hint { min-height: 3em; }
+    .note-move { min-width: 44px; min-height: 44px; }
     .note-item-body { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
     .note-item-edit { display: flex; gap: .5rem; flex: 1 1 15rem; min-width: 0; }
     .note-item-edit input { flex: 1 1 6rem; min-width: 0; min-height: 44px; padding: .55rem .7rem; border-radius: var(--radius-sm);
@@ -39,7 +41,10 @@
   const initials = name => name.split(/\s+/).filter(Boolean).slice(0, 2).map(p => p[0].toUpperCase()).join('');
   const first = name => name.split(' ')[0];
   const listWords = a => (a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1]);
-  const todayIn = tz => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(App.now());
+  const dateIn = (tz, ms) => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(ms);
+  const todayIn = tz => dateIn(tz, App.now());
+  // The day a note was posted ("Thu, Oct 15") when that isn't the visit's own day; null when it is.
+  const postedDay = (ms, tz, day) => (dateIn(tz, ms) === day ? null : App.fmtDate(ms, { weekday: 'short', month: 'short', day: 'numeric', timeZone: tz }));
   // "Afternoon Study, 1:02–3:58 PM"; a student still in the building reads "since 1:02 PM".
   const visitText = (v, tz) => (v.session_name || 'Visit') + ', ' +
     (v.check_out_at ? App.fmtTime(v.check_in_at, tz) + '–' + App.fmtTime(v.check_out_at, tz) : 'since ' + App.fmtTime(v.check_in_at, tz));
@@ -137,10 +142,11 @@
         // A posted note shows as a summary until someone chooses to edit it.
         if (posted && !open.has(s.id) && !unsaved.has(key)) {
           const n = s.note;
+          const day = postedDay(n.posted_at, tz, data.date);
           art.append(ratingSummary(s.ratings));
           if (s.comment) art.append(h('p', { class: 'note-comment' }, s.comment));
           art.append(
-            h('p', { class: 'muted small', style: 'margin:.6rem 0 0' }, 'Posted ' + App.fmtTime(n.posted_at, tz) + ' by ' + n.posted_by_name +
+            h('p', { class: 'muted small', style: 'margin:.6rem 0 0' }, 'Posted ' + (day ? day + ', ' : '') + App.fmtTime(n.posted_at, tz) + ' by ' + n.posted_by_name +
               (n.edited_at ? ' · Edited ' + App.fmtDateTime(n.edited_at, tz) + ' by ' + n.edited_by_name : '')),
             h('div', { class: 'row note-actions' }, h('button', { class: 'btn', type: 'button', 'aria-label': 'Edit ' + s.name + "'s note",
               onclick: () => { open.add(s.id); redraw(s); focusFirstChoice(s); } }, 'Edit note')));
@@ -150,7 +156,8 @@
         // The form. Ratings start blank (DN-4); posting needs every item rated.
         const ed = unsaved.get(key) || { ratings: Object.fromEntries(s.ratings.map(r => [r.item_id, r.rating])), comment: s.comment || '' };
         const keep = () => unsaved.set(key, ed);
-        const hint = h('p', { class: 'muted small', 'aria-live': 'polite', style: 'margin:.25rem 0 0' });
+        // The hint keeps its space even when empty, so the button below never shifts as it changes.
+        const hint = h('p', { class: 'muted small note-hint', 'aria-live': 'polite', style: 'margin:.25rem 0 0' });
         const postBtn = h('button', { class: 'btn btn-primary', type: 'button' }, posted ? 'Save changes' : 'Post note');
         const refresh = () => {
           const missing = s.ratings.filter(r => ed.ratings[r.item_id] == null).map(r => r.label);
@@ -167,9 +174,11 @@
           const btns = [1, 2, 3].map(v => {
             const b = h('button', { type: 'button', class: 'btn' + (ed.ratings[r.item_id] === v ? ' btn-primary' : ''),
               'aria-pressed': String(ed.ratings[r.item_id] === v), 'data-v': v }, WORDS[v]);
+            // Tapping the chosen rating again clears it; posting still needs every item rated.
             b.addEventListener('click', () => {
-              ed.ratings[r.item_id] = v; keep();
-              btns.forEach(x => { const on = Number(x.dataset.v) === v; x.classList.toggle('btn-primary', on); x.setAttribute('aria-pressed', String(on)); });
+              const chosen = ed.ratings[r.item_id] === v ? null : v;
+              ed.ratings[r.item_id] = chosen; keep();
+              btns.forEach(x => { const on = Number(x.dataset.v) === chosen; x.classList.toggle('btn-primary', on); x.setAttribute('aria-pressed', String(on)); });
               refresh();
             });
             return b;
@@ -224,6 +233,7 @@
   // ======================================================== parents: Notes
   function parentNoteCard(n, showName) {
     const tz = n.timezone;
+    const day = postedDay(n.posted_at, tz, n.local_date);
     return h('article', { class: 'card' },
       h('div', { class: 'row between' },
         h('h2', { style: 'margin:0' }, App.fmtDate(n.local_date, { weekday: 'long', month: 'short', day: 'numeric' })),
@@ -233,15 +243,22 @@
         h('span', { class: BADGE[r.rating] || 'badge' }, r.word || 'Not rated')))),
       n.comment && h('div', null, h('div', { class: 'muted small', style: 'margin-top:.5rem' }, 'Comment from ' + first(n.posted_by_name || 'staff')),
         h('p', { class: 'note-comment', style: 'margin-top:.25rem' }, n.comment)),
-      h('p', { class: 'muted small', style: 'margin:.6rem 0 0' }, 'Posted by ' + n.posted_by_name + ' at ' + App.fmtTime(n.posted_at, tz) +
+      h('p', { class: 'muted small', style: 'margin:.6rem 0 0' }, 'Posted by ' + n.posted_by_name + (day ? ' on ' + day : '') + ' at ' + App.fmtTime(n.posted_at, tz) +
         (n.edited_at ? ' · Edited ' + App.fmtDateTime(n.edited_at, tz) : '')));
   }
 
   App.register({
     id: 'notes', title: 'Notes', icon: '📝', roles: ['parent'], order: 30,
     async render(el, params) {
-      const student = params[0] && params[0] !== 'all' ? params[0] : '';
-      const to = params[1] || '';
+      let student = params[0] && params[0] !== 'all' ? params[0] : '';
+      let to = params[1] || '';
+      // A "note is ready" notification opens #/notes/note/<id>: that student's notes, from the note's day.
+      if (student === 'note') {
+        const { note } = await App.api.get('/api/notes/note/' + encodeURIComponent(to));
+        student = String(note.student_id);
+        to = note.local_date;
+        history.replaceState(null, '', '#/notes/' + student + '/' + to);
+      }
       const query = upTo => {
         const q = new URLSearchParams({ limit: '20' });
         if (student) q.set('student', student);
@@ -331,9 +348,9 @@
         return h('li', { style: 'align-items:flex-start' },
           h('span', { class: 'avatar', 'aria-hidden': 'true' }, idx + 1),
           h('div', { class: 'note-item-body' }, form, h('div', { class: 'row' },
-            h('button', { class: 'btn', type: 'button', id: 'nc-up-' + it.id, 'aria-label': 'Move "' + it.label + '" up', disabled: idx === 0,
+            h('button', { class: 'btn note-move', type: 'button', id: 'nc-up-' + it.id, 'aria-label': 'Move "' + it.label + '" up', disabled: idx === 0,
               onclick: e => move(e.currentTarget, idx, -1) }, '↑'),
-            h('button', { class: 'btn', type: 'button', id: 'nc-down-' + it.id, 'aria-label': 'Move "' + it.label + '" down', disabled: idx === active.length - 1,
+            h('button', { class: 'btn note-move', type: 'button', id: 'nc-down-' + it.id, 'aria-label': 'Move "' + it.label + '" down', disabled: idx === active.length - 1,
               onclick: e => move(e.currentTarget, idx, 1) }, '↓'),
             h('button', { class: 'btn', type: 'button', 'aria-label': 'Retire "' + it.label + '"', disabled: active.length === 1,
               title: active.length === 1 ? 'The checklist needs at least one item.' : null,
@@ -380,10 +397,14 @@
         h('ul', { class: 'list' }, students.map(s => {
           const n = s.note;
           if (!n) {
+            // "Wasn't in" only once the day's last session has ended (in the location's zone, worked out by the server).
+            const who = first(s.name);
+            const why = s.in_building || s.session_later ? 'No note yet. Notes post after ' + who + "'s session."
+              : s.visited ? 'No note yet. Notes usually post by the end of the day.'
+              : s.session_today ? who + " wasn't in today, so there's no note."
+              : who + " has no session today, so there's no note.";
             return h('li', null, h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(s.name)),
-              h('div', { class: 'grow' }, h('strong', null, s.name), h('div', { class: 'muted small' }, s.visited
-                ? 'No note yet. Notes usually post by the end of the day.'
-                : first(s.name) + " wasn't in today, so there's no note.")));
+              h('div', { class: 'grow' }, h('strong', null, s.name), h('div', { class: 'muted small' }, why)));
           }
           return h('li', { style: 'align-items:flex-start' }, h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(s.name)),
             h('div', { class: 'grow' }, h('strong', null, s.name), ratingSummary(n.ratings),
@@ -416,6 +437,6 @@
     },
   });
 
-  // A "note is ready" notification opens the parent's Notes.
-  App.inboxLink('daily_note', 'notes');
+  // A "note is ready" notification opens the parent's Notes at that note's day.
+  App.inboxLink('daily_note', n => 'notes/note/' + n.ref_id);
 })();

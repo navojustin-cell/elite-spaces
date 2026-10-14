@@ -7,7 +7,8 @@
      staff accounts (directors and HQ), a director's own location settings, my account.
    - Locations (HQ): every location, its settings and its directors.
    - Home cards: students waiting for a parent's approval; a nudge to replace a
-     temporary password. */
+     temporary password.
+   - Inbox links: family account items open Family; a new director's opens Location settings. */
 (function () {
   'use strict';
   const { h } = App;
@@ -40,13 +41,14 @@
 
   // Form submit: the submit button is disabled while it runs, and an API error
   // is shown inside the form (role=alert) where the person is looking.
-  function onSubmit(form, err, fn) {
+  // `more(error)` may add a way forward to that message (a Resend button).
+  function onSubmit(form, err, fn, more) {
     form.addEventListener('submit', async e => {
       e.preventDefault();
       err.replaceChildren();
       const btn = form.querySelector('button[type=submit]');
       if (btn) btn.disabled = true;
-      try { await fn(); } catch (x) { err.replaceChildren(h('div', { class: 'notice notice-danger' }, x.message)); }
+      try { await fn(); } catch (x) { err.replaceChildren(h('div', { class: 'notice notice-danger' }, x.message, more && more(x))); }
       finally { if (btn) btn.disabled = false; }
     });
   }
@@ -75,14 +77,10 @@
     return btns;
   }
 
-  // Swap `slot`'s content for a one-sentence confirmation that names the consequence.
-  function confirmIn(slot, message, yesLabel, noLabel, fn) {
-    const before = [...slot.childNodes];
-    const yes = h('button', { class: 'btn btn-danger', type: 'button', onclick: e => App.run(e.currentTarget, fn) }, yesLabel);
-    const no = h('button', { class: 'btn', type: 'button', onclick: () => { slot.replaceChildren(...before); } }, noLabel);
-    slot.replaceChildren(h('div', { class: 'notice notice-warn', role: 'group', 'aria-label': yesLabel },
-      h('p', null, message), h('div', { class: 'row' }, yes, no)));
-    yes.focus();
+  // Ask first with the shell's confirm (it takes over `box` while open, the safe
+  // button comes first and has focus), then run the action on the button that asked.
+  async function confirmThen(btn, box, opts, fn) {
+    if (await App.confirm(Object.assign({ el: box, opener: btn, danger: true }, opts))) await App.run(btn, fn);
   }
 
   // A few things survive one re-render (an invite code, a temporary password):
@@ -99,6 +97,7 @@
       .ac-facts dd { margin: 0; font-weight: 600; }
       .ac-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .08em; overflow-wrap: anywhere; margin: .25rem 0 .75rem; }
       .ac-section { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+      .ac-contact a { display: inline-flex; align-items: center; min-height: 44px; }
     `));
   }
 
@@ -299,6 +298,14 @@
     App.toast(done);
     App.refresh();
   }
+  // A second invite to an email the family already invited is refused: offer
+  // that invite's Resend right under the message.
+  function resendOffer(inv, name) {
+    if (!inv) return null;
+    return h('div', { class: 'row', style: 'margin-top:.5rem' },
+      h('button', { class: 'btn', type: 'button', onclick: e => resend(e.currentTarget, inv.id) },
+        inv.expired ? 'Send ' + first(name) + ' a new code' : 'Resend ' + first(name) + "'s invite"));
+  }
 
   function shareBox(res) {
     const inv = res.invite;
@@ -331,17 +338,19 @@
     if (s.state === 'awaiting_approval') {
       actions.append(
         h('button', { class: 'btn btn-primary', type: 'button', onclick: e => approve(e.currentTarget, s) }, 'Approve ' + name1),
-        h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => confirmIn(actions,
-          `Decline ${name1}? Their account won't be created and the invite stops working.`, 'Decline ' + name1, 'Keep waiting',
-          () => cancelInvite(invId, name1 + ' was declined.')) }, 'Decline'));
+        h('button', { class: 'btn btn-ghost', type: 'button', onclick: e => confirmThen(e.currentTarget, actions, {
+          title: `Decline ${name1}?`, body: "Their account won't be created and the invite stops working.",
+          confirmLabel: 'Decline ' + name1, cancelLabel: 'Keep waiting',
+        }, () => cancelInvite(invId, name1 + ' was declined.')) }, 'Decline'));
     } else if ((s.state === 'invited' || s.state === 'invite_expired') && invId) {
       actions.append(
         h('button', { class: 'btn', type: 'button', onclick: e => resend(e.currentTarget, invId) }, s.state === 'invite_expired' ? 'Send a new code' : 'Resend'),
-        h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => confirmIn(actions,
-          `Cancel ${name1}'s invite? The code stops working and ${name1} won't be added.`, 'Cancel invite', 'Keep invite',
-          () => cancelInvite(invId, name1 + "'s invite was cancelled.")) }, 'Cancel invite'));
+        h('button', { class: 'btn btn-ghost', type: 'button', onclick: e => confirmThen(e.currentTarget, actions, {
+          title: `Cancel ${name1}'s invite?`, body: `The code stops working and ${name1} won't be added.`,
+          confirmLabel: `Cancel ${name1}'s invite`, cancelLabel: 'Keep invite',
+        }, () => cancelInvite(invId, 'Invite to ' + name1 + ' cancelled.')) }, 'Cancel invite'));
     }
-    const contact = s.email || (s.invite && (s.invite.email || s.invite.phone)) || s.phone;
+    const contact = [s.email || (s.invite && s.invite.email), s.phone || (s.invite && s.invite.phone)].filter(Boolean).join(' · ') || null;
     return h('li', null, avatar(s.name), h('div', { class: 'grow' },
       h('div', { class: 'row between' }, h('strong', null, s.name), badge(state[0], state[1])),
       contact && h('div', { class: 'muted small' }, contact),
@@ -350,7 +359,7 @@
       actions.childNodes.length ? actions : null));
   }
 
-  function inviteStudentForm(close) {
+  function inviteStudentForm(close, students) {
     const name = input('text', { autocomplete: 'off', required: true, maxlength: 80 });
     const email = input('email', { autocomplete: 'off' });
     const phone = input('tel', { autocomplete: 'off' });
@@ -368,11 +377,14 @@
       const res = await App.api.post(A + '/students/invite', { name: name.value, email: email.value, phone: phone.value });
       flash = { kind: 'share', res };
       App.refresh();
+    }, x => {
+      const s = x.code === 'invite_pending' && students.find(s => s.invite && !s.invite.accepted_at && s.invite.email === email.value.trim().toLowerCase());
+      return s && resendOffer(s.invite, s.name);
     });
     return form;
   }
 
-  function inviteGuardianForm(close) {
+  function inviteGuardianForm(close, invites) {
     const name = input('text', { autocomplete: 'off', required: true, maxlength: 80 });
     const email = input('email', { autocomplete: 'off', required: true });
     const err = alertBox();
@@ -388,6 +400,9 @@
       const res = await App.api.post(A + '/guardians/invite', { name: name.value, email: email.value });
       flash = { kind: 'share', res };
       App.refresh();
+    }, x => {
+      const inv = x.code === 'invite_pending' && invites.find(i => i.email === email.value.trim().toLowerCase());
+      return inv && resendOffer(inv, inv.name);
     });
     return form;
   }
@@ -433,7 +448,7 @@
 
       // Students
       const stSlot = h('div');
-      const [inviteBtn] = slotButtons(stSlot, [['Invite a student', inviteStudentForm, 'btn-primary']]);
+      const [inviteBtn] = slotButtons(stSlot, [['Invite a student', close => inviteStudentForm(close, data.students), 'btn-primary']]);
       const stList = h('ul', { class: 'list' }, ...data.students.map(studentItem));
       el.append(h('section', { class: 'card', 'aria-labelledby': 'ac-st' },
         h('div', { class: 'row between' }, h('h2', { id: 'ac-st', style: 'margin:0' }, 'Students'), inviteBtn),
@@ -444,7 +459,7 @@
 
       // Guardians
       const gSlot = h('div');
-      const [gBtn] = slotButtons(gSlot, [['Invite a guardian', inviteGuardianForm]]);
+      const [gBtn] = slotButtons(gSlot, [['Invite a guardian', close => inviteGuardianForm(close, data.invites)]]);
       const gList = h('ul', { class: 'list' });
       for (const g of data.guardians) {
         gList.append(h('li', null, avatar(g.name), h('div', { class: 'grow' },
@@ -454,9 +469,10 @@
       for (const inv of data.invites) {
         const actions = h('div', { class: 'row', style: 'margin-top:.5rem' },
           h('button', { class: 'btn', type: 'button', onclick: e => resend(e.currentTarget, inv.id) }, inv.expired ? 'Send a new code' : 'Resend'),
-          h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => confirmIn(actions,
-            `Cancel the invite to ${inv.name}? The code stops working.`, 'Cancel invite', 'Keep invite',
-            () => cancelInvite(inv.id, 'Invite to ' + first(inv.name) + ' cancelled.')) }, 'Cancel invite'));
+          h('button', { class: 'btn btn-ghost', type: 'button', onclick: e => confirmThen(e.currentTarget, actions, {
+            title: `Cancel the invite to ${inv.name}?`, body: 'The code stops working.',
+            confirmLabel: 'Cancel invite to ' + first(inv.name), cancelLabel: 'Keep invite',
+          }, () => cancelInvite(inv.id, 'Invite to ' + first(inv.name) + ' cancelled.')) }, 'Cancel invite'));
         gList.append(h('li', null, avatar(inv.name), h('div', { class: 'grow' },
           h('div', { class: 'row between' }, h('strong', null, inv.name),
             inv.expired ? badge('badge-danger', 'Invite expired') : badge('', 'Invited ' + App.fmtDate(inv.created_at, { weekday: undefined }))),
@@ -470,6 +486,11 @@
       el.append(accountCard());
     },
   });
+
+  // Inbox items about the family (a student accepted or was declined, a guardian
+  // joined) open Family; a new director's opens their location settings.
+  App.inboxLink('user', n => /^account_(student|guardian)_/.test(n.kind) ? 'family' : null);
+  App.inboxLink('location', 'people/location');
 
   // Home: students waiting for approval, or a first step for a brand-new family.
   App.card({
@@ -580,13 +601,14 @@
           h('td', null, badge(st[0], st[1])),
           h('td', null, s.parents.length ? h('ul', { class: 'list' }, ...s.parents.map(p => h('li', { style: 'padding:.25rem 0;border:0;display:block' },
             h('div', null, p.name, p.link_status === 'pending' ? h('span', { class: 'muted small' }, ' (not approved yet)') : null),
-            h('div', { class: 'small' },
+            h('div', { class: 'small ac-contact' },
               p.phone && h('a', { href: 'tel:' + p.phone.replace(/[^\d+]/g, ''), 'aria-label': 'Call ' + p.name + ' at ' + p.phone }, p.phone),
               p.phone && p.email ? ' · ' : '',
               p.email && h('a', { href: 'mailto:' + p.email, 'aria-label': 'Email ' + p.name + ' at ' + p.email }, p.email)))))
             : h('span', { class: 'muted small' }, 'No parent linked'))));
       }
-      out.replaceChildren(head, h('div', { class: 'card table-wrap' }, h('table', { class: 'table' },
+      // Wider than a phone: the scroll box takes focus so arrow keys can scroll it.
+      out.replaceChildren(head, h('div', { class: 'card table-wrap', tabindex: '0', role: 'region', 'aria-label': 'Students and their parents or guardians' }, h('table', { class: 'table' },
         h('caption', { class: 'sr-only' }, 'Students and their parents or guardians'),
         h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Student'), isHq && h('th', { scope: 'col' }, 'Location'),
           h('th', { scope: 'col' }, 'Account'), h('th', { scope: 'col' }, 'Parents and guardians'))),
@@ -637,18 +659,20 @@
         else if (!canManage) cell.append(h('span', { class: 'muted small' }, 'HQ manages directors'));
         else {
           const row = h('div', { class: 'row' });
-          row.append(h('button', { class: 'btn', type: 'button', 'aria-label': 'Reset password for ' + s.name, onclick: () => confirmIn(row,
-            `Reset ${first(s.name)}'s password? Their current password stops working and they get a new temporary one.`, 'Reset password', 'Keep it',
-            async () => {
-              const r = await App.api.post(A + '/staff/' + s.id + '/reset-password');
-              shown.replaceChildren(tempPasswordBox(r, 'New temporary password for ' + s.name));
-              focusSoon('ac-temp-pw');
-              await load();
-            }) }, 'Reset password'));
+          row.append(h('button', { class: 'btn', type: 'button', 'aria-label': 'Reset password for ' + s.name, onclick: e => confirmThen(e.currentTarget, row, {
+            title: `Reset ${first(s.name)}'s password?`, body: 'Their current password stops working and they get a new temporary one.',
+            confirmLabel: `Reset ${first(s.name)}'s password`, cancelLabel: 'Keep current password',
+          }, async () => {
+            const r = await App.api.post(A + '/staff/' + s.id + '/reset-password');
+            shown.replaceChildren(tempPasswordBox(r, 'New temporary password for ' + s.name));
+            focusSoon('ac-temp-pw');
+            await load();
+          }) }, 'Reset password'));
           if (s.active) {
-            row.append(h('button', { class: 'btn btn-ghost', type: 'button', 'aria-label': 'Deactivate ' + s.name, onclick: () => confirmIn(row,
-              `Deactivate ${s.name}? They're signed out now and can't sign in until the account is reactivated.`, 'Deactivate', 'Keep active',
-              async () => { await App.api.post(A + '/staff/' + s.id + '/deactivate'); App.toast(s.name + ' was deactivated.'); await load(); }) }, 'Deactivate'));
+            row.append(h('button', { class: 'btn btn-ghost', type: 'button', 'aria-label': 'Deactivate ' + s.name, onclick: e => confirmThen(e.currentTarget, row, {
+              title: `Deactivate ${s.name}?`, body: "They're signed out now and can't sign in until the account is reactivated.",
+              confirmLabel: 'Deactivate ' + first(s.name), cancelLabel: 'Keep active',
+            }, async () => { await App.api.post(A + '/staff/' + s.id + '/deactivate'); App.toast(s.name + ' was deactivated.'); await load(); }) }, 'Deactivate'));
           } else {
             row.append(h('button', { class: 'btn', type: 'button', 'aria-label': 'Reactivate ' + s.name, onclick: async e => {
               const r = await App.run(e.currentTarget, () => App.api.post(A + '/staff/' + s.id + '/reactivate'));
@@ -664,7 +688,7 @@
           h('td', null, status),
           cell));
       }
-      out.replaceChildren(h('div', { class: 'card table-wrap' }, h('table', { class: 'table' },
+      out.replaceChildren(h('div', { class: 'card table-wrap', tabindex: '0', role: 'region', 'aria-label': 'Staff accounts' }, h('table', { class: 'table' },
         h('caption', { class: 'sr-only' }, 'Staff accounts'),
         h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Name'), isHq && h('th', { scope: 'col' }, 'Location'),
           h('th', { scope: 'col' }, 'Role'), h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col' }, 'Actions'))),

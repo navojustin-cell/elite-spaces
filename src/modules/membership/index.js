@@ -93,10 +93,13 @@ module.exports = {
       const today = svc.todayAt(ctx, loc);
       const parents = db.prepare(`SELECT p.name FROM family_links fl JOIN users p ON p.id = fl.parent_id
         WHERE fl.student_id = ? AND fl.status = 'active' ORDER BY p.name`);
-      const students = db.prepare("SELECT id, name FROM users WHERE role = 'student' AND active = 1 AND location_id = ? ORDER BY name")
+      const students = db.prepare("SELECT id, name, password_hash IS NOT NULL AS accepted FROM users WHERE role = 'student' AND active = 1 AND location_id = ? ORDER BY name")
         .all(loc.id).map(s => {
           const ps = parents.all(s.id).map(p => p.name);
           return { id: s.id, name: s.name, parents: ps, linked: ps.length > 0,
+            // The account's state, decided the way People's roster decides it (accounts):
+            // a parent approved the link, or the student set a password and waits for that, or not even that yet.
+            account: ps.length ? 'active' : s.accepted ? 'awaiting_approval' : 'invited',
             membership: svc.describe(membershipOf(ctx, s.id), today), ...svc.slotCounts(ctx, s.id, today) };
         });
       res.json({ location: loc, today, soon_days: svc.SOON_DAYS, students });

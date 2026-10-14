@@ -2,6 +2,8 @@
 // Enrollment mutations: each breaks one rule of PRD 3; enrollment.test.js must catch it.
 const S = 'src/modules/enrollment/service.js';
 const I = 'src/modules/enrollment/index.js';
+const V = 'public/js/views/enrollment.js';
+const SEED = 'src/modules/enrollment/seed.js';
 
 module.exports = [
   // ---- EN-1: weekly slots only ----
@@ -160,4 +162,31 @@ module.exports = [
     find: "const valid = !!m && m.status === 'active' && m.expires_on >= today(ctx, loc);", repl: 'const valid = false;' },
   { name: 'a lapsed membership is told its paused spot is over the limit', covers: ['EN-4'], file: S,
     find: "const valid = !!m && m.status === 'active' && m.expires_on >= today(ctx, loc);", repl: 'const valid = !!m;' },
+
+  // ---- the Schedule screen (views/enrollment.js) ----
+  // EN-6: Drop asks inline with App.confirm, safe answer first, both naming the day.
+  { name: 'Drop asks with window.confirm', covers: ['EN-6'], file: V,
+    find: "const days = DAY[e.weekday] + 's';\n    const ok = await App.confirm({", repl: "const days = DAY[e.weekday] + 's';\n    const ok = confirm('Drop?') && await App.confirm({" },
+  { name: "Drop's answers do not name the day", covers: ['EN-6'], file: V,
+    find: "confirmLabel: 'Drop ' + days, cancelLabel: 'Keep ' + days,", repl: "confirmLabel: 'OK', cancelLabel: 'Cancel'," },
+  { name: 'Drop goes ahead whatever the answer', covers: ['EN-6'], file: V,
+    find: '    if (!ok) return;\n    const out = await App.run(btn, () => App.api.post(`${API}/enrollments/', repl: '    const out = await App.run(btn, () => App.api.post(`${API}/enrollments/' },
+  { name: 'the Drop question opens away from its row', covers: ['EN-6'], file: V,
+    find: '      el: btn.parentNode, opener: btn, danger: true,\n      title: `Drop', repl: '      opener: btn, danger: true,\n      title: `Drop' },
+  // EN-3: request notices open Schedule from the Inbox.
+  { name: 'request notices in the Inbox open nothing', covers: ['EN-3'], file: V,
+    find: "App.inboxLink('enrollment_request', 'schedule');", repl: '' },
+  // EN-4 / MB-5: a lapsed student hears one message, the one the Home membership card uses.
+  { name: 'a lapsed student gets no word at the top of Schedule', covers: ['EN-4'], file: V,
+    find: 'if (lapsed(me.membership)) {', repl: 'if (false) {' },
+  { name: 'a lapsed student is not told their sessions are paused', covers: ['EN-4'], file: V,
+    find: "lapsedText(me.enrollments.some(e => e.status === 'paused'), me.location.name)", repl: 'lapsedText(false, me.location.name)' },
+  { name: 'the Ask card words a lapse its own way', covers: ['EN-4'], file: V,
+    find: "if (lapsed(m)) return h('div'", repl: "if (false) return h('div'" },
+
+  // ---- the demo data (seed.js) ----
+  { name: "the demo request's Inbox notice carries the seeding time, not the request's", covers: ['EN-3'], file: SEED,
+    find: 'ctx.clock.set(asked);', repl: '' },
+  { name: 'seeding leaves the clock on the request time', covers: ['EN-3'], file: SEED,
+    find: 'ctx.clock.set(clock);', repl: '' },
 ];

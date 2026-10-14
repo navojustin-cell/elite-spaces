@@ -39,14 +39,18 @@
     return h('div', { class: 'notice notice-warn', role: 'note' }, m.message || (first(name) + " can't add sessions right now."));
   }
 
+  // A lapsed membership, said to the student the same way on Home and Schedule
+  // (the membership view's Home card uses these exact words).
+  const lapsed = m => m.code === 'membership_inactive' || m.code === 'membership_expired';
+  const lapsedText = (paused, place) => (paused ? 'Your membership isn\'t active, so your sessions are paused.' : 'Your membership isn\'t active.') +
+    ` Ask a parent or the front desk at ${place} to renew it.`;
+
   // The same reasons, said to the student (they can't drop or renew themselves).
   function studentNotice(m) {
     if (m.can_add) return null;
-    const exp = m.expires_on && App.fmtDate(m.expires_on, { weekday: undefined, year: 'numeric' });
+    if (lapsed(m)) return h('div', { class: 'notice notice-warn', role: 'note' }, 'Nothing new can be added until it\'s renewed. You can still ask; your parent will see this too.');
     const text = {
       weekly_cap: `You have ${m.used} weekly sessions, the most your membership allows. A parent can drop one to make room.`,
-      membership_inactive: 'Your membership is inactive. A parent can ask the front desk to reactivate it.',
-      membership_expired: `Your membership expired on ${exp}. A parent can renew it at the front desk.`,
       no_membership: "You don't have a membership yet. A parent can set one up with the front desk.",
     }[m.code] || m.message;
     return h('div', { class: 'notice notice-warn', role: 'note' }, text + ' You can still ask; your parent will see this too.');
@@ -131,44 +135,69 @@
     App.refresh();
   }
 
+  // Every question below is asked inline with App.confirm, in place of the
+  // buttons that raised it (`el`), safe answer first.
+
+  // A full slot: offer its waitlist (EN-5).
+  const offerWaitlist = (btn, message, student, slot) => App.confirm({
+    el: btn.parentNode, opener: btn, title: `${slot.name} on ${DAY[slot.weekday]}s is full`, body: message,
+    confirmLabel: `Add ${first(student.name)} to the waitlist`, cancelLabel: 'Don\'t join',
+  });
+
   async function enrollIn(btn, student, slot) {
     btn.disabled = true;
+    let full = null;
     try {
       await App.api.post(API + '/enroll', { studentId: student.id, sessionId: slot.session_id, weekday: slot.weekday });
       App.toast(`${first(student.name)} is enrolled: ${slot.name}, ${slotText(slot)}.`);
     } catch (e) {
-      if (e.code === 'full') {
-        if (confirm(e.message + '\n\nAdd ' + first(student.name) + ' to the waitlist?')) await joinWaitlist(null, student, slot);
-      } else App.toast(e.message, 'error');
+      if (e.code === 'full') full = e.message; else App.toast(e.message, 'error');
     } finally { btn.disabled = false; }
+    if (full && await offerWaitlist(btn, full, student, slot)) await joinWaitlist(null, student, slot);
     App.refresh();
   }
 
+  // EN-6: the row turns into the question; the button names the day it drops.
   async function dropEnrollment(btn, student, e) {
-    const ok = confirm(`Drop ${first(student.name)} from ${e.name} on ${DAY[e.weekday]}s (${times(e)})?\n\n` +
-      'This ends the weekly spot. The seat goes to the next family on the waitlist, and you can add it again later if there is room.');
+    const days = DAY[e.weekday] + 's';
+    const ok = await App.confirm({
+      el: btn.parentNode, opener: btn, danger: true,
+      title: `Drop ${first(student.name)} from ${e.name} on ${days}?`,
+      body: `This ends the weekly spot (${times(e)}). The seat goes to the next family on the waitlist, and you can add it again later if there is room.`,
+      confirmLabel: 'Drop ' + days, cancelLabel: 'Keep ' + days,
+    });
     if (!ok) return;
     const out = await App.run(btn, () => App.api.post(`${API}/enrollments/${e.id}/drop`));
-    if (out) { App.toast(`Dropped ${e.name} on ${DAY[e.weekday]}s.`); App.refresh(); }
+    if (out) { App.toast(`Dropped ${e.name} on ${days}.`); App.refresh(); }
   }
 
   async function leaveWaitlist(btn, student, w) {
-    if (!confirm(`Take ${first(student.name)} off the waitlist for ${w.name} on ${DAY[w.weekday]}s? They'll lose their place in line.`)) return;
+    const ok = await App.confirm({
+      el: btn.parentNode, opener: btn, danger: true,
+      title: `Take ${first(student.name)} off the waitlist for ${w.name} on ${DAY[w.weekday]}s?`, body: 'They\'ll lose their place in line.',
+      confirmLabel: 'Leave the waitlist', cancelLabel: 'Keep their place',
+    });
+    if (!ok) return;
     const out = await App.run(btn, () => App.api.post(`${API}/waitlist/${w.id}/leave`));
     if (out) { App.toast('Removed from the waitlist.'); App.refresh(); }
   }
 
   async function decide(btn, r, approve) {
-    if (!approve && !confirm(`Decline ${first(r.student_name)}'s request for ${r.session_name} on ${DAY[r.weekday]}s? ${first(r.student_name)} will be told.`)) return;
+    const name = first(r.student_name);
+    if (!approve && !(await App.confirm({
+      el: btn.parentNode, opener: btn,
+      title: `Decline ${name}'s request for ${r.session_name} on ${DAY[r.weekday]}s?`, body: `${name} will be told.`,
+      confirmLabel: `Decline ${name}'s request`, cancelLabel: 'Keep it waiting',
+    }))) return;
     const out = await App.run(btn, () => App.api.post(`${API}/requests/${r.id}/${approve ? 'approve' : 'decline'}`));
     if (!out) return App.refresh();
-    if (out.outcome === 'declined') App.toast(`Declined. ${first(r.student_name)} has been told.`);
-    else if (out.outcome === 'enrolled') App.toast(`Approved. ${first(r.student_name)} is enrolled in ${r.session_name}.`);
+    if (out.outcome === 'declined') App.toast(`Declined. ${name} has been told.`);
+    else if (out.outcome === 'enrolled') App.toast(`Approved. ${name} is enrolled in ${r.session_name}.`);
     else if (out.outcome === 'full') {
-      if (confirm(out.message + '\n\nAdd ' + first(r.student_name) + ' to the waitlist?')) {
-        await joinWaitlist(null, { id: r.student_id, name: r.student_name }, { session_id: r.session_id, weekday: r.weekday, name: r.session_name });
-      }
-    } else App.toast(`Approved, but ${first(r.student_name)} couldn't be enrolled yet. ${out.message}`, 'error');
+      const slot = { session_id: r.session_id, weekday: r.weekday, name: r.session_name };
+      const student = { id: r.student_id, name: r.student_name };
+      if (await offerWaitlist(btn, out.message, student, slot)) await joinWaitlist(null, student, slot);
+    } else App.toast(`Approved, but ${name} couldn't be enrolled yet. ${out.message}`, 'error');
     App.refresh();
   }
 
@@ -294,6 +323,9 @@
     const [cat, sched] = await Promise.all([App.api.get(`${API}/students/${me.id}/catalog`), App.api.get(scheduleUrl(me.id, from))]);
     el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'My schedule'),
       h('p', null, `Your weekly sessions at ${me.location.name}.`))));
+    if (lapsed(me.membership)) {
+      el.append(h('div', { class: 'notice notice-warn', role: 'note' }, lapsedText(me.enrollments.some(e => e.status === 'paused'), me.location.name)));
+    }
 
     el.append(weekCard(sched, d => App.go('schedule', me.id, d), from ? 'Week' : 'This week'));
 
@@ -336,6 +368,8 @@
     id: 'schedule', title: 'Schedule', icon: '📅', roles: ['parent', 'student'], order: 20,
     render: (el, params) => (App.role() === 'parent' ? renderParent(el, params) : renderStudent(el, params)),
   });
+  // A student's request, and the parent's answer to it, open Schedule from the Inbox.
+  App.inboxLink('enrollment_request', 'schedule');
 
   // ---------- Home cards ----------
 

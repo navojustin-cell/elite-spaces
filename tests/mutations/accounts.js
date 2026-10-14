@@ -64,6 +64,35 @@ module.exports = [
   { name: 'the inviting parent is not told the guardian joined', covers: ['AC-2'], file: F,
     find: 'notify.send(ctx, [inv.invited_by], {', repl: 'notify.send(ctx, [], {' },
 
+  // ---- one open invite per email in a family; no unusable guardian invites
+  { name: 'a second guardian invite to the same email is sent', covers: ['AC-2'], file: F,
+    find: 'if (twinGuardian) throw', repl: 'if (false) throw' },
+  { name: 'a second student invite to the same email is sent', covers: ['AC-3'], file: F,
+    find: 'if (twinStudent) throw', repl: 'if (false) throw' },
+  { name: 'a co-guardian can send a second guardian invite to the same email', covers: ['AC-2'], file: F,
+    find: 'const fam = coGuardians(db, parentId);', repl: 'const fam = [parentId];' },
+  { name: 'a guardian invite to the family\'s own student\'s email is sent', covers: ['AC-2'], file: F,
+    find: 'if (kid) throw bad(', repl: 'if (false) throw bad(' },
+  { name: 'a guardian invite to the email a pending student was invited at is sent', covers: ['AC-2'], file: F,
+    find: '(s.email = ?2 OR EXISTS (SELECT 1 FROM account_invites i', repl: '(s.email = ?2 OR 0 AND EXISTS (SELECT 1 FROM account_invites i' },
+
+  // ---- the invite accept screen never confirms that an email has an account
+  { name: 'the accept screen says the email already has an account', covers: ['AC-1', 'NF-1'], file: F,
+    find: "conflict('email_unavailable', 'Already have an account? Sign in first, then open this invite again. '",
+    repl: "conflict('email_taken', 'That email already has an ELITE Spaces account. '" },
+  { name: 'the accept screen answers differently when staff hold the email', covers: ['AC-1', 'NF-1'], file: F,
+    find: 'if (u.emailTaken(db, addr, student.id)) throw emailUnavailable(!!row.email);',
+    repl: "if (u.emailTaken(db, addr, student.id)) throw emailUnavailable(!!row.email || !!db.prepare(\"SELECT 1 FROM users WHERE email = ? AND role = 'staff'\").get(addr));" },
+
+  // ---- declining a student who accepted
+  { name: 'declining leaves the accepted item asking for approval', covers: ['AC-3'], file: F,
+    find: "WHERE kind = 'account_student_accepted' AND ref_type = 'user' AND ref_id = ?`)",
+    repl: "WHERE kind = 'account_student_accepted' AND ref_type = 'user' AND ref_id = ? AND 0`)" },
+  { name: 'declining one student rewrites every accepted item', covers: ['AC-3'], file: F,
+    find: "AND ref_type = 'user' AND ref_id = ?`)", repl: "AND ref_type = 'user' AND ? IS NOT NULL`)" },
+  { name: 'the other guardians are not told about a decline', covers: ['AC-3', 'AC-2'], file: F,
+    find: 'notify.send(ctx, others, {', repl: 'notify.send(ctx, [], {' },
+
   // ---- NF-1 family scope
   { name: 'the family screen lists other families\' students', covers: ['NF-1'], file: F,
     find: "WHERE fl.parent_id = ? AND s.role = 'student' AND s.active = 1 ORDER BY s.name, s.id",

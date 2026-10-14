@@ -229,4 +229,42 @@ module.exports = [
   // ---- CI-2 / CI-4: the radius applies to check-out scans too ----
   { name: 'skip the radius check when checking out', covers: ['CI-2', 'CI-4'], file: IDX,
     find: 'if (!insideRadius(loc, b.lat, b.lng)) {', repl: 'if (!insideRadius(loc, b.lat, b.lng) && !svc.openVisit(ctx, student.id, loc.id, time.localDate(loc, now))) {' },
+  { name: 'outside the radius while checking out, tell the student to ask staff to check them in', covers: ['CI-2', 'CI-4'], file: IDX,
+    find: "throw refuse('outside_radius', open", repl: "throw refuse('outside_radius', false" },
+  { name: 'wrong-location refusal gives no next step', covers: ['CI-2'], file: IDX,
+    find: "+ `Scan the code at ${home ? home.name : 'your own location'}, or ask staff at the front desk.`", repl: "+ ''" },
+
+  // ---- CI-4: a quick scan after checking out asks before checking back in ----
+  { name: 'check back in right after a check-out without asking', covers: ['CI-4', 'CI-6'], file: IDX,
+    find: 'if (last && now - last.check_out_at < CONFIRM_MS && b.confirm !== true) {', repl: 'if (false) {' },
+  { name: 'a confirmed check back in is still refused', covers: ['CI-4'], file: IDX,
+    find: 'last && now - last.check_out_at < CONFIRM_MS && b.confirm !== true', repl: 'last && now - last.check_out_at < CONFIRM_MS' },
+  { name: 'the check-back-in question looks at the first check-out of the day, not the latest', covers: ['CI-4'], file: SVC,
+    find: 'ORDER BY check_out_at DESC, id DESC LIMIT 1`).get(studentId, locId, date);', repl: 'ORDER BY check_out_at, id LIMIT 1`).get(studentId, locId, date);' },
+  { name: 'check-out response leaves out the session', covers: ['CI-4'], file: IDX,
+    find: 'location: svc.publicLocation(loc), session: svc.visitSession(ctx, loc, visit) });', repl: 'location: svc.publicLocation(loc) });' },
+
+  // ---- CI-7 / NF-2: manual entries show who and why ----
+  { name: 'In the building leaves out who checked a visit in by hand', covers: ['CI-7', 'NF-2'], file: SVC,
+    find: 'ib.name AS checked_in_by_name', repl: 'NULL AS checked_in_by_name' },
+  { name: 'In the building leaves out who checked a visit out by hand', covers: ['CI-7', 'NF-2'], file: SVC,
+    find: 'ob.name AS checked_out_by_name', repl: 'NULL AS checked_out_by_name' },
+  { name: 'In the building leaves out the manual check-in reason', covers: ['CI-7', 'NF-2'], file: SVC,
+    find: "${reasonOf('checkin.manual_checkin')} AS checkin_reason", repl: 'NULL AS checkin_reason' },
+  { name: 'In the building leaves out the manual check-out reason', covers: ['CI-7', 'NF-2'], file: SVC,
+    find: "${reasonOf('checkin.manual_checkout')} AS checkout_reason", repl: 'NULL AS checkout_reason' },
+  { name: "a row shows the reason from another visit's audit entry", covers: ['CI-7', 'NF-2'], file: SVC,
+    find: 'a.target_id = v.id AND', repl: 'a.target_id IS NOT NULL AND' },
+  { name: 'Needs review leaves out who checked the visit in and why', covers: ['CI-7', 'NF-2'], file: SVC,
+    find: '}, byFields(v)));', repl: '}));' },
+
+  // ---- CI-7: a manual check-in warns about an inactive membership ----
+  { name: 'manual check-in ignores an inactive membership', covers: ['CI-7'], file: IDX,
+    find: 'if (!svc.membershipOk(ctx, student.id, time.localDate(loc, now)) && b.override !== true) {', repl: 'if (false) {' },
+  { name: 'staff cannot confirm a manual check-in for an inactive membership', covers: ['CI-7'], file: IDX,
+    find: 'time.localDate(loc, now)) && b.override !== true) {', repl: 'time.localDate(loc, now))) {' },
+  { name: 'staff search says every membership is active', covers: ['CI-7'], file: IDX,
+    find: 'membership_active: svc.membershipOk(ctx, s.id, today),', repl: 'membership_active: true,' },
+  { name: 'expected list says every membership is active', covers: ['CI-7'], file: SVC,
+    find: 'membership_active: membershipOk(ctx, s.student_id, today) });', repl: 'membership_active: true });' },
 ];

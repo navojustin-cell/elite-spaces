@@ -110,6 +110,18 @@ function closeVisit(ctx, visit, { ms, method, staff = null }) {
   return getVisit(ctx, visit.id);
 }
 
+// The student's latest finished visit that day, for the "check back in?" question.
+function lastCheckout(ctx, studentId, locId, date) {
+  return ctx.db.prepare(`SELECT * FROM visits WHERE student_id = ? AND location_id = ? AND local_date = ? AND check_out_at IS NOT NULL
+    ORDER BY check_out_at DESC, id DESC LIMIT 1`).get(studentId, locId, date);
+}
+
+// The session a visit counted toward, with that day's start and end, or null.
+function visitSession(ctx, loc, v) {
+  const s = v.session_id ? ctx.db.prepare('SELECT id, name, start_time, end_time FROM sessions WHERE id = ?').get(v.session_id) : null;
+  return s ? { id: s.id, name: s.name, start_at: time.toMs(loc, v.local_date, s.start_time), end_at: time.toMs(loc, v.local_date, s.end_time) } : null;
+}
+
 // ---------- wording ----------
 
 const firstName = name => String(name || '').split(' ')[0];
@@ -166,18 +178,30 @@ function announceCheckout(ctx, { student, loc, visit, staff = null }) {
 
 const publicLocation = loc => ({ id: loc.id, name: loc.name, timezone: loc.timezone, close_time: loc.close_time });
 
+// Who checked a visit in or out by hand, and the reason they gave (saved with
+// the audit entry), so staff rows can say "Checked in by Chris Ortiz · Phone is dead".
+const reasonOf = action => `(SELECT json_extract(a.detail, '$.reason') FROM audit_log a
+    WHERE a.target_type = 'visit' AND a.target_id = v.id AND a.action = '${action}' ORDER BY a.id DESC LIMIT 1)`;
+const BY_SQL = `ib.name AS checked_in_by_name, ob.name AS checked_out_by_name,
+    ${reasonOf('checkin.manual_checkin')} AS checkin_reason, ${reasonOf('checkin.manual_checkout')} AS checkout_reason`;
+const BY_JOIN = 'LEFT JOIN users ib ON ib.id = v.checked_in_by LEFT JOIN users ob ON ob.id = v.checked_out_by';
+const byFields = v => ({
+  checked_in_by_name: v.checked_in_by_name, checkin_reason: v.checkin_reason,
+  checked_out_by_name: v.checked_out_by_name, checkout_reason: v.checkout_reason,
+});
+
 // Staff "In the building" (CI-7): who is here, who is expected and has not
 // arrived, who has left today, and flagged visits still waiting for review.
 function building(ctx, loc, ms) {
   const today = time.localDate(loc, ms);
-  const visits = ctx.db.prepare(`SELECT v.*, u.name AS student_name, s.name AS session_name, s.end_time
-    FROM visits v JOIN users u ON u.id = v.student_id LEFT JOIN sessions s ON s.id = v.session_id
+  const visits = ctx.db.prepare(`SELECT v.*, u.name AS student_name, s.name AS session_name, s.end_time, ${BY_SQL}
+    FROM visits v JOIN users u ON u.id = v.student_id LEFT JOIN sessions s ON s.id = v.session_id ${BY_JOIN}
     WHERE v.location_id = ? AND v.local_date = ? ORDER BY v.check_in_at, v.id`).all(loc.id, today);
-  const row = v => ({
+  const row = v => Object.assign({
     visit_id: v.id, student_id: v.student_id, name: v.student_name, session_name: v.session_name,
     check_in_at: v.check_in_at, check_out_at: v.check_out_at, checkin_method: v.checkin_method,
     checkout_method: v.checkout_method, ends_at: v.end_time ? time.toMs(loc, today, v.end_time) : null, flagged: !!v.flagged,
-  });
+  }, byFields(v));
   const here = visits.filter(v => v.check_out_at == null).map(row);
   const hereIds = new Set(here.map(v => v.student_id));
   // Left = students who have gone; someone who came back in shows only under Here.
@@ -189,15 +213,17 @@ function building(ctx, loc, ms) {
   for (const s of slotsOn(ctx, loc, today)) {
     if (s.end_at <= ms || hereIds.has(s.student_id) || listed.has(s.student_id) || visitedSlot.has(s.student_id + ':' + s.session_id)) continue;
     listed.add(s.student_id);
-    expected.push({ student_id: s.student_id, name: s.student_name, session_id: s.session_id, session_name: s.name, start_at: s.start_at, end_at: s.end_at });
+    expected.push({ student_id: s.student_id, name: s.student_name, session_id: s.session_id, session_name: s.name, start_at: s.start_at, end_at: s.end_at,
+      membership_active: membershipOk(ctx, s.student_id, today) });
   }
-  const needsReview = ctx.db.prepare(`SELECT v.*, u.name AS student_name, s.name AS session_name FROM visits v
-    JOIN users u ON u.id = v.student_id LEFT JOIN sessions s ON s.id = v.session_id
+  const needsReview = ctx.db.prepare(`SELECT v.*, u.name AS student_name, s.name AS session_name, ${BY_SQL} FROM visits v
+    JOIN users u ON u.id = v.student_id LEFT JOIN sessions s ON s.id = v.session_id ${BY_JOIN}
     WHERE v.location_id = ? AND v.flagged = 1 AND v.reviewed_by IS NULL ORDER BY v.check_in_at DESC, v.id DESC LIMIT 100`).all(loc.id)
-    .map(v => ({
+    .map(v => Object.assign({
       visit_id: v.id, student_id: v.student_id, name: v.student_name, session_name: v.session_name, local_date: v.local_date,
-      check_in_at: v.check_in_at, check_out_at: v.check_out_at, checkout_method: v.checkout_method, flag_reason: v.flag_reason,
-    }));
+      check_in_at: v.check_in_at, check_out_at: v.check_out_at, checkin_method: v.checkin_method, checkout_method: v.checkout_method,
+      flag_reason: v.flag_reason,
+    }, byFields(v)));
   return { location: publicLocation(loc), today, now: ms, here, expected, left, needs_review: needsReview };
 }
 
@@ -258,7 +284,7 @@ function autoCheckout(ctx) {
 
 module.exports = {
   EARLY_MS, FLAG_REASON, getLocation, getVisit, qrDay, currentCode, codeExpiresAt, checkCode,
-  slotsOn, slotNow, nextSlot, membershipOk, openVisit, createVisit, closeVisit,
+  slotsOn, slotNow, nextSlot, membershipOk, openVisit, createVisit, closeVisit, lastCheckout, visitSession,
   firstName, clockTime, minutes, duration, when, noSessionMessage, announceCheckin, announceCheckout,
   publicLocation, building, status, autoCheckout,
 };

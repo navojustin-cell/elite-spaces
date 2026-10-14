@@ -1,6 +1,11 @@
 'use strict';
-// Daily notes (PRD 6): DN-1..DN-5, plus NF-1 scope on every notes route.
-const { test, makeApp, assert, at } = require('./lib');
+// Daily notes (PRD 6): DN-1..DN-5, plus NF-1 scope on every notes route, and
+// the notes screens (public/js/views/notes.js) in a browser tab at the end.
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const crypto = require('crypto');
+const { test, makeApp, assert, at, ROOT } = require('./lib');
 
 const LA = 'America/Los_Angeles';
 const TODAY = '2026-10-14', YESTERDAY = '2026-10-13', TWO_DAYS_AGO = '2026-10-12';
@@ -496,6 +501,87 @@ test(['DN-5'], "the parent home's 'today' is the date at each student's home loc
   assert.deepEqual(await home(w.fa.parent), [['Leo Garcia', TODAY, true, TODAY, 'Leo, Wednesday'], ['Sofia Garcia', TODAY, false, null, null]]);
 });
 
+test(['DN-5'], "the parent home knows whether today's session is still to come, so a student isn't called absent before it ends", async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students, anh = w.fb.student;
+  w.t.fx.enroll(leo, w.sessA, 3); // Wednesdays 1-4 PM
+  w.t.fx.enroll(anh, w.sessA, 3);
+  w.t.fx.enroll(sofia, w.sessA, 1); // Mondays only
+  const home = async parent => (await w.t.as(parent).get('/api/notes/today')).body.students
+    .map(s => [s.name, s.visited, s.in_building, s.session_today, s.session_later]);
+
+  // 10:00, before the session: Leo's is still to come; Sofia has none today.
+  assert.deepEqual(await home(w.fa.parent), [['Leo Garcia', false, false, true, true], ['Sofia Garcia', false, false, false, false]]);
+
+  // Leo scans in at 1:05 PM. At 3:59 PM Anh hasn't come, but the session hasn't ended either.
+  w.t.clock.set(at(LA, TODAY, '13:05'));
+  const v = w.visit(leo, w.A, TODAY, { check_in_at: at(LA, TODAY, '13:05'), check_out_at: null, checkout_method: null });
+  assert.deepEqual((await home(w.fa.parent))[0], ['Leo Garcia', true, true, true, true]);
+  w.t.clock.set(at(LA, TODAY, '15:59'));
+  assert.deepEqual(await home(w.fb.parent), [['Anh Nguyen', false, false, true, true]]);
+
+  // 4:30 PM: the session is over. Leo is still in until he scans out; Anh never came.
+  w.t.clock.set(at(LA, TODAY, '16:30'));
+  assert.deepEqual((await home(w.fa.parent))[0], ['Leo Garcia', true, true, true, false]);
+  w.t.db.prepare("UPDATE visits SET check_out_at = ?, checkout_method = 'scan' WHERE id = ?").run(at(LA, TODAY, '16:20'), v.id);
+  assert.deepEqual((await home(w.fa.parent))[0], ['Leo Garcia', true, false, true, false]);
+  assert.deepEqual(await home(w.fb.parent), [['Anh Nguyen', false, false, true, false]]);
+
+  // No session runs today on a closure day, or for a paused slot, a cancelled session or a term that has ended.
+  w.t.clock.set(at(LA, TODAY, '10:00'));
+  const anhDay = async () => (await home(w.fb.parent))[0].slice(3);
+  assert.deepEqual(await anhDay(), [true, true]);
+  for (const [why, set, undo] of [
+    ['closed today', `INSERT INTO closures (location_id, date, reason) VALUES (${w.A.id}, '${TODAY}', 'Staff training')`, 'DELETE FROM closures'],
+    ['slot paused', "UPDATE enrollments SET status = 'paused'", "UPDATE enrollments SET status = 'active'"],
+    ['session cancelled', "UPDATE sessions SET status = 'cancelled'", "UPDATE sessions SET status = 'active'"],
+    ['term ended', `UPDATE terms SET end_date = '${YESTERDAY}'`, "UPDATE terms SET end_date = '2026-12-18'"],
+  ]) {
+    w.t.db.exec(set);
+    assert.deepEqual(await anhDay(), [false, false], why);
+    w.t.db.exec(undo);
+  }
+  assert.deepEqual(await anhDay(), [true, true]);
+});
+
+test(['DN-5'], "whether today's session has ended is worked out in the student's location zone", async () => {
+  const w = await world();
+  const TOR = 'America/Toronto';
+  const T = w.t.fx.location({ name: 'Toronto', timezone: TOR });
+  const ft = w.t.fx.family(T);
+  w.t.fx.enroll(ft.student, w.t.fx.session(T, { name: 'Toronto Study' }), 3); // Wednesdays 1-4 PM Toronto time
+  const day = async () => (await w.t.as(ft.parent).get('/api/notes/today')).body.students.map(s => [s.date, s.session_today, s.session_later]);
+  w.t.clock.set(at(TOR, TODAY, '15:30')); // 12:30 PM in Los Angeles
+  assert.deepEqual(await day(), [[TODAY, true, true]]);
+  w.t.clock.set(at(TOR, TODAY, '16:30')); // 1:30 PM in Los Angeles: over in Toronto
+  assert.deepEqual(await day(), [[TODAY, true, false]]);
+});
+
+test(['DN-5', 'NF-1'], "a note-is-ready notification leads a parent to that note's student and day, and nobody else", async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students;
+  w.visit(leo, w.A, YESTERDAY); w.visit(sofia, w.A);
+  assert.equal((await w.save(w.staffA, leo, YESTERDAY, { ratings: w.all(3), post: true })).status, 200); // posted a day late
+  assert.equal((await w.save(w.staffA, sofia, TODAY, { ratings: w.all(2) })).status, 200); // a draft
+  const [n] = w.t.fx.notifications(w.fa.parent, 'note');
+  const r = await w.t.as(w.fa.parent).get('/api/notes/note/' + n.ref_id);
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.body.note.id, r.body.note.student_id, r.body.note.student_name, r.body.note.local_date], [n.ref_id, leo.id, 'Leo Garcia', YESTERDAY]);
+  assert.deepEqual(r.body.note.ratings.map(x => x.word), ['Great', 'Great', 'Great', 'Great']);
+
+  const draft = w.notes().find(x => x.student_id === sofia.id);
+  assert.equal((await w.t.as(w.fa.parent).get('/api/notes/note/' + draft.id)).status, 404, 'a draft is not there for parents');
+  assert.equal((await w.t.as(w.fa.parent).get('/api/notes/note/999')).status, 404);
+  const pending = w.t.fx.user('parent', { location: w.A });
+  w.t.fx.link(pending, leo, 'pending');
+  for (const u of [w.fb.parent, pending, leo, w.staffA, w.hq]) {
+    const other = await w.t.as(u).get('/api/notes/note/' + n.ref_id);
+    assert.equal(other.status, 403, u.role + ' ' + u.id);
+    assert.equal(other.body.note, undefined);
+  }
+  assert.equal((await w.t.anon.get('/api/notes/note/' + n.ref_id)).status, 401);
+});
+
 test(['DN-5', 'NF-1'], 'students cannot see daily notes in v1, not even their own', async () => {
   const w = await world();
   const leo = w.fa.students[0];
@@ -607,4 +693,263 @@ test(['NF-1', 'DN-2'], 'only HQ can change the checklist', async () => {
   const read = await w.t.as(w.staffA).get('/api/notes/items');
   assert.equal(read.status, 200);
   assert.equal(read.body.items.length, 4);
+});
+
+// ---------------------------------------------------------------- the notes screens in a browser tab
+
+// Just enough DOM for public/js/app.js and the notes view. Elements live in one
+// tree under <html>, so getElementById and querySelector find what the view drew,
+// and a disabled button ignores clicks, as in a browser.
+class El {
+  constructor(doc, tag, data = '') { Object.assign(this, { doc, tag, data, childNodes: [], attrs: new Map(), on: {}, parentNode: null }); }
+  get textContent() { return this.tag ? this.childNodes.map(c => c.textContent).join('') : this.data; }
+  set textContent(s) { this.replaceChildren(String(s)); }
+  setAttribute(k, v) { this.attrs.set(k, String(v)); }
+  getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
+  get id() { return this.getAttribute('id') || ''; }
+  get cls() { return (this.getAttribute('class') || '').split(/\s+/).filter(Boolean); }
+  get classList() {
+    return { toggle: (c, on) => { const s = new Set(this.cls); if (on) s.add(c); else s.delete(c); this.setAttribute('class', [...s].join(' ')); } };
+  }
+  get disabled() { return this.attrs.has('disabled'); }
+  set disabled(v) { if (v) this.attrs.set('disabled', ''); else this.attrs.delete('disabled'); }
+  get dataset() { return Object.fromEntries([...this.attrs].filter(([k]) => k.startsWith('data-')).map(([k, v]) => [k.slice(5), v])); }
+  get value() { return this.typed ?? this.getAttribute('value') ?? ''; }
+  set value(v) { this.typed = String(v); }
+  addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
+  dispatch(type) { for (const fn of this.on[type] || []) fn({ type, target: this, currentTarget: this, preventDefault() {} }); }
+  click() { if (!this.disabled) this.dispatch('click'); }
+  focus() { this.doc.focused = this; }
+  append(...kids) {
+    for (const k of kids) {
+      const n = k instanceof El ? k : new El(this.doc, null, String(k));
+      n.remove();
+      n.parentNode = this;
+      this.childNodes.push(n);
+    }
+  }
+  appendChild(k) { this.append(k); return k; }
+  replaceChildren(...kids) { this.childNodes.forEach(c => { c.parentNode = null; }); this.childNodes = []; this.append(...kids); }
+  replaceWith(n) { const p = this.parentNode; n.remove(); p.childNodes[p.childNodes.indexOf(this)] = n; n.parentNode = p; this.parentNode = null; }
+  remove() { if (this.parentNode) this.parentNode.childNodes = this.parentNode.childNodes.filter(c => c !== this); this.parentNode = null; }
+  all() { return this.childNodes.flatMap(c => [c, ...c.all()]); }
+  find(pred) { return this.all().find(pred); }
+  findAll(pred) { return this.all().filter(pred); }
+  // Descendant selectors made of #id, .class and tag parts: '#dn-5 .note-scale .btn', 'button'.
+  querySelector(sel) {
+    const parts = sel.trim().split(/\s+/);
+    const hits = (n, part) => !!n.tag && part.split(/(?=[#.])/).every(p => (p[0] === '#' ? n.id === p.slice(1) : p[0] === '.' ? n.cls.includes(p.slice(1)) : n.tag === p));
+    const walk = (root, i) => {
+      for (const n of root.all()) {
+        if (!hits(n, parts[i])) continue;
+        const got = i === parts.length - 1 ? n : walk(n, i + 1);
+        if (got) return got;
+      }
+      return null;
+    };
+    return walk(this, 0);
+  }
+}
+
+// One browser tab running the real shell and notes view (read from ROOT, so the
+// mutation runner's copy is the one exercised) against the test server.
+function notesTab(t) {
+  let cookie = '';
+  const pending = new Set(), requests = [], replaced = [];
+  const doc = { addEventListener() {} };
+  const el = (tag, id) => { const n = new El(doc, tag); if (id) n.setAttribute('id', id); return n; };
+  doc.documentElement = el('html');
+  doc.head = el('head');
+  doc.body = el('body');
+  const main = el('main', 'main');
+  doc.body.append(el('div', 'toasts'), main);
+  doc.documentElement.append(doc.head, doc.body);
+  Object.assign(doc, {
+    createElement: tag => el(tag), createTextNode: s => new El(doc, null, String(s)),
+    getElementById: id => doc.documentElement.find(n => n.id === id) || null,
+    querySelector: sel => doc.documentElement.querySelector(sel),
+  });
+  const fetchAs = (url, opts = {}) => {
+    const p = fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie }) }))
+      .then(async r => {
+        const body = await r.arrayBuffer();
+        requests.push({ url, method: opts.method || 'GET', status: r.status });
+        return new Response(body, { status: r.status, headers: r.headers });
+      });
+    pending.add(p);
+    const done = () => pending.delete(p);
+    p.then(done, done);
+    return p;
+  };
+  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, URLSearchParams, console, navigator: {}, location: { hash: '' },
+    history: { replaceState(_s, _t, url) { replaced.push(url); } }, addEventListener() {}, setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
+  win.window = win;
+  vm.createContext(win);
+  for (const f of ['public/js/app.js', 'public/js/views/notes.js']) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
+  const App = win.App;
+  // Waits until every request has answered and the view has drawn what came back.
+  const settle = async () => {
+    do {
+      await Promise.allSettled([...pending]);
+      for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+    } while (pending.size);
+  };
+  const mount = async draw => { const box = el('div'); main.replaceChildren(box); await draw(box); await settle(); return box; };
+  return {
+    App, requests, replaced, settle, main, css: () => doc.head.textContent,
+    async signIn(user) {
+      const token = crypto.randomBytes(16).toString('hex');
+      t.ctx.sessions.set(token, user.id);
+      cookie = 'sid=' + token;
+      App.me = await App.api.get('/api/auth/me');
+    },
+    open: (id, ...params) => mount(box => App.views.find(v => v.id === id).render(box, params)),
+    card: id => mount(box => App.cards.find(c => c.id === id).render(box)),
+    async click(button) { button.click(); await settle(); },
+  };
+}
+const words = n => n.all().filter(c => !c.tag).map(c => c.data).join(' ').replace(/\s+/g, ' ').trim();
+const byId = (root, id) => root.find(n => n.id === id);
+const postedLines = root => root.findAll(n => n.tag === 'p' && n.textContent.startsWith('Posted ')).map(n => n.textContent);
+
+test(['DN-5'], "a parent's Home card says a student wasn't in only after the day's last session has ended", async () => {
+  const w = await world();
+  const [leo] = w.fa.students;
+  w.t.fx.enroll(leo, w.sessA, 3); // Wednesdays 1-4 PM; Sofia has nothing on Wednesdays
+  w.t.fx.enroll(w.fb.student, w.sessA, 3);
+  const tab = notesTab(w.t);
+  const lines = async parent => {
+    await tab.signIn(parent);
+    const box = await tab.card('notes-today');
+    return box.findAll(n => n.tag === 'li').map(li => [li.find(n => n.tag === 'strong').textContent, words(li.find(n => n.cls.includes('muted')))]);
+  };
+
+  // 10:00 AM, before the session.
+  assert.deepEqual(await lines(w.fa.parent), [['Leo Garcia', "No note yet. Notes post after Leo's session."],
+    ['Sofia Garcia', "Sofia has no session today, so there's no note."]]);
+  // In the building, even after the session's end until he scans out.
+  const v = w.visit(leo, w.A, TODAY, { check_in_at: at(LA, TODAY, '13:05'), check_out_at: null, checkout_method: null });
+  w.t.clock.set(at(LA, TODAY, '16:10'));
+  assert.deepEqual((await lines(w.fa.parent))[0], ['Leo Garcia', "No note yet. Notes post after Leo's session."]);
+  // Gone home, note not posted yet.
+  w.t.db.prepare("UPDATE visits SET check_out_at = ?, checkout_method = 'scan' WHERE id = ?").run(at(LA, TODAY, '16:00'), v.id);
+  assert.deepEqual((await lines(w.fa.parent))[0], ['Leo Garcia', 'No note yet. Notes usually post by the end of the day.']);
+
+  // Anh hasn't come: still possible a minute before the end, not after it.
+  w.t.clock.set(at(LA, TODAY, '15:59'));
+  assert.deepEqual(await lines(w.fb.parent), [['Anh Nguyen', "No note yet. Notes post after Anh's session."]]);
+  w.t.clock.set(at(LA, TODAY, '16:01'));
+  assert.deepEqual(await lines(w.fb.parent), [['Anh Nguyen', "Anh wasn't in today, so there's no note."]]);
+});
+
+test(['DN-5'], "a note posted after the visit's day shows the posting date, and its notification opens Notes at the visit's day", async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students;
+  w.visit(leo, w.A, YESTERDAY); w.visit(leo, w.A); w.visit(sofia, w.A, YESTERDAY);
+  const post = async (s, date, day, hhmm) => {
+    w.t.clock.set(at(LA, day, hhmm));
+    assert.equal((await w.save(w.staffA, s, date, { ratings: w.all(3), post: true })).status, 200);
+  };
+  await post(sofia, YESTERDAY, YESTERDAY, '17:00'); // on the day
+  await post(leo, YESTERDAY, TODAY, '09:05'); // the next morning
+  await post(leo, TODAY, TODAY, '16:10');
+  const [sofiaTue, leoTue, leoWed] = w.t.fx.notifications(w.fa.parent, 'note').map(n => n.ref_id);
+  const tab = notesTab(w.t);
+
+  // Staff: each card says when its note was posted, with the date when it was another day.
+  await tab.signIn(w.staffA);
+  assert.deepEqual(postedLines(await tab.open('daily-notes', YESTERDAY)),
+    ['Posted Wed, Oct 14, 9:05 AM by Chris Ortiz', 'Posted 5:00 PM by Chris Ortiz']);
+  assert.deepEqual(postedLines(await tab.open('daily-notes', TODAY)), ['Posted 4:10 PM by Chris Ortiz']);
+
+  // Parent: the latest notes.
+  await tab.signIn(w.fa.parent);
+  const latest = await tab.open('notes');
+  assert.deepEqual(latest.findAll(n => n.tag === 'h2').map(n => n.textContent), ['Wednesday, Oct 14', 'Tuesday, Oct 13', 'Tuesday, Oct 13']);
+  assert.deepEqual(postedLines(latest), ['Posted by Chris Ortiz at 4:10 PM', 'Posted by Chris Ortiz on Wed, Oct 14 at 9:05 AM',
+    'Posted by Chris Ortiz at 5:00 PM']);
+
+  // The Inbox: each "note is ready" item opens Notes at that note.
+  const inbox = await tab.open('inbox');
+  assert.deepEqual(inbox.findAll(n => n.tag === 'a').map(a => [a.find(n => n.tag === 'strong').textContent, a.getAttribute('href')]), [
+    ["Leo's daily note from Irvine is ready", '#/notes/note/' + leoWed],
+    ["Leo's daily note from Irvine is ready", '#/notes/note/' + leoTue],
+    ["Sofia's daily note from Irvine is ready", '#/notes/note/' + sofiaTue],
+  ]);
+
+  // Opening Leo's Tuesday note: his notes, from Tuesday back, and the address says so.
+  const opened = await tab.open('notes', 'note', String(leoTue));
+  assert.deepEqual(tab.requests.slice(-2).map(r => [r.url, r.status]), [
+    ['/api/notes/note/' + leoTue, 200], [`/api/notes/feed?limit=20&student=${leo.id}&to=${YESTERDAY}`, 200]]);
+  assert.equal(tab.replaced.at(-1), `#/notes/${leo.id}/${YESTERDAY}`);
+  assert.equal(byId(opened, 'pn-student').find(o => o.getAttribute('selected') !== null).textContent, 'Leo Garcia');
+  assert.equal(byId(opened, 'pn-date').value, YESTERDAY);
+  assert.deepEqual(opened.findAll(n => n.tag === 'h2').map(n => n.textContent), ['Tuesday, Oct 13']);
+  assert.deepEqual(postedLines(opened), ['Posted by Chris Ortiz on Wed, Oct 14 at 9:05 AM']);
+});
+
+test(['DN-4', 'DN-2', 'NF-7'], "on the day list, tapping the chosen rating again clears it; a note with a cleared item can't be posted or saved, and the button doesn't move", async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  w.visit(leo, w.A);
+  const tab = notesTab(w.t);
+  await tab.signIn(w.staffA);
+  await tab.open('daily-notes');
+  const card = () => byId(tab.main, 'dn-' + leo.id);
+  const groups = () => card().findAll(n => n.getAttribute('role') === 'group');
+  const tap = (label, word) => tab.click(groups().find(g => g.childNodes[0].textContent === label).find(b => b.tag === 'button' && b.textContent === word));
+  const pressed = () => groups().map(g => { const b = g.find(x => x.tag === 'button' && x.getAttribute('aria-pressed') === 'true'); return b ? b.textContent : null; });
+  const hint = () => card().find(n => n.cls.includes('note-hint')).textContent;
+  const button = label => card().find(n => n.tag === 'button' && n.textContent === label);
+
+  await tap('On time', 'Great');
+  assert.deepEqual(pressed(), ['Great', null, null, null]);
+  await tap('On time', 'Great');
+  assert.deepEqual(pressed(), [null, null, null, null], 'tapping the chosen rating again clears it');
+  assert.equal(hint(), 'Rate each item to post.');
+  assert.equal(button('Post note').disabled, true);
+  await tap('On time', 'Good');
+  await tap('On time', 'Great');
+  assert.deepEqual(pressed(), ['Great', null, null, null], 'tapping another rating switches to it');
+  for (const label of PRD_ITEMS.slice(1)) await tap(label, 'Great');
+  assert.equal(button('Post note').disabled, false);
+  assert.equal(hint(), 'Ready to post. Parents get a notification.');
+
+  // Cleared again, Post is blocked and names the item; saving keeps the blank.
+  await tap('Focused', 'Great');
+  assert.deepEqual(pressed(), ['Great', null, 'Great', 'Great']);
+  assert.equal(button('Post note').disabled, true);
+  assert.equal(hint(), 'Rate Focused to post.');
+  await tab.click(button('Post note'));
+  await tab.click(button('Save for later'));
+  const [row] = w.notes();
+  assert.equal(row.status, 'draft');
+  assert.deepEqual(w.ratingsOf(row.id).map(x => x.rating), [3, null, 3, 3]);
+
+  await tap('Focused', 'Good');
+  await tab.click(button('Post note'));
+  assert.equal(w.notes()[0].status, 'posted');
+
+  // Editing the posted note: the hint keeps its space while empty, and a cleared item blocks Save changes.
+  assert.match(tab.css(), /\.note-hint \{ min-height: 3em; \}/);
+  await tab.click(button('Edit note'));
+  assert.equal(hint(), '');
+  await tap('On time', 'Great');
+  assert.deepEqual(pressed(), [null, 'Good', 'Great', 'Great']);
+  assert.equal(button('Save changes').disabled, true);
+  assert.equal(hint(), 'Rate On time to save.');
+  await tab.click(button('Save changes'));
+  assert.deepEqual(w.ratingsOf(w.notes()[0].id).map(x => x.rating), [3, 2, 3, 3], 'the posted note is untouched');
+  assert.equal(w.t.fx.audit('note.edit').length, 0);
+});
+
+test(['DN-2', 'NF-7'], "the checklist's move up and move down buttons are 44px targets", async () => {
+  const w = await world();
+  const tab = notesTab(w.t);
+  await tab.signIn(w.hq);
+  const view = await tab.open('note-checklist');
+  const moves = view.findAll(n => n.tag === 'button' && /^nc-(up|down)-/.test(n.id));
+  assert.equal(moves.length, 8);
+  for (const b of moves) assert.ok(b.cls.includes('note-move'), b.id);
+  assert.match(tab.css(), /\.note-move \{ min-width: 44px; min-height: 44px; \}/);
 });

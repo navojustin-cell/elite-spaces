@@ -1,6 +1,7 @@
 'use strict';
 // Notes mutations: each breaks one daily-notes rule; tests/notes.test.js must catch it.
 const F = 'src/modules/notes/index.js';
+const VIEW = 'public/js/views/notes.js';
 
 module.exports = [
   // ---- DN-1: a note only for a student who visited this location that day
@@ -76,15 +77,77 @@ module.exports = [
   { name: 'ignore the date range when browsing', covers: ['DN-5'], file: F,
     find: 'AND n.local_date BETWEEN ? AND ?', repl: 'AND ? IS NOT NULL AND ? IS NOT NULL' },
   { name: "work out the parent home's 'today' in Los Angeles for every student", covers: ['DN-5'], file: F,
-    find: 'const date = time.localDate(s, ctx.clock.now());', repl: "const date = time.localDate({ timezone: 'America/Los_Angeles' }, ctx.clock.now());" },
+    find: 'const date = time.localDate(s, now);', repl: "const date = time.localDate({ timezone: 'America/Los_Angeles' }, now);" },
   { name: "work out the parent home's 'today' in UTC", covers: ['DN-5'], file: F,
-    find: 'const date = time.localDate(s, ctx.clock.now());', repl: 'const date = new Date(ctx.clock.now()).toISOString().slice(0, 10);' },
+    find: 'const date = time.localDate(s, now);', repl: 'const date = new Date(now).toISOString().slice(0, 10);' },
   { name: "show a draft as today's note on the parent home", covers: ['DN-5'], file: F,
     find: "WHERE n.student_id = ? AND n.local_date = ? AND n.status = 'posted'", repl: 'WHERE n.student_id = ? AND n.local_date = ?' },
   { name: 'let students read the notes feed', covers: ['DN-5', 'NF-1'], file: F,
     find: "r.get('/feed', auth.requireRole('parent')", repl: "r.get('/feed', auth.requireRole('parent', 'student')" },
   { name: "let students read today's notes", covers: ['DN-5', 'NF-1'], file: F,
     find: "r.get('/today', auth.requireRole('parent')", repl: "r.get('/today', auth.requireRole('parent', 'student')" },
+
+  // ---- DN-5: the parent home knows whether today's session is still to come
+  { name: 'treat a session that has ended as still to come', covers: ['DN-5'], file: F,
+    find: 'session_later: ends.some(end => end > now)', repl: 'session_later: ends.length > 0' },
+  { name: 'treat a session as over once it has started', covers: ['DN-5'], file: F,
+    find: 'SELECT se.end_time FROM enrollments e', repl: 'SELECT se.start_time AS end_time FROM enrollments e' },
+  { name: "work out when today's session ends in Los Angeles for every location", covers: ['DN-5'], file: F,
+    find: '.map(r => time.toMs(s, date, r.end_time))', repl: ".map(r => time.toMs({ timezone: 'America/Los_Angeles' }, date, r.end_time))" },
+  { name: 'count a session on a closure day', covers: ['DN-5'], file: F,
+    find: "if (db.prepare('SELECT 1 FROM closures WHERE location_id = ? AND date = ?').get(s.location_id, date)) return [];", repl: '' },
+  { name: 'count a paused slot as a session today', covers: ['DN-5'], file: F,
+    find: "WHERE e.student_id = ? AND e.status = 'active' AND e.weekday = ?", repl: "WHERE e.student_id = ? AND e.status != 'dropped' AND e.weekday = ?" },
+  { name: "count a slot on another weekday as today's session", covers: ['DN-5'], file: F,
+    find: "AND e.status = 'active' AND e.weekday = ? AND se.status", repl: "AND e.status = 'active' AND ? > 0 AND se.status" },
+  { name: 'count a cancelled session as a session today', covers: ['DN-5'], file: F,
+    find: "AND se.status = 'active' AND t.start_date <= ?", repl: 'AND t.start_date <= ?' },
+  { name: "count a session whose term has ended", covers: ['DN-5'], file: F,
+    find: 'AND t.start_date <= ? AND t.end_date >= ?`)', repl: 'AND ? IS NOT NULL AND ? IS NOT NULL`)' },
+  { name: 'say a student who scanned out is still in the building', covers: ['DN-5'], file: F,
+    find: "local_date = ? AND check_out_at IS NULL').get(id, date);", repl: "local_date = ?').get(id, date);" },
+  { name: 'never say a student is in the building', covers: ['DN-5'], file: F,
+    find: 'in_building: inBuilding,', repl: 'in_building: false,' },
+
+  // ---- DN-5, NF-1: a note's own route, for the notification link
+  { name: "let a parent open another family's note by its id", covers: ['DN-5', 'NF-1'], file: F,
+    find: 'if (!auth.linkedStudentIds(ctx, req.user.id).includes(n.student_id)) throw forbidden();', repl: '' },
+  { name: 'let a parent open a draft by its id', covers: ['DN-5'], file: F,
+    find: "WHERE n.id = ? AND n.status = 'posted'`", repl: 'WHERE n.id = ?`' },
+
+  // ---- the notes screens (public/js/views/notes.js)
+  { name: "say a student wasn't in while today's session is still to come", covers: ['DN-5'], file: VIEW,
+    find: 'const why = s.in_building || s.session_later ?', repl: 'const why = s.in_building ?' },
+  { name: "say a student wasn't in while they are in the building", covers: ['DN-5'], file: VIEW,
+    find: 'const why = s.in_building || s.session_later ?', repl: 'const why = s.session_later ?' },
+  { name: "say a student with no session today wasn't in", covers: ['DN-5'], file: VIEW,
+    find: ": s.session_today ? who + \" wasn't in today", repl: ": true ? who + \" wasn't in today" },
+  { name: 'show only the time on a staff card when the note was posted another day', covers: ['DN-4'], file: VIEW,
+    find: "'Posted ' + (day ? day + ', ' : '') +", repl: "'Posted ' +" },
+  { name: "show only the time on a parent's note when it was posted another day", covers: ['DN-5'], file: VIEW,
+    find: "(day ? ' on ' + day : '') + ' at '", repl: "' at '" },
+  { name: "compare the posting day in the device's zone, not the location's", covers: ['DN-5'], file: VIEW,
+    find: '(dateIn(tz, ms) === day ?', repl: '(dateIn(undefined, ms) === day ?' },
+  { name: 'open the latest notes from a note notification', covers: ['DN-5'], file: VIEW,
+    find: "App.inboxLink('daily_note', n => 'notes/note/' + n.ref_id);", repl: "App.inboxLink('daily_note', 'notes');" },
+  { name: "open a note notification without its day", covers: ['DN-5'], file: VIEW,
+    find: 'to = note.local_date;', repl: "to = '';" },
+  { name: "open a note notification at every student's notes", covers: ['DN-5'], file: VIEW,
+    find: 'student = String(note.student_id);', repl: "student = '';" },
+  { name: 'keep a rating when its chosen button is tapped again', covers: ['DN-4'], file: VIEW,
+    find: 'const chosen = ed.ratings[r.item_id] === v ? null : v;', repl: 'const chosen = v;' },
+  { name: 'leave Post on with an item unrated', covers: ['DN-4', 'DN-2'], file: VIEW,
+    find: 'postBtn.disabled = missing.length > 0;', repl: 'postBtn.disabled = false;' },
+  { name: "let the hint's line collapse when it is empty", covers: ['DN-4'], file: VIEW,
+    find: "class: 'muted small note-hint'", repl: "class: 'muted small'" },
+  { name: "don't reserve the hint's space", covers: ['DN-4'], file: VIEW,
+    find: '.note-hint { min-height: 3em; }', repl: '' },
+  { name: 'make the checklist move buttons narrower than 44px', covers: ['DN-2'], file: VIEW,
+    find: '.note-move { min-width: 44px; min-height: 44px; }', repl: '' },
+  { name: 'drop the 44px class from the move-up button', covers: ['DN-2'], file: VIEW,
+    find: "class: 'btn note-move', type: 'button', id: 'nc-up-'", repl: "class: 'btn', type: 'button', id: 'nc-up-'" },
+  { name: 'drop the 44px class from the move-down button', covers: ['DN-2'], file: VIEW,
+    find: "class: 'btn note-move', type: 'button', id: 'nc-down-'", repl: "class: 'btn', type: 'button', id: 'nc-down-'" },
 
   // ---- NF-1: scope on every route
   { name: "let staff open another location's day list", covers: ['NF-1'], file: F,

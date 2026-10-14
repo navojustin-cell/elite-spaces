@@ -8,3 +8,6 @@ CREATE INDEX IF NOT EXISTS checkin_visits_student_day ON visits(student_id, loca
 CREATE INDEX IF NOT EXISTS checkin_visits_location_day ON visits(location_id, local_date);
 CREATE INDEX IF NOT EXISTS checkin_visits_open ON visits(check_out_at) WHERE check_out_at IS NULL;
 CREATE INDEX IF NOT EXISTS checkin_enrollments_student ON enrollments(student_id, status);
+-- "In the building" reads who checked a visit in or out by hand, and why, from
+-- that visit's audit entries (CI-7, NF-2).
+CREATE INDEX IF NOT EXISTS checkin_audit_target ON audit_log(target_type, target_id);

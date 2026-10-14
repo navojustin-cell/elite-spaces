@@ -8,15 +8,17 @@
 //   GET  /locations/:id/qr           staff+ of that location: today's code, its app URL and an SVG (CI-1)
 //   GET  /locations/:id/building     staff+: here / expected / left today and visits needing review (CI-7)
 //   GET  /locations/:id/students?q=  staff+: find a student at the location for a manual check-in
-//   POST /manual-checkin             staff+: { studentId, reason, override } (CI-7, audited)
+//   POST /manual-checkin             staff+: { studentId, reason, override } (CI-7, audited); override confirms
+//                                    checking in a student with no session now or an inactive membership
 //   POST /visits/:id/checkout        staff+: { reason } manual check-out (CI-7, audited)
 //   POST /visits/:id/review          staff+: { out_time? } mark a flagged visit reviewed, optionally fixing the time out (audited)
 // Job: auto-checkout (CI-5, D-14).
 //
 // Scan order: today's code -> home location (D-1) -> inside the radius -> an
 // open visit today means check-out -> otherwise an enrolled slot window means
-// check-in. Scan coordinates are used for the radius check only and are never
-// stored or logged (NF-5, D-23).
+// check-in. A scan within five minutes of the last check-in or check-out asks
+// before reversing it. Scan coordinates are used for the radius check only and
+// are never stored or logged (NF-5, D-23).
 
 const express = require('express');
 const QRCode = require('qrcode');
@@ -27,7 +29,7 @@ const time = require('../../time');
 const { AppError, bad, forbidden, notFound, conflict } = require('../../errors');
 const svc = require('./service');
 
-const CONFIRM_MS = 5 * 60000; // a second scan this soon after checking in asks before checking out
+const CONFIRM_MS = 5 * 60000; // a second scan this soon after checking in (or out) asks first
 
 const refuse = (code, msg) => new AppError(403, code, msg);
 // Real coordinates only: a number on the globe for each. null, text, NaN, 1e308, or a latitude
@@ -70,23 +72,27 @@ function router(ctx) {
     if (code !== 'ok') throw refuse('bad_code', "That code didn't work. Scan the code at the entrance again.");
     if (loc.id !== student.location_id) {
       const home = svc.getLocation(ctx, student.location_id);
-      throw refuse('wrong_location', `This code is for ${loc.name}. You're a member at ${home ? home.name : 'another location'}.`);
+      throw refuse('wrong_location', `This code is for ${loc.name}. You're a member at ${home ? home.name : 'another location'}. `
+        + `Scan the code at ${home ? home.name : 'your own location'}, or ask staff at the front desk.`);
     }
     if (!coordsGiven(b)) throw bad('location_needed', "We need your phone's location to check you in. It's only used for this check and isn't saved.");
+    const today = time.localDate(loc, now);
+    const open = svc.openVisit(ctx, student.id, loc.id, today);
     if (!insideRadius(loc, b.lat, b.lng)) {
-      throw refuse('outside_radius', `You need to be inside ${loc.name} to check in or out. If you are, ask staff to check you in.`);
+      throw refuse('outside_radius', open
+        ? `You need to be inside ${loc.name} to check out. If you are, ask staff to check you out.`
+        : `You need to be inside ${loc.name} to check in or out. If you are, ask staff to check you in.`);
     }
     // From here on the coordinates are not used again.
 
-    const today = time.localDate(loc, now);
-    const open = svc.openVisit(ctx, student.id, loc.id, today);
     if (open) {
       if (now - open.check_in_at < CONFIRM_MS && b.confirm !== true) {
         throw conflict('confirm_checkout', `You checked in at ${svc.clockTime(loc, open.check_in_at)}. Check out now?`);
       }
       const visit = svc.closeVisit(ctx, open, { ms: now, method: 'scan' });
       svc.announceCheckout(ctx, { student, loc, visit });
-      return res.json({ action: 'checkout', visit, total_minutes: svc.minutes(visit.check_in_at, visit.check_out_at), location: svc.publicLocation(loc) });
+      return res.json({ action: 'checkout', visit, total_minutes: svc.minutes(visit.check_in_at, visit.check_out_at),
+        location: svc.publicLocation(loc), session: svc.visitSession(ctx, loc, visit) });
     }
 
     if (!svc.membershipOk(ctx, student.id, today)) {
@@ -94,6 +100,11 @@ function router(ctx) {
     }
     const slot = svc.slotNow(ctx, loc, student.id, now);
     if (!slot) throw refuse('no_session', svc.noSessionMessage(ctx, loc, student.id, now));
+    // The mirror of the check-out question: a scan this soon after checking out asks before checking back in.
+    const last = svc.lastCheckout(ctx, student.id, loc.id, today);
+    if (last && now - last.check_out_at < CONFIRM_MS && b.confirm !== true) {
+      throw conflict('confirm_checkin', `You checked out at ${svc.clockTime(loc, last.check_out_at)}. Check back in?`);
+    }
     const visit = svc.createVisit(ctx, { student, loc, slot, ms: now, method: 'scan' });
     svc.announceCheckin(ctx, { student, loc, visit, slot });
     res.json({
@@ -149,6 +160,7 @@ function router(ctx) {
         return {
           id: s.id, name: s.name, here: !!open, visit_id: open ? open.id : null, since: open ? open.check_in_at : null,
           session_now: slot ? { id: slot.session_id, name: slot.name, end_at: slot.end_at } : null,
+          membership_active: svc.membershipOk(ctx, s.id, today),
         };
       }),
     });
@@ -163,6 +175,9 @@ function router(ctx) {
     const now = ctx.clock.now();
     const open = svc.openVisit(ctx, student.id, loc.id, time.localDate(loc, now));
     if (open) throw conflict('already_here', `${student.name} is already checked in (since ${svc.clockTime(loc, open.check_in_at)}).`);
+    if (!svc.membershipOk(ctx, student.id, time.localDate(loc, now)) && b.override !== true) {
+      throw conflict('membership_inactive', `${svc.firstName(student.name)}'s membership isn't active. Check in anyway?`);
+    }
     const slot = svc.slotNow(ctx, loc, student.id, now);
     if (!slot && b.override !== true) {
       throw conflict('no_session', `${svc.firstName(student.name)} doesn't have a session right now. Check them in anyway?`);

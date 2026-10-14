@@ -13,12 +13,16 @@
 // Parent:
 //   GET  /family                  my students (with link state), my co-guardians and their open invites
 //   POST /students/invite         { name, email?, phone? } -> pending student, pending links for me and my
-//                                 co-guardians (see coGuardians), one-time code
+//                                 co-guardians (see coGuardians), one-time code; refused while one of my
+//                                 students already has an open invite to that email (use resend)
 //   POST /students/:id/approve    activate a student who accepted their invite
-//   POST /guardians/invite        { name, email } -> one-time code for a second guardian
+//   POST /guardians/invite        { name, email } -> one-time code for a second guardian; refused for my own
+//                                 student's email, or while the family has an open invite to that email
 //   POST /invites/join            { code } -> an existing parent joins the family the invite came from
 //   POST /invites/:id/resend      new code and expiry; the old code stops working
-//   POST /invites/:id/cancel      the code stops working; a pending student is removed
+//   POST /invites/:id/cancel      the code stops working; a pending student is removed. For a student who
+//                                 already accepted (a decline), the other parents are told and the
+//                                 "accepted your invite" inbox items stop asking for approval
 // Anyone signed in:
 //   GET  /me                      { temp_password } - still using a password someone else set?
 //   POST /password                { current_password, new_password }
@@ -67,6 +71,30 @@ function createInvite(ctx, { kind, by, userId = null, name, email = null, phone 
   const row = ctx.db.prepare('SELECT * FROM account_invites WHERE id = ?').get(id);
   return { invite: inviteOut(row, now), code, link: '/#/invite/' + code };
 }
+
+// An invite this family already has out to `addr` that is neither used nor
+// cancelled (expired ones too: their card still offers a new code). A second
+// one would mean a second card and a second working code. Guardian invites
+// count across co-guardians, like the Family screen's list; student invites
+// count for students linked to this parent. Phone numbers are not compared:
+// siblings may share one.
+function openInviteTo(db, parentId, kind, addr) {
+  if (!addr) return null;
+  if (kind === 'student') {
+    return db.prepare(`SELECT i.* FROM account_invites i JOIN family_links fl ON fl.student_id = i.user_id AND fl.parent_id = ?1
+      WHERE i.kind = 'student' AND i.email = ?2 AND i.accepted_at IS NULL AND i.revoked_at IS NULL ORDER BY i.id LIMIT 1`).get(parentId, addr);
+  }
+  const fam = coGuardians(db, parentId);
+  return db.prepare(`SELECT * FROM account_invites WHERE kind = 'guardian' AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL
+    AND invited_by IN (${fam.map(() => '?').join(',')}) ORDER BY id LIMIT 1`).get(addr, ...fam);
+}
+const alreadyInvited = (row, now) => conflict('invite_pending',
+  `${u.firstName(row.name)} already has an invite at that email. Use ${row.expires_at <= now ? 'Send a new code' : 'Resend'} on that invite instead of sending another.`);
+
+// One answer for an email someone already uses, whoever that is, so an invite
+// code can't be used to find out which addresses have accounts.
+const emailUnavailable = fixed => conflict('email_unavailable', 'Already have an account? Sign in first, then open this invite again. '
+  + (fixed ? 'If not, ask for a new invite to a different email.' : 'If not, use a different email.'));
 
 const invalidInvite = () => new AppError(404, 'invite_invalid', "That invite code isn't valid. Check it and try again, or ask for a new invite.");
 
@@ -125,11 +153,7 @@ function acceptStudent(ctx, row, body, pw) {
   const student = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'student' AND active = 1").get(row.user_id);
   if (!student) throw invalidInvite();
   const addr = row.email || u.email(body.email);
-  if (u.emailTaken(db, addr, student.id)) {
-    throw conflict('email_taken', row.email
-      ? 'That email already has an ELITE Spaces account. Ask your parent to send the invite to a different email.'
-      : 'That email already has an ELITE Spaces account. Use a different one.');
-  }
+  if (u.emailTaken(db, addr, student.id)) throw emailUnavailable(!!row.email);
   const now = ctx.clock.now();
   tx(db, () => {
     db.prepare('UPDATE users SET password_hash = ?, email = ? WHERE id = ?').run(auth.hashPassword(pw), addr, student.id);
@@ -146,9 +170,7 @@ function acceptStudent(ctx, row, body, pw) {
 
 function acceptGuardian(ctx, row, by, body, pw) {
   const db = ctx.db;
-  if (u.emailTaken(db, row.email)) {
-    throw conflict('email_taken', 'That email already has an account. Sign in with it, then open this invite again to join the family.');
-  }
+  if (u.emailTaken(db, row.email)) throw emailUnavailable(true);
   const name = body.name == null || String(body.name).trim() === '' ? row.name : u.text(body.name, 'name', 'your name');
   const phone = u.phone(body.phone);
   const id = tx(db, () => {
@@ -257,6 +279,8 @@ function routes(r, ctx) {
     const phone = u.phone(b.phone);
     if (!addr && !phone) throw bad('contact', 'Add an email or a phone number so you can send the invite.');
     if (!req.user.location_id) throw bad('location', 'Your account has no home location yet. Ask the front desk to set it.');
+    const twinStudent = openInviteTo(db, req.user.id, 'student', addr);
+    if (twinStudent) throw alreadyInvited(twinStudent, ctx.clock.now());
     const parents = activeParents(db, coGuardians(db, req.user.id));
     const out = tx(db, () => {
       const now = ctx.clock.now();
@@ -295,6 +319,13 @@ function routes(r, ctx) {
     const name = u.text(b.name, 'name', "the guardian's name");
     const addr = u.email(b.email);
     if (addr === String(req.user.email || '').toLowerCase()) throw bad('email', "That's your own email. Enter the other guardian's email.");
+    // A student's email can never sign in as a parent, so that invite could never be used.
+    const kid = db.prepare(`SELECT s.name FROM family_links fl JOIN users s ON s.id = fl.student_id
+      WHERE fl.parent_id = ?1 AND s.role = 'student' AND s.active = 1 AND (s.email = ?2 OR EXISTS (SELECT 1 FROM account_invites i
+        WHERE i.kind = 'student' AND i.user_id = s.id AND i.revoked_at IS NULL AND i.email = ?2)) LIMIT 1`).get(req.user.id, addr);
+    if (kid) throw bad('email', `That's the email for ${u.firstName(kid.name)}, a student on your account. Enter the guardian's own email.`);
+    const twinGuardian = openInviteTo(db, req.user.id, 'guardian', addr);
+    if (twinGuardian) throw alreadyInvited(twinGuardian, ctx.clock.now());
     res.status(201).json(createInvite(ctx, { kind: 'guardian', by: req.user.id, name, email: addr }));
   });
 
@@ -315,14 +346,32 @@ function routes(r, ctx) {
     if (row.kind === 'student' && auth.studentLinked(ctx, row.user_id)) {
       throw conflict('already_active', `${u.firstName(row.name)} is already approved, so there is no invite to cancel.`);
     }
+    // Declining: the student already accepted, so their parents were asked to approve them.
+    const declined = row.kind === 'student' && !!row.accepted_at;
+    const first = u.firstName(row.name);
+    const now = ctx.clock.now();
+    const others = declined ? activeParents(db, db.prepare("SELECT parent_id FROM family_links WHERE student_id = ? AND status = 'pending'")
+      .all(row.user_id).map(r => r.parent_id).filter(id => id !== req.user.id)) : [];
     tx(db, () => {
-      db.prepare('UPDATE account_invites SET revoked_at = ? WHERE id = ?').run(ctx.clock.now(), row.id);
+      db.prepare('UPDATE account_invites SET revoked_at = ? WHERE id = ?').run(now, row.id);
       if (row.kind === 'student') {
         // The pending student never got access; retire the account so nobody can finish it.
         db.prepare("DELETE FROM family_links WHERE student_id = ? AND status = 'pending'").run(row.user_id);
         db.prepare('UPDATE users SET active = 0, email = NULL, password_hash = NULL WHERE id = ?').run(row.user_id);
       }
+      if (declined) {
+        // The "accepted your invite" items stop asking anyone to approve.
+        db.prepare(`UPDATE notifications SET body = ?, read_at = COALESCE(read_at, ?)
+          WHERE kind = 'account_student_accepted' AND ref_type = 'user' AND ref_id = ?`)
+          .run(`${req.user.name} declined ${first}, so there's nothing to approve.`, now, row.user_id);
+      }
     });
+    if (declined) {
+      notify.send(ctx, others, {
+        kind: 'account_student_declined', title: `${u.firstName(req.user.name)} declined ${first}`,
+        body: `${first}'s account wasn't created, and the invite code no longer works.`, refType: 'user', refId: row.user_id,
+      });
+    }
     res.json({ ok: true });
   });
 

@@ -11,7 +11,7 @@
 //   Operations side: directors for their own location, HQ for any one location or all (AT-4).
 //   Staff are not given reports.
 //   GET /report/options           the locations, sessions and range shortcuts the caller may report on
-//   GET /report                   ?location=<id|all>&session=<id>&from&to
+//   GET /report                   ?location=<id|all>&session=<id>&from&to   (`timing`: upcoming, current or past)
 //   GET /report.csv, /report.pdf  the same report as a download
 // No scheduled jobs: absences are computed on every read (D-15), never stored.
 
@@ -77,12 +77,29 @@ function reportScope(ctx, user, q) {
   return { from, to, location, session };
 }
 
+// Every location an all-locations report covers, by name.
+const allLocations = ctx => ctx.db.prepare('SELECT id, name, timezone FROM locations ORDER BY name, id').all();
+
+// Where the range stands against today, so the screen never says a session that
+// hasn't happened yet had a check-in (D-15 counts only sessions that have ended):
+// 'upcoming' before it starts, 'past' once it is over, else 'current'. Today is the
+// location's own date; across every location, a range has started once it has
+// started anywhere, and is over once it is over everywhere.
+function timing(ctx, scope) {
+  const now = ctx.clock.now();
+  const todays = (scope.location ? [scope.location] : allLocations(ctx)).map(l => time.localDate(l, now)).sort();
+  if (scope.from > todays[todays.length - 1]) return 'upcoming';
+  if (scope.to < todays[0]) return 'past';
+  return 'current';
+}
+
 function report(ctx, scope) {
   const log = svc.log(ctx, { locationId: scope.location ? scope.location.id : null, sessionId: scope.session ? scope.session.id : null,
     from: scope.from, to: scope.to });
   return {
     filters: { location: scope.location, session: scope.session, from: scope.from, to: scope.to },
     label: svc.rangeLabel(scope.from, scope.to),
+    timing: timing(ctx, scope),
     ...log,
     by_student: svc.byStudent(log.visits, log.absences),
   };
@@ -171,7 +188,8 @@ module.exports = {
     r.get('/report.pdf', reportsOnly, async (req, res) => {
       const scope = reportScope(ctx, req.user, req.query);
       const rep = report(ctx, scope);
-      const pdf = await files.reportPdf({ filters: rep.filters, label: rep.label, log: rep, byStudent: rep.by_student, now: ctx.clock.now() });
+      const pdf = await files.reportPdf({ filters: rep.filters, label: rep.label, log: rep, byStudent: rep.by_student, now: ctx.clock.now(),
+        locations: scope.location ? [] : allLocations(ctx) });
       download(res, 'application/pdf', reportFilename(scope, 'pdf'), pdf);
     });
 

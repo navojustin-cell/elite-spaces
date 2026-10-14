@@ -151,8 +151,14 @@ legend { font-weight: 600; font-size: .9rem; padding: 0 .3rem; }
 .list > li:last-child { border-bottom: 0; }
 .list .grow { flex: 1; min-width: 0; }
 .card.list { padding: 4px 16px; }
-.inbox-link { display: flex; align-items: center; gap: .75rem; flex: 1; min-width: 0; min-height: 44px; color: inherit; text-decoration: none; border-radius: 8px; }
+.inbox-link, .inbox-row { display: flex; align-items: center; gap: .75rem; flex: 1; min-width: 0; min-height: 44px; color: inherit; text-decoration: none; border-radius: 8px; }
 .inbox-link:hover strong { text-decoration: underline; }
+.inbox-link.emergency, .inbox-row.emergency { margin: 0; }
+.inbox-go { font-size: 1.4rem; line-height: 1; color: var(--muted); }
+.emergency .inbox-go { color: #fff; }
+/* "New" on an unread Inbox item: navy on white (dark: pale on near-black), white on an emergency's red. */
+.badge-new { background: var(--brand); color: var(--brand-ink); margin-right: .4rem; }
+.emergency .badge-new { background: #fff; color: var(--danger-fill); }
 .avatar { width: 40px; height: 40px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-weight: 700; flex: none; }
 
 .table-wrap { overflow-x: auto; position: relative; }
@@ -179,10 +185,24 @@ table.table { width: 100%; border-collapse: collapse; font-size: .92rem; }
 
 .empty { text-align: center; color: var(--muted); padding: 2rem 1rem; }
 
-#toasts { position: fixed; left: 50%; transform: translateX(-50%); bottom: 84px; z-index: 50; display: grid; gap: .5rem; width: min(92vw, 420px); }
+/* Toasts never cover the bottom of a phone, where the tab bar and primary buttons sit:
+   they hang just under the top bar (sticky, zero height, so nothing shifts). Desktop: bottom right.
+   Taps pass through them to the page. */
+#toasts { position: sticky; top: 64px; z-index: 50; height: 0; width: min(92vw, 420px); margin: 0 auto;
+  display: grid; gap: .5rem; align-content: start; transform: translateY(8px); pointer-events: none; }
 .toast { background: var(--text); color: var(--bg); border-radius: 12px; padding: .75rem 1rem; box-shadow: var(--shadow); font-weight: 500; }
 .toast-error { background: var(--danger-fill); color: #fff; }
-@media (min-width: 900px) { #toasts { bottom: 24px; } }
+@media (min-width: 900px) {
+  #toasts { position: fixed; top: auto; bottom: 24px; right: 24px; height: auto; width: min(420px, calc(100vw - 48px)); margin: 0; transform: none; }
+}
+
+/* App.confirm: an inline question that names the consequence. */
+.confirm { flex: 1 1 100%; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: var(--radius-sm); padding: .75rem 1rem; margin: .5rem 0; color: var(--text); }
+.confirm-danger { background: var(--danger-soft); border-color: var(--danger); }
+.confirm-title { font-weight: 700; margin: 0 0 .25rem; }
+.confirm-body { margin: 0 0 .75rem; }
+.confirm .row { margin-top: .5rem; }
+.list > li:has(> .confirm) { flex-wrap: wrap; }
 
 /* sign-in */
 .signin { max-width: 440px; margin: 6vh auto 0; }

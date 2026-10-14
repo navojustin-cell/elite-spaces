@@ -2,7 +2,11 @@
 // Enrollment and waitlists (PRD 3): EN-1..EN-7, NF-1, NF-3.
 // Default clock: Wed 14 Oct 2026 10:00 in Los Angeles. The default session
 // meets Mon/Wed/Fri 13:00-16:00 in the Fall 2026 term (Aug 17 - Dec 18).
-const { test, makeApp, assert, at } = require('./lib');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const crypto = require('crypto');
+const { test, makeApp, assert, at, load, ROOT } = require('./lib');
 
 const LA = 'America/Los_Angeles';
 
@@ -901,4 +905,196 @@ test(['EN-4', 'MB-5'], 'a spot kept paused over the weekly limit says so, instea
   assert.match((await enroll(t, f.parent, f.student, sess, 3)).body.message, /is paused until the membership is renewed\.$/);
   t.fx.membership(f.student, { cap: 1, status: 'inactive' });
   assert.match((await enroll(t, f.parent, f.student, sess, 3)).body.message, /is paused until the membership is renewed\.$/);
+});
+
+// ---------------------------------------------------------------- the demo data (src/modules/enrollment/seed.js)
+
+test(['EN-3'], "the demo's pending request and its notice in the parents' Inbox carry the same time", async () => {
+  const { t, loc, sess } = await world();
+  const garcia = t.fx.family(loc, { students: 2 }), nguyen = t.fx.family(loc);
+  const small = t.fx.session(loc, { name: 'Quiet Room', weekdays: '2,4', capacity: 1 });
+  const morning = t.fx.session(loc, { name: 'Morning Focus', weekdays: '1,2,3,4,5', start: '09:30', end: '12:00' });
+  const demo = { NOW: t.clock.now(), families: [garcia, nguyen], sessions: { small, pmMWF: sess, morning } };
+  load('src/modules/enrollment/seed.js')(t.ctx, demo);
+  const asked = t.db.prepare("SELECT * FROM enrollment_requests WHERE status = 'pending'").all();
+  assert.deepEqual(asked.map(r => [r.student_id, r.created_at]), [[garcia.students[1].id, demo.NOW - 3 * 3600e3]]);
+  const told = t.fx.notifications(garcia.parent, 'enrollment_request');
+  assert.deepEqual(told.map(n => [n.ref_id, n.created_at]), [[asked[0].id, asked[0].created_at]], 'Home says "asked" at the time the Inbox shows');
+  assert.equal(t.clock.now(), demo.NOW, 'the clock is left as it was');
+});
+
+// ---------------------------------------------------------------- the Schedule screen and Inbox in a browser tab
+
+// Just enough DOM for public/js/app.js and this module's view, as in core.test.js:
+// one tree under <html>; focus, bubbling events and isConnected work as in a browser.
+class El {
+  constructor(doc, tag, data = '') { Object.assign(this, { doc, tag, data, childNodes: [], attrs: new Map(), on: {}, parentNode: null }); }
+  get textContent() { return this.tag ? this.childNodes.map(c => c.textContent).join('') : this.data; }
+  set textContent(s) { this.replaceChildren(String(s)); }
+  get className() { return this.getAttribute('class') || ''; }
+  set className(v) { this.setAttribute('class', v); }
+  setAttribute(k, v) { this.attrs.set(k, String(v)); }
+  getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
+  get id() { return this.getAttribute('id') || ''; }
+  get hidden() { return this.attrs.has('hidden'); }
+  set hidden(v) { if (v) this.attrs.set('hidden', ''); else this.attrs.delete('hidden'); }
+  get cls() { return this.className.split(/\s+/).filter(Boolean); }
+  get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === this.doc.documentElement; }
+  addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
+  dispatch(type, props) {
+    const ev = Object.assign({ type, target: this, stopped: false, preventDefault() {}, stopPropagation() { this.stopped = true; } }, props);
+    for (let n = this; n && !ev.stopped; n = n.parentNode) { ev.currentTarget = n; for (const fn of n.on[type] || []) fn(ev); }
+  }
+  click() { this.dispatch('click'); }
+  focus() { this.doc.focused = this; }
+  adopt(kids) { return kids.map(k => { const n = k instanceof El ? k : new El(this.doc, null, String(k)); n.remove(); n.parentNode = this; return n; }); }
+  append(...kids) { this.childNodes.push(...this.adopt(kids)); }
+  appendChild(k) { this.append(k); return k; }
+  prepend(...kids) { this.childNodes.unshift(...this.adopt(kids)); }
+  after(...kids) { const p = this.parentNode, ns = p.adopt(kids); p.childNodes.splice(p.childNodes.indexOf(this) + 1, 0, ...ns); }
+  replaceChildren(...kids) { this.childNodes.forEach(c => { c.parentNode = null; }); this.childNodes = []; this.append(...kids); }
+  remove() { if (this.parentNode) this.parentNode.childNodes = this.parentNode.childNodes.filter(c => c !== this); this.parentNode = null; }
+  contains(n) { for (; n; n = n.parentNode) if (n === this) return true; return false; }
+  all() { return this.childNodes.flatMap(c => [c, ...c.all()]); }
+  find(pred) { return this.all().find(pred); }
+  findAll(pred) { return this.all().filter(pred); }
+}
+
+// One tab running the real shell and enrollment view (read from ROOT, so the
+// mutation runner's copy is the one exercised) against the test server.
+// window.confirm only counts its calls: the view must never use it.
+function shellTab(t) {
+  let cookie = '';
+  const pending = new Set();
+  const track = p => { pending.add(p); const done = () => pending.delete(p); p.then(done, done); return p; };
+  const doc = { title: '', hidden: false, on: {}, addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); } };
+  const el = (tag, attrs = {}) => { const n = new El(doc, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; };
+  doc.documentElement = el('html');
+  doc.head = el('head');
+  doc.body = el('body');
+  doc.documentElement.append(doc.head, doc.body);
+  const shell = el('div', { id: 'shell' });
+  shell.append(el('nav', { id: 'nav', hidden: '' }), el('main', { id: 'main', tabindex: '-1' }));
+  doc.body.append(el('div', { id: 'devbar', hidden: '' }), el('header', { id: 'topbar', hidden: '' }), el('div', { id: 'toasts' }), shell);
+  Object.assign(doc, {
+    createElement: tag => new El(doc, tag), createTextNode: s => new El(doc, null, String(s)),
+    getElementById: id => doc.documentElement.find(n => n.id === id) || null,
+  });
+  Object.defineProperty(doc, 'activeElement', { get: () => (doc.focused && doc.focused.isConnected ? doc.focused : doc.body) });
+  const winOn = {};
+  const location = {
+    _hash: '',
+    get hash() { return this._hash; },
+    set hash(v) {
+      this._hash = v ? (String(v).startsWith('#') ? String(v) : '#' + v) : '';
+      track(new Promise(r => setImmediate(() => { (winOn.hashchange || []).forEach(fn => fn({ type: 'hashchange' })); r(); })));
+    },
+  };
+  class EventSource { close() {} }
+  const fetchAs = (url, opts = {}) => track(fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie }) }))
+    .then(async r => new Response(await r.arrayBuffer(), { status: r.status, headers: r.headers })));
+  const tab = { confirms: 0 };
+  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, console, navigator: {}, location, EventSource,
+    history: { replaceState(_s, _t, url) { location._hash = String(url).replace(/^[^#]*/, ''); } },
+    addEventListener(type, fn) { (winOn[type] = winOn[type] || []).push(fn); },
+    confirm: () => { tab.confirms++; return true; },
+    setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
+  win.window = win;
+  vm.createContext(win);
+  for (const f of ['public/js/app.js', 'public/js/views/enrollment.js']) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
+  const settle = async () => {
+    do {
+      await Promise.allSettled([...pending]);
+      for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+    } while (pending.size);
+  };
+  return Object.assign(tab, {
+    doc, settle, main: () => doc.getElementById('main'), toasts: () => doc.getElementById('toasts').childNodes.map(n => n.textContent),
+    async open(user, hash) {
+      const token = crypto.randomBytes(16).toString('hex');
+      t.ctx.sessions.set(token, user.id);
+      cookie = 'sid=' + token;
+      location._hash = hash;
+      win.App.start();
+      await settle();
+    },
+    async go(hash) { location.hash = hash; await settle(); },
+  });
+}
+const words = n => n.all().filter(c => !c.tag).map(c => c.data).join(' ').replace(/\s+/g, ' ').trim();
+const byTag = (root, tag) => root.findAll(n => n.tag === tag);
+const rename = (t, u, name) => { t.db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, u.id); return Object.assign(u, { name }); };
+
+test(['EN-6'], 'Drop asks inline in place of the row: "Keep Mondays" comes first and has focus, Escape keeps the spot, "Drop Mondays" drops it', async () => {
+  const { t, loc, sess } = await world();
+  const f = t.fx.family(loc);
+  rename(t, f.student, 'Leo Garcia');
+  const e = t.fx.enroll(f.student, sess, 1);
+  const tab = shellTab(t);
+  await tab.open(f.parent, '#/schedule');
+  const dropButton = () => byTag(tab.main(), 'button').find(b => b.getAttribute('aria-label') === 'Drop Afternoon Study on Mondays');
+  const status = () => t.db.prepare('SELECT status FROM enrollments WHERE id = ?').get(e.id).status;
+
+  const btn = dropButton();
+  const row = btn.parentNode, before = row.childNodes.slice();
+  btn.click();
+  const box = row.childNodes[0];
+  assert.equal(row.childNodes.length, 1, 'the question takes the place of the row');
+  assert.equal(box.getAttribute('role'), 'alertdialog');
+  assert.equal(tab.doc.getElementById(box.getAttribute('aria-labelledby')).textContent, 'Drop Leo from Afternoon Study on Mondays?');
+  assert.match(tab.doc.getElementById(box.getAttribute('aria-describedby')).textContent,
+    /^This ends the weekly spot \(1pm–4pm\)\. The seat goes to the next family on the waitlist/);
+  const choices = byTag(box, 'button');
+  assert.deepEqual(choices.map(b => b.textContent), ['Keep Mondays', 'Drop Mondays'], 'the safe answer comes first, and each names the day');
+  assert.ok(choices[1].cls.includes('btn-danger'));
+  assert.equal(tab.doc.activeElement, choices[0], 'focus starts on the safe answer');
+  tab.doc.activeElement.dispatch('keydown', { key: 'Escape' });
+  await tab.settle();
+  assert.equal(status(), 'active', 'Escape keeps the spot');
+  assert.ok(row.childNodes.length === before.length && row.childNodes.every((n, i) => n === before[i]), 'the row comes back');
+  assert.equal(tab.doc.activeElement, btn, 'focus goes back to Drop');
+
+  btn.click();
+  byTag(row, 'button').find(b => b.textContent === 'Drop Mondays').click();
+  await tab.settle();
+  assert.equal(status(), 'dropped');
+  assert.deepEqual(tab.toasts(), ['Dropped Afternoon Study on Mondays.']);
+  assert.equal(dropButton(), undefined, 'the page is drawn again without the spot');
+  assert.equal(tab.confirms, 0, 'window.confirm is never used');
+});
+
+test(['EN-3'], 'request notices in the Inbox open Schedule, for the parents asked and for the student told the answer', async () => {
+  const { t, loc, sess } = await world();
+  const f = t.fx.family(loc);
+  const r = await t.as(f.student).post('/api/enrollment/requests', { sessionId: sess.id, weekday: 1 });
+  assert.equal((await t.as(f.parent).post(`/api/enrollment/requests/${r.body.request.id}/decline`)).status, 200);
+  const links = tab => tab.main().findAll(n => n.tag === 'li').map(li => li.childNodes[0])
+    .map(item => [words(item), item.tag === 'a' ? item.getAttribute('href') : null]);
+  const parent = shellTab(t);
+  await parent.open(f.parent, '#/inbox');
+  assert.deepEqual(links(parent).map(([text, href]) => [/asked to join Afternoon Study/.test(text), href]), [[true, '#/schedule']]);
+  const student = shellTab(t);
+  await student.open(f.student, '#/inbox');
+  assert.deepEqual(links(student).map(([text, href]) => [/declined your request for Afternoon Study/.test(text), href]), [[true, '#/schedule']]);
+  await student.go('#/schedule');
+  assert.equal(byTag(student.main(), 'h1')[0].textContent, 'My schedule');
+});
+
+test(['EN-4', 'MB-5'], "a student whose membership lapsed hears one message on Schedule: it isn't active, the sessions are paused, and who renews it", async () => {
+  const { t, loc, sess } = await world();
+  const lapsed = t.fx.family(loc, { status: 'inactive' });
+  t.fx.enroll(lapsed.student, sess, 1, { status: 'paused' });
+  const expired = t.fx.family(loc, { expires: '2026-10-13' });
+  t.fx.enroll(expired.student, sess, 3, { status: 'paused' });
+  const never = t.fx.family(loc, { status: 'inactive' });
+  const fine = t.fx.family(loc);
+  const notes = tab => tab.main().findAll(n => n.getAttribute('role') === 'note').map(words);
+  const paused = "Your membership isn't active, so your sessions are paused. Ask a parent or the front desk at Irvine to renew it.";
+  const ask = "Nothing new can be added until it's renewed. You can still ask; your parent will see this too.";
+  for (const [who, want] of [[lapsed, [paused, ask]], [expired, [paused, ask]],
+    [never, ["Your membership isn't active. Ask a parent or the front desk at Irvine to renew it.", ask]], [fine, []]]) {
+    const tab = shellTab(t);
+    await tab.open(who.student, '#/schedule');
+    assert.deepEqual(notes(tab), want);
+  }
 });

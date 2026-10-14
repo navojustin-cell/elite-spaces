@@ -6,6 +6,11 @@
   'use strict';
   const { h } = App;
 
+  // The filter tabs stay one row of one-line tabs; on a phone the row (.tabs) scrolls sideways.
+  document.head.append(h('style', null, `
+    .mb-tabs button { flex: none; white-space: nowrap; padding-left: .6rem; padding-right: .6rem; }
+  `));
+
   // ---------- shared wording ----------
   const STATE = {
     active: { label: 'Active', badge: 'badge-ok' },
@@ -47,10 +52,12 @@
         (self ? renew : renew + 'keep ' + first(x.student.name) + '\'s weekly sessions.')));
     } else if (m.state === 'expired' || m.state === 'inactive') {
       const paused = x.paused_slots;
-      box.append(h('div', { class: 'notice notice-danger', style: 'margin:.6rem 0 0' },
-        who + ' membership ' + (m.state === 'expired' ? 'ended on ' + fullDate(m.expires_on) : 'isn\'t active right now') + '. ' +
-        (paused ? plural(paused, 'weekly session is', 'weekly sessions are') + ' paused and saved. ' : '') +
-        (self ? renew : renew + (paused ? (paused === 1 ? 'bring it back.' : 'bring them back.') : 'enroll in sessions again.'))));
+      // A student hears the same words here as on their Schedule (views/enrollment.js).
+      box.append(h('div', { class: 'notice notice-danger', style: 'margin:.6rem 0 0' }, self
+        ? (paused ? 'Your membership isn\'t active, so your sessions are paused. ' : 'Your membership isn\'t active. ') + renew
+        : who + ' membership ' + (m.state === 'expired' ? 'ended on ' + fullDate(m.expires_on) : 'isn\'t active right now') + '. ' +
+          (paused ? plural(paused, 'weekly session is', 'weekly sessions are') + ' paused and saved. ' : '') +
+          renew + (paused ? (paused === 1 ? 'bring it back.' : 'bring them back.') : 'enroll in sessions again.')));
     }
     return box;
   }
@@ -113,7 +120,7 @@
     const search = h('input', { type: 'search', id: 'mb-search', value: query, autocomplete: 'off', placeholder: 'Student or parent name' });
     controls.append(field('mb-search', 'Find a student', search));
 
-    const tabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Show' });
+    const tabs = h('div', { class: 'tabs mb-tabs', role: 'tablist', 'aria-label': 'Show' });
     const panel = h('div', { id: 'mb-panel', role: 'tabpanel', class: 'card' });
 
     const draw = () => {
@@ -134,9 +141,11 @@
         return;
       }
       panel.className = 'card';
-      // position:relative keeps the visually hidden header text inside the scroll box.
-      panel.replaceChildren(h('div', { class: 'table-wrap', style: 'position:relative' }, h('table', { class: 'table' },
-        h('caption', { class: 'sr-only' }, 'Memberships at ' + data.location.name),
+      // position:relative keeps the visually hidden header text inside the scroll box. On a phone the
+      // table is wider than the screen, so the box takes focus and arrow keys scroll it.
+      const title = 'Memberships at ' + data.location.name;
+      panel.replaceChildren(h('div', { class: 'table-wrap', style: 'position:relative', tabindex: '0', role: 'region', 'aria-label': title }, h('table', { class: 'table' },
+        h('caption', { class: 'sr-only' }, title),
         h('thead', null, h('tr', null,
           ['Student', 'Membership', 'Weekly limit', 'Valid through', 'Sessions'].map(t => h('th', { scope: 'col' }, t)),
           h('th', { scope: 'col' }, h('span', { class: 'sr-only' }, 'Actions')))),
@@ -146,6 +155,9 @@
     draw();
     el.append(controls, tabs, panel);
   }
+
+  // An account no parent has approved yet, in the People screen's words (views/accounts.js).
+  const ACCOUNT = { awaiting_approval: 'Waiting for parent approval', invited: 'Invited, not set up yet' };
 
   function rosterRow(s) {
     const m = s.membership;
@@ -159,7 +171,7 @@
       : 'None';
     return h('tr', null,
       h('td', null, h('strong', null, s.name),
-        h('div', { class: 'muted small' }, s.linked ? (s.parents.length > 1 ? 'Parents: ' : 'Parent: ') + s.parents.join(', ') : 'Waiting for a parent to approve the account')),
+        h('div', { class: 'muted small' }, s.account === 'active' ? (s.parents.length > 1 ? 'Parents: ' : 'Parent: ') + s.parents.join(', ') : ACCOUNT[s.account])),
       h('td', null, badge(m), note && h('div', { class: 'muted small' }, note)),
       h('td', null, m ? plural(m.weekly_cap, 'session', 'sessions') : '—'),
       h('td', null, m ? fullDate(m.expires_on) : '—'),

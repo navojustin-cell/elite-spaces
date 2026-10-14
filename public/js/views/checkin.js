@@ -157,18 +157,19 @@
           h('p', { class: 'small', style: 'margin:0' }, `${r.location.name}. Your parents have been told.`))
         : h('div', { class: 'notice notice-ok ci-result' },
           h('span', { class: 'ci-big' }, h('span', { 'aria-hidden': 'true' }, '✓ '), 'Checked out'),
-          h('p', null, `${App.fmtTime(v.check_out_at, tz)} · Total time ${App.fmtDuration(r.total_minutes)}`),
+          h('p', null, `${App.fmtTime(v.check_out_at, tz)}${r.session ? ' · ' + r.session.name : ''} · Total time ${App.fmtDuration(r.total_minutes)}`),
           h('p', { class: 'small', style: 'margin:0' }, `See you next time at ${r.location.name}.`));
       result.replaceChildren(box);
       box.setAttribute('tabindex', '-1');
       box.focus({ preventScroll: false });
     }
-    function askCheckout(message, go) {
+    // A second scan soon after checking in (or out) asks before undoing it.
+    function askFirst(message, { yes, no, kept }, go) {
       result.replaceChildren(h('div', { class: 'card ci-result', role: 'alert' },
         h('p', null, h('strong', null, message)),
         h('div', { class: 'ci-actions', style: 'justify-content:center' },
-          h('button', { class: 'btn btn-primary', type: 'button', onclick: go }, 'Check out'),
-          h('button', { class: 'btn', type: 'button', onclick: () => result.replaceChildren(h('p', { class: 'notice' }, "OK, you're still checked in.")) }, 'Stay checked in'))));
+          h('button', { class: 'btn btn-primary', type: 'button', onclick: go }, yes),
+          h('button', { class: 'btn', type: 'button', onclick: () => result.replaceChildren(h('p', { class: 'notice' }, kept)) }, no))));
     }
 
     const TITLES = {
@@ -192,9 +193,11 @@
         showSuccess(r);
         loadStatus();
       } catch (e) {
-        if (e.code === 'confirm_checkout') return askCheckout(e.message, () => submit(target, pos, true));
+        if (e.code === 'confirm_checkout') return askFirst(e.message, { yes: 'Check out', no: 'Stay checked in', kept: "OK, you're still checked in." }, () => submit(target, pos, true));
+        if (e.code === 'confirm_checkin') return askFirst(e.message, { yes: 'Check back in', no: 'Stay checked out', kept: "OK, you're still checked out." }, () => submit(target, pos, true));
         if (e.code === 'outside_radius' && pos.accuracy > 75) {
-          return showError("Your phone's location is fuzzy right now", `It's only accurate to about ${Math.round(pos.accuracy)} m. Step near a window or the entrance and try again, or ask staff to check you in.`, { retry: () => submit(target) });
+          const inOut = status && status.state === 'here' ? 'out' : 'in';
+          return showError("Your phone's location is fuzzy right now", `It's only accurate to about ${Math.round(pos.accuracy)} m. Step near a window or the entrance and try again, or ask staff to check you ${inOut}.`, { retry: () => submit(target) });
         }
         showError(TITLES[e.code] || "We couldn't check you in", e.message);
       }
@@ -210,7 +213,7 @@
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
       } catch (e) {
-        if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) return showError('The camera is blocked for ELITE Spaces', 'We need the camera to read the code by the entrance.', { steps: cameraHelp() });
+        if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) return showError('The camera is blocked for ELITE Spaces', 'We need the camera to read the code by the entrance.', { steps: cameraHelp(), retry: startCamera });
         if (e && e.name === 'NotFoundError') return showError("We couldn't find a camera", 'Ask staff at the front desk to check you in.');
         return showError("The camera didn't start", 'Close other apps using the camera and try again, or ask staff to check you in.', { retry: startCamera });
       }
@@ -301,30 +304,62 @@
   const IN_REASONS = ['Phone is dead', 'Forgot phone', "Location check didn't work", "Camera didn't work", 'Other'];
   const OUT_REASONS = ['Phone is dead', 'Forgot to scan out', 'Leaving early', 'Other'];
 
+  // One reusable dialog for every check-in/out sheet. Closing it any way (Cancel, Escape, done)
+  // empties it and takes it out of the page at once, so its fields and ids never linger or repeat.
+  const sheetDlg = h('dialog', { class: 'ci-dialog', 'aria-labelledby': 'ci-dlg-title' });
+  function closeSheet() {
+    if (sheetDlg.open) sheetDlg.close();
+    sheetDlg.replaceChildren();
+    sheetDlg.remove();
+  }
+  // Escape closes the dialog natively. The close event arrives later, so skip it if the sheet has opened again.
+  sheetDlg.addEventListener('close', () => { if (!sheetDlg.open) closeSheet(); });
+
   // A confirm sheet that names the student and the action, with an optional reason (CI-7).
+  // "Other" opens a short text box; what staff type there is saved as the reason.
   function confirmSheet({ title, warn, confirmLabel, reasons, onConfirm }) {
+    closeSheet();
     const reason = h('select', { id: 'ci-reason' }, h('option', { value: '' }, 'No reason given'), reasons.map(r => h('option', { value: r }, r)));
+    const other = h('input', { type: 'text', id: 'ci-reason-other', maxlength: 100, autocomplete: 'off' });
+    const otherField = h('label', { class: 'field ci-hideable', for: 'ci-reason-other', hidden: true }, h('span', null, 'What happened?'), other);
+    reason.addEventListener('change', () => {
+      otherField.hidden = reason.value !== 'Other';
+      if (!otherField.hidden) other.focus();
+    });
     const warnBox = h('div');
     const btn = h('button', { class: 'btn btn-primary', type: 'submit' }, confirmLabel);
     const setWarn = text => warnBox.replaceChildren(text ? h('div', { class: 'notice notice-warn' }, text) : '');
     setWarn(warn);
-    const dlg = h('dialog', { class: 'ci-dialog', 'aria-labelledby': 'ci-dlg-title' },
+    sheetDlg.replaceChildren(
       h('form', { onsubmit: async ev => {
         ev.preventDefault();
+        const why = reason.value === 'Other' ? other.value.trim() || 'Other' : reason.value;
         await App.run(btn, async () => {
-          const done = await onConfirm(reason.value, { setWarn, setLabel: t => { btn.textContent = t; } });
-          if (done !== false) dlg.close();
+          const done = await onConfirm(why, { setWarn, setLabel: t => { btn.textContent = t; } });
+          if (done !== false) closeSheet();
         });
       } },
       h('h2', { id: 'ci-dlg-title' }, title),
       warnBox,
       h('label', { class: 'field', for: 'ci-reason' }, h('span', null, 'Reason (optional)'), reason),
+      otherField,
       h('p', { class: 'muted small' }, 'This is saved with your name.'),
-      h('div', { class: 'ci-actions' }, btn, h('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Cancel'))));
-    dlg.addEventListener('close', () => dlg.remove());
-    document.body.append(dlg);
-    dlg.showModal();
+      h('div', { class: 'ci-actions' }, btn, h('button', { class: 'btn', type: 'button', onclick: closeSheet }, 'Cancel'))));
+    document.body.append(sheetDlg);
+    sheetDlg.showModal();
   }
+
+  // Why staff are about to check someone in anyway: an inactive membership, no session open now, or both.
+  function overrideWarn(name, membershipActive, sessionWarn) {
+    if (membershipActive !== false) return sessionWarn;
+    return `${first(name)}'s membership isn't active.` + (sessionWarn ? ' ' + sessionWarn : ' Check in anyway?');
+  }
+  // "Checked in by Chris Ortiz · Phone is dead" for a manual entry.
+  const byLine = (verb, name, reason) => `${verb} by ${name || 'staff'}` + (reason ? ' · ' + reason : '');
+  const inLine = v => (v.checkin_method === 'staff' ? byLine('Checked in', v.checked_in_by_name, v.checkin_reason) : inLabel(v.checkin_method));
+  const outLine = v => (v.checkout_method === 'staff' ? byLine('Checked out', v.checked_out_by_name, v.checkout_reason) : outLabel(v.checkout_method));
+  // 'HH:MM' (24-hour) in the location's zone, the value a time input takes.
+  const hhmm = (ms, tz) => new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: tz }).format(ms);
 
   function manualCheckin(student, { override, warn, after }) {
     confirmSheet({
@@ -334,8 +369,8 @@
         try {
           await App.api.post(API + '/manual-checkin', { studentId: student.id, reason: reason || undefined, override: override || undefined });
         } catch (e) {
-          if (e.code !== 'no_session') throw e;
-          override = true; // no session after all: say so and ask once more
+          if (e.code !== 'no_session' && e.code !== 'membership_inactive') throw e;
+          override = true; // no session or an inactive membership after all: say so and ask once more
           sheet.setWarn(e.message);
           sheet.setLabel('Check in anyway');
           return false;
@@ -391,7 +426,8 @@
           s.here
             ? h('button', { class: 'btn', type: 'button', 'aria-label': `Check out ${s.name}`, onclick: () => manualCheckout(s.visit_id, s.name, reload) }, 'Check out')
             : h('button', { class: 'btn', type: 'button', 'aria-label': `Check in ${s.name}`,
-              onclick: () => manualCheckin(s, { override: !s.session_now, warn: s.session_now ? null : `${first(s.name)} doesn't have a session right now. You can still check them in.`, after: reload }) }, 'Check in'))));
+              onclick: () => manualCheckin(s, { override: !s.session_now || !s.membership_active, after: reload,
+                warn: overrideWarn(s.name, s.membership_active, s.session_now ? null : `${first(s.name)} doesn't have a session right now. You can still check them in.`) }) }, 'Check in'))));
       }
       q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => search().catch(e => App.toast(e.message, 'error')), 250); });
       el.append(h('section', { class: 'card', 'aria-labelledby': 'ci-find-h' },
@@ -423,7 +459,8 @@
           h('h2', { id: 'ci-rev-h' }, h('span', { class: 'badge badge-warn' }, 'Needs review'), ' ', plural(d.needs_review.length, 'visit', 'visits') + ' to check'),
           h('p', { class: 'muted small' }, "These students didn't scan out, so the app checked them out automatically. Confirm the time, or set the real time out."),
           h('ul', { class: 'list' }, d.needs_review.map(v => {
-            const time = h('input', { type: 'time', id: 'ci-out-' + v.visit_id, required: true });
+            // Starts at the automatic time out (the session end or closing time), so staff only adjust it.
+            const time = h('input', { type: 'time', id: 'ci-out-' + v.visit_id, required: true, value: v.check_out_at != null ? hhmm(v.check_out_at, tz) : null });
             const fix = h('form', { class: 'row ci-hideable', hidden: true, style: 'margin-top:.5rem', onsubmit: async ev => {
               ev.preventDefault();
               await App.run(ev.submitter, async () => {
@@ -438,6 +475,8 @@
               h('div', { class: 'grow' }, h('strong', null, v.name),
                 h('div', { class: 'muted small' }, `${App.fmtDate(v.local_date)} · ${v.session_name || 'No session'} · in ${App.fmtTime(v.check_in_at, tz)} · out ${App.fmtTime(v.check_out_at, tz)}`
                   + (v.checkout_method === 'auto' ? ' (automatic)' : '')),
+                v.checkin_method === 'staff' && h('div', { class: 'muted small' }, inLine(v)),
+                v.checkout_method === 'staff' && h('div', { class: 'muted small' }, outLine(v)),
                 v.flag_reason && h('div', { class: 'small' }, v.flag_reason), fix),
               h('div', { class: 'ci-actions' },
                 h('button', { class: 'btn', type: 'button', 'aria-label': `Confirm the time out for ${v.name}`, onclick: async e => {
@@ -461,9 +500,9 @@
           d.here.length ? h('ul', { class: 'list' }, d.here.map(v => h('li', null,
             h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(v.name)),
             h('div', { class: 'grow' }, h('strong', null, v.name),
-              h('div', { class: 'muted small' }, `${v.session_name || 'No session'} · in at ${App.fmtTime(v.check_in_at, tz)} · ${inLabel(v.checkin_method)}`)),
+              h('div', { class: 'muted small' }, `${v.session_name || 'No session'} · in at ${App.fmtTime(v.check_in_at, tz)} · ${inLine(v)}`)),
             h('button', { class: 'btn', type: 'button', 'aria-label': `Check out ${v.name}`, onclick: () => manualCheckout(v.visit_id, v.name, reload) }, 'Check out'))))
-            : h('p', { class: 'empty', style: 'padding:1rem' }, "Nobody's checked in yet today."));
+            : h('p', { class: 'empty', style: 'padding:1rem' }, d.left.length ? 'Nobody is in the building right now.' : "Nobody's checked in yet today."));
       }
 
       function expected(d) {
@@ -477,8 +516,8 @@
                 h('div', { class: 'muted small' }, `${x.session_name} · ${d.now >= x.start_at ? 'started' : 'starts'} ${App.fmtTime(x.start_at, tz)}`)),
               h('button', { class: 'btn', type: 'button', 'aria-label': `Check in ${x.name}`,
                 onclick: () => manualCheckin({ id: x.student_id, name: x.name }, {
-                  override: !open, after: reload,
-                  warn: open ? null : `${first(x.name)}'s ${x.session_name} doesn't open for check-in until ${App.fmtTime(x.start_at - EARLY_MS, tz)}. You can still check them in now.`,
+                  override: !open || !x.membership_active, after: reload,
+                  warn: overrideWarn(x.name, x.membership_active, open ? null : `${first(x.name)}'s ${x.session_name} doesn't open for check-in until ${App.fmtTime(x.start_at - EARLY_MS, tz)}. You can still check them in now.`),
                 }) }, 'Check in'));
           })) : h('p', { class: 'empty', style: 'padding:1rem' }, 'No one else is expected today.'));
       }
@@ -490,8 +529,9 @@
             h('thead', null, h('tr', null, ['Student', 'Session', 'In', 'Out', 'How they left'].map(c => h('th', { scope: 'col' }, c)))),
             h('tbody', null, d.left.map(v => h('tr', null,
               h('td', null, v.name), h('td', null, v.session_name || 'No session'),
-              h('td', null, App.fmtTime(v.check_in_at, tz)), h('td', null, App.fmtTime(v.check_out_at, tz)),
-              h('td', null, v.checkout_method === 'auto' ? h('span', { class: 'badge badge-warn' }, outLabel(v.checkout_method)) : outLabel(v.checkout_method)))))))
+              h('td', null, App.fmtTime(v.check_in_at, tz), v.checkin_method === 'staff' && h('div', { class: 'muted small' }, inLine(v))),
+              h('td', null, App.fmtTime(v.check_out_at, tz)),
+              h('td', null, v.checkout_method === 'auto' ? h('span', { class: 'badge badge-warn' }, outLabel(v.checkout_method)) : outLine(v)))))))
             : h('p', { class: 'empty', style: 'padding:1rem' }, 'No one has left yet today.'));
       }
 
@@ -547,6 +587,14 @@
       }, 60000);
     },
   });
+
+  // ---------- Inbox links for check-in notifications (ref_type 'visit') ----------
+  // The first route the signed-in role can open wins: a parent's check-out (or automatic
+  // check-out) opens Hours, staff open In the building, and a parent's check-in opens Home,
+  // whose Today card shows where the student is now.
+  App.inboxLink('visit', n => (n.kind === 'checkin' ? null : 'hours'));
+  App.inboxLink('visit', 'building');
+  App.inboxLink('visit', 'home');
 
   // ---------- Home cards ----------
   App.card({

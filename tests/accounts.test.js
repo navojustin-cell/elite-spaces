@@ -375,7 +375,7 @@ test(['AC-2', 'NF-1'], 'an existing parent joins only with an invite sent to the
   assert.equal(auth.canSeeStudent(t.ctx, stranger, z.student.id), false);
   const dup = await t.anon.post(A + '/invites/accept', { code: g.code, password: 'whatever1' });
   assert.equal(dup.status, 409);
-  assert.equal(dup.body.error, 'email_taken');
+  assert.equal(dup.body.error, 'email_unavailable');
   const ok = await t.as(xy.parent).post(A + '/invites/join', { code: g.code });
   assert.equal(ok.status, 200);
   assert.equal(auth.canSeeStudent(t.ctx, xy.parent, z.student.id), true);
@@ -431,6 +431,120 @@ test(['AC-2', 'NF-1'], 'a parent in two families never carries one family\'s stu
   const zInv = await inviteGuardian(t, z.parent, { name: 'Grandma Z', email: 'grandma@family.test' });
   assert.equal((await t.as(y).post(A + '/invites/' + zInv.invite.id + '/cancel')).status, 403);
   assert.equal((await t.as(xy.parent).post(A + '/invites/' + zInv.invite.id + '/resend')).status, 200);
+});
+
+test(['AC-2', 'AC-3'], 'a family gets one open invite per email: a second guardian or student invite to it is refused, and Resend is the way', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  const g = await inviteGuardian(t, p, { name: 'Mark Johnson', email: 'mark@family.test' });
+  const mark = (await t.anon.post(A + '/invites/accept', { code: g.code, password: 'markpass1' })).body.user;
+  const kemi = await inviteGuardian(t, p, { name: 'Kemi Adeyemi', email: 'kemi@family.test' });
+  // the same email again, from the same parent or a co-guardian: refused, pointing at Resend
+  for (const who of [p, mark]) {
+    const again = await t.as(who).post(A + '/guardians/invite', { name: 'Kemi A', email: 'KEMI@family.test' });
+    assert.equal(again.status, 409, JSON.stringify(again.body));
+    assert.equal(again.body.error, 'invite_pending');
+    assert.match(again.body.message, /^Kemi already has an invite at that email\. Use Resend/);
+  }
+  assert.equal(t.db.prepare("SELECT COUNT(*) AS n FROM account_invites WHERE email = 'kemi@family.test'").get().n, 1);
+  assert.deepEqual((await t.as(p).get(A + '/family')).body.invites.map(i => i.email), ['kemi@family.test']);
+  // an expired invite still has its card, which offers a new code
+  t.clock.set(DEFAULT_NOW + 8 * DAY);
+  assert.match((await t.as(p).post(A + '/guardians/invite', { name: 'Kemi', email: 'kemi@family.test' })).body.message, /Use Send a new code/);
+  // another family may invite the same person; once cancelled, this family may invite again
+  assert.equal((await t.as(parentAt(t, loc)).post(A + '/guardians/invite', { name: 'Kemi', email: 'kemi@family.test' })).status, 201);
+  assert.equal((await t.as(p).post(A + '/invites/' + kemi.invite.id + '/cancel')).status, 200);
+  await inviteGuardian(t, p, { name: 'Kemi Adeyemi', email: 'kemi@family.test' });
+  // students too: one open invite per email in the family, while siblings may share a phone
+  const leo = await inviteStudent(t, p, { name: 'Leo Diaz', email: 'leo@kid.test' });
+  for (const who of [p, mark]) {
+    const twin = await t.as(who).post(A + '/students/invite', { name: 'Leo D', email: 'Leo@Kid.Test' });
+    assert.equal(twin.status, 409, JSON.stringify(twin.body));
+    assert.equal(twin.body.error, 'invite_pending');
+  }
+  assert.equal(t.db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'student'").get().n, 1);
+  await inviteStudent(t, p, { name: 'Ana Diaz', phone: '555-0140' });
+  await inviteStudent(t, p, { name: 'Bo Diaz', phone: '555-0140' });
+  // the first code still works
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: leo.code, password: 'kidpass12' })).status, 200);
+});
+
+test(['AC-2'], 'a guardian invite to the email of one of the family\'s own students is refused when it is made', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  await approvedStudent(t, p, 'Leo Diaz', 'leo@kid.test');
+  await inviteStudent(t, p, { name: 'Ana Diaz', email: 'ana@kid.test' });
+  for (const [email, kid] of [['LEO@kid.test', 'Leo'], ['ana@kid.test', 'Ana']]) {
+    const r = await t.as(p).post(A + '/guardians/invite', { name: 'Grandpa', email });
+    assert.equal(r.status, 400, email);
+    assert.equal(r.body.error, 'email');
+    assert.equal(r.body.message, `That's the email for ${kid}, a student on your account. Enter the guardian's own email.`);
+  }
+  assert.equal(t.db.prepare("SELECT COUNT(*) AS n FROM account_invites WHERE kind = 'guardian'").get().n, 0);
+  // another family's student is not named or refused: that would tell a stranger the address is in use
+  assert.equal((await t.as(parentAt(t, loc)).post(A + '/guardians/invite', { name: 'Someone', email: 'leo@kid.test' })).status, 201);
+});
+
+test(['AC-1', 'AC-3', 'NF-1'], 'the invite accept screen gives one neutral answer for an email in use, whoever holds it', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  const holders = [parentAt(t, loc), t.fx.staff(loc), t.fx.staff(loc, { active: 0 }), t.fx.hq()];
+  const inv = await inviteStudent(t, p, { name: 'Ana Diaz', phone: '555-0101' });
+  const answers = [];
+  for (const h of [...holders, { email: holders[0].email.toUpperCase() }]) {
+    const r = await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12', email: h.email });
+    answers.push({ status: r.status, body: r.body });
+  }
+  for (const a of answers) assert.deepEqual(a, answers[0]);
+  assert.equal(answers[0].status, 409);
+  assert.equal(answers[0].body.error, 'email_unavailable');
+  assert.equal(answers[0].body.message, 'Already have an account? Sign in first, then open this invite again. If not, use a different email.');
+  assert.doesNotMatch(JSON.stringify(answers[0].body), /already has|exists|taken|in use|staff|parent/i);
+  assert.equal(userRow(t, inv.invite.user_id).password_hash, null);
+  assert.equal((await t.anon.get(A + '/invites/' + inv.code)).status, 200);
+  // an invite whose email was set by the inviter: the same answer for a student invite and a guardian invite
+  const kid = await inviteStudent(t, p, { name: 'Bo Diaz', email: holders[1].email });
+  const grown = await inviteGuardian(t, p, { name: 'Mark Diaz', email: holders[2].email });
+  const k = await t.anon.post(A + '/invites/accept', { code: kid.code, password: 'kidpass12' });
+  const g = await t.anon.post(A + '/invites/accept', { code: grown.code, password: 'markpass1' });
+  assert.deepEqual({ status: k.status, body: k.body }, { status: g.status, body: g.body });
+  assert.deepEqual(k.body, { error: 'email_unavailable',
+    message: 'Already have an account? Sign in first, then open this invite again. If not, ask for a new invite to a different email.' });
+  // a free email goes straight through
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12', email: 'ana@kid.test' })).status, 200);
+});
+
+test(['AC-3', 'AC-2'], 'declining a student who accepted tells the other guardians, and the accepted item stops asking for approval', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc, { name: 'Rosa Diaz' });
+  const g = await inviteGuardian(t, p, { name: 'Mark Diaz', email: 'mark@family.test' });
+  const mark = (await t.anon.post(A + '/invites/accept', { code: g.code, password: 'markpass1' })).body.user;
+  const leo = await inviteStudent(t, p, { name: 'Leo Diaz', email: 'leo@kid.test' });
+  const ana = await inviteStudent(t, p, { name: 'Ana Diaz', email: 'ana@kid.test' });
+  for (const inv of [leo, ana]) assert.equal((await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12' })).status, 200);
+  const accepted = (who, sid) => t.fx.notifications(who, 'account_student_accepted').find(n => n.ref_id === sid);
+  for (const who of [p, mark]) assert.match(accepted(who, leo.invite.user_id).body, /^Approve Leo/);
+  const r = await t.as(p).post(A + '/invites/' + leo.invite.id + '/cancel');
+  assert.equal(r.status, 200);
+  for (const who of [p, mark]) {
+    const n = accepted(who, leo.invite.user_id);
+    assert.equal(n.body, "Rosa Diaz declined Leo, so there's nothing to approve.");
+    assert.equal(n.read_at, DEFAULT_NOW);
+    // Ana still waits, and her item still asks
+    assert.match(accepted(who, ana.invite.user_id).body, /^Approve Ana/);
+    assert.equal(accepted(who, ana.invite.user_id).read_at, null);
+  }
+  const told = t.fx.notifications(mark, 'account_student_declined');
+  assert.equal(told.length, 1);
+  assert.equal(told[0].title, 'Rosa declined Leo');
+  assert.equal(told[0].body, "Leo's account wasn't created, and the invite code no longer works.");
+  assert.deepEqual([told[0].ref_type, told[0].ref_id], ['user', leo.invite.user_id]);
+  assert.equal(t.fx.notifications(p, 'account_student_declined').length, 0);
+  assert.equal(userRow(t, leo.invite.user_id).active, 0);
 });
 
 // ---------------------------------------------------------------- AC-4 staff accounts
