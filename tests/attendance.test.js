@@ -1,0 +1,1174 @@
+'use strict';
+// Attendance and hours (PRD 7): what every visit shows (AT-1), history by week,
+// month or term with computed absences (AT-2, D-15), family CSV/PDF exports
+// (AT-3), director/HQ reports (AT-4), and who may see what (NF-1).
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const zlib = require('zlib');
+const crypto = require('crypto');
+const { test, makeApp, assert, at, ROOT } = require('./lib');
+
+const LA = 'America/Los_Angeles', TOR = 'America/Toronto';
+const A = '/api/attendance';
+
+// ISO weekday of a 'YYYY-MM-DD' date (1 = Monday).
+const weekdayOf = d => new Date(d + 'T12:00:00Z').getUTCDay() || 7;
+
+// A PDF's objects in file order: { id, dict, data } with each stream inflated.
+function pdfObjects(buf) {
+  const s = buf.toString('latin1');
+  const objs = [];
+  const re = /(\d+) 0 obj\b/g;
+  let m;
+  while ((m = re.exec(s))) {
+    const at = re.lastIndex, end = s.indexOf('endobj', at), so = s.indexOf('stream', at);
+    if (so === -1 || so > end) { objs.push({ id: Number(m[1]), dict: s.slice(at, end) }); re.lastIndex = end; continue; }
+    const dict = s.slice(at, so), begin = so + (s.startsWith('stream\r\n', so) ? 8 : 7);
+    const len = Number(/\/Length (\d+)/.exec(dict)[1]);
+    let data = Buffer.from(s.slice(begin, begin + len), 'latin1');
+    if (dict.includes('/FlateDecode')) data = zlib.inflateSync(data);
+    objs.push({ id: Number(m[1]), dict, data });
+    re.lastIndex = begin + len;
+  }
+  return objs;
+}
+
+// A font's ToUnicode CMap as pdfkit writes it (bfrange arrays): code -> text.
+function toUnicode(cmap) {
+  const map = new Map();
+  const text = hex => String.fromCharCode(...hex.split(/\s+/).filter(Boolean).map(u => parseInt(u, 16)));
+  for (const r of cmap.matchAll(/<([0-9a-f]+)> <[0-9a-f]+> \[([^\]]*)\]/gi)) {
+    [...r[2].matchAll(/<([^>]*)>/g)].forEach((e, i) => map.set(parseInt(r[1], 16) + i, text(e[1])));
+  }
+  return map;
+}
+
+// The text a PDF shows, in drawing order, whitespace collapsed. pdfkit writes
+// text as hex inside TJ arrays in Flate streams: 2-byte glyph codes read
+// through the font's ToUnicode map for an embedded font, WinAnsi bytes for a
+// built-in one (Helvetica).
+function pdfText(buf) {
+  const objs = pdfObjects(buf);
+  const byId = new Map(objs.map(o => [o.id, o]));
+  const unicode = new Map(); // font object id -> its ToUnicode map
+  for (const o of objs) {
+    const ref = /\/ToUnicode (\d+) 0 R/.exec(o.dict);
+    if (ref) unicode.set(o.id, toUnicode(byId.get(Number(ref[1])).data.toString('latin1')));
+  }
+  const fonts = new Map(); // resource name (F1) -> ToUnicode map, or undefined for a built-in font
+  for (const o of objs) for (const r of o.dict.matchAll(/\/(F\d+) (\d+) 0 R/g)) fonts.set(r[1], unicode.get(Number(r[2])));
+  const dec = new TextDecoder('windows-1252');
+  const out = [];
+  for (const o of objs) {
+    if (!o.data) continue;
+    let font;
+    for (const t of o.data.toString('latin1').matchAll(/\/(F\d+) [\d.]+ Tf|\[(.*?)\] TJ/g)) {
+      if (t[1]) { font = fonts.get(t[1]); continue; }
+      out.push([...t[2].matchAll(/<([0-9a-fA-F]*)>/g)].map(x => (font
+        ? (x[1].match(/.{4}/g) || []).map(c => font.get(parseInt(c, 16)) ?? '�').join('')
+        : dec.decode(Buffer.from(x[1], 'hex')))).join(''));
+    }
+  }
+  return out.join(' ').replace(/\s+/g, ' ');
+}
+
+// What each glyph code of every embedded font stands for (its ToUnicode entries).
+const pdfGlyphs = buf => pdfObjects(buf).filter(o => o.data && o.data.includes('beginbfrange'))
+  .flatMap(o => [...toUnicode(o.data.toString('latin1')).values()]);
+
+// Every font a PDF uses, as "Subtype BaseFont" without the subset tag.
+const pdfFonts = buf => [...new Set(pdfObjects(buf).filter(o => /\/Type \/Font\b/.test(o.dict) && !/CIDFontType/.test(o.dict))
+  .map(o => /\/Subtype \/(\w+)/.exec(o.dict)[1] + ' ' + /\/BaseFont \/(?:[A-Z]{6}\+)?([\w-]+)/.exec(o.dict)[1]))].sort();
+
+// RFC 4180 CSV -> rows of cells.
+function parseCsv(text) {
+  text = text.replace(/^\uFEFF/, '');
+  const rows = [];
+  let row = [], cell = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (c === '"') quoted = false; else cell += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(cell); cell = ''; } else if (c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; } else if (c !== '\r') cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+// One Irvine location with a Fall term and an afternoon Mon/Wed/Fri session
+// (1-4pm). One family whose student holds all three weekly slots since Mon Sep 28.
+async function world({ term } = {}) {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine', timezone: LA });
+  const fall = t.fx.term(loc, term);
+  const pm = t.fx.session(loc, { term: fall, name: 'Afternoon Study', weekdays: '1,3,5', start: '13:00', end: '16:00' });
+  const fam = t.fx.family(loc);
+  const kid = rename(t, fam.student, 'Maya Johnson');
+  const slots = {};
+  for (const wd of [1, 3, 5]) slots[wd] = enrollSince(t, kid, pm, wd, at(LA, '2026-09-28', '08:00'));
+  // A visit to the afternoon session: visit('2026-10-12', '13:02', '15:58')
+  const visit = (date, inAt, outAt, o = {}) => {
+    const { checked_in_by = null, checked_out_by = null, flag_reason = null, ...extra } = o.extra || {};
+    const v = t.fx.visit(o.student || kid, o.location || loc, Object.assign({
+      session: o.session === undefined ? pm : o.session, weekday: weekdayOf(date), local_date: date,
+      check_in_at: at(o.zone || LA, date, inAt), check_out_at: outAt ? at(o.zone || LA, date, outAt) : null,
+      checkout_method: outAt ? 'scan' : null,
+    }, extra));
+    t.db.prepare('UPDATE visits SET checked_in_by = ?, checked_out_by = ?, flag_reason = ? WHERE id = ?')
+      .run(checked_in_by, checked_out_by, flag_reason, v.id);
+    return v;
+  };
+  return { t, loc, term: fall, pm, fam, kid, parent: fam.parent, slots, visit };
+}
+
+function rename(t, u, name) {
+  t.db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, u.id);
+  return Object.assign({}, u, { name });
+}
+function enrollSince(t, student, session, weekday, createdAt) {
+  const e = t.fx.enroll(student, session, weekday);
+  t.db.prepare('UPDATE enrollments SET created_at = ? WHERE id = ?').run(createdAt, e.id);
+  return e;
+}
+const closure = (t, loc, date) => t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(loc.id, date, 'Closed');
+// What a staff change to a membership leaves in the core tables at `when`: the
+// record rewritten, and an audit row with the record before and after (MB-2, NF-2).
+// The clock moves to `when` too, so the slot changes the membership module makes
+// in the same request (setSlots) are stamped at that instant in the status log (D-26).
+function staffSetsMembership(t, student, changes, when) {
+  t.clock.set(when);
+  const keep = m => ({ status: m.status, weekly_cap: m.weekly_cap, start_date: m.start_date, expires_on: m.expires_on });
+  const m = t.db.prepare('SELECT * FROM memberships WHERE student_id = ?').get(student.id);
+  const after = Object.assign(keep(m), changes);
+  t.db.prepare('UPDATE memberships SET status = ?, weekly_cap = ?, start_date = ?, expires_on = ?, updated_at = ? WHERE id = ?')
+    .run(after.status, after.weekly_cap, after.start_date, after.expires_on, when, m.id);
+  t.db.prepare(`INSERT INTO audit_log (action, target_type, target_id, location_id, detail, at) VALUES ('membership.update', 'membership', ?, ?, ?, ?)`)
+    .run(m.id, student.location_id, JSON.stringify({ student_id: student.id, before: keep(m), after }), when);
+}
+// MB-5: the membership module pauses a student's slots, or brings some back.
+const setSlots = (t, status, slots) => slots.forEach(e => t.db.prepare('UPDATE enrollments SET status = ? WHERE id = ?').run(status, e.id));
+const pick = (rows, keys) => rows.map(r => Object.fromEntries(keys.map(k => [k, r[k]])));
+
+// ---------------------------------------------------------------- AT-1
+
+test(['AT-1'], 'every visit shows check-in, check-out, total minutes, session and how check-out happened', async () => {
+  const w = await world();
+  const staff = rename(w.t, w.t.fx.staff(w.loc), 'Chris Ortiz');
+  w.visit('2026-10-12', '13:02', '15:58');
+  w.visit('2026-10-09', '13:00', '16:00', { extra: { checkout_method: 'auto', flagged: 1, flag_reason: 'Did not scan out' } });
+  w.visit('2026-10-07', '13:10', '15:40', { extra: { checkout_method: 'staff', checked_out_by: staff.id } });
+
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=month&date=2026-10-14`);
+  assert.equal(r.status, 200);
+  assert.deepEqual(pick(r.body.visits, ['date', 'session_name', 'check_in_local', 'check_out_local', 'minutes', 'checkout_method', 'timezone']), [
+    { date: '2026-10-07', session_name: 'Afternoon Study', check_in_local: '13:10', check_out_local: '15:40', minutes: 150, checkout_method: 'staff', timezone: LA },
+    { date: '2026-10-09', session_name: 'Afternoon Study', check_in_local: '13:00', check_out_local: '16:00', minutes: 180, checkout_method: 'auto', timezone: LA },
+    { date: '2026-10-12', session_name: 'Afternoon Study', check_in_local: '13:02', check_out_local: '15:58', minutes: 176, checkout_method: 'scan', timezone: LA },
+  ]);
+  assert.equal(r.body.visits[0].checked_out_by_name, 'Chris Ortiz');
+  assert.equal(r.body.visits[1].check_in_at, at(LA, '2026-10-09', '13:00'));
+  assert.equal(r.body.totals.minutes, 506);
+  assert.equal(r.body.totals.hours, 8.43);
+  assert.equal(r.body.totals.visits, 3);
+});
+
+test(['AT-1'], 'a visit still in progress has no check-out, total or method yet', async () => {
+  const w = await world();
+  w.t.clock.set(at(LA, '2026-10-14', '14:00'));
+  w.visit('2026-10-14', '12:58', null);
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=week`);
+  assert.equal(r.status, 200);
+  assert.deepEqual(pick(r.body.visits, ['date', 'check_in_local', 'check_out_local', 'minutes', 'checkout_method']),
+    [{ date: '2026-10-14', check_in_local: '12:58', check_out_local: null, minutes: null, checkout_method: null }]);
+  assert.equal(r.body.totals.minutes, 0);
+});
+
+test(['AT-1', 'AT-3'], 'times are the location\'s own local time: a Toronto visit reads 9:05, not Los Angeles or UTC time', async () => {
+  const t = await makeApp();
+  const tor = t.fx.location({ name: 'Toronto', timezone: TOR, lat: 43.65, lng: -79.38 });
+  const morning = t.fx.session(tor, { name: 'Morning Focus', weekdays: '1,3,5', start: '09:00', end: '11:30' });
+  const fam = t.fx.family(tor);
+  const kid = rename(t, fam.student, 'Noah Roy');
+  t.fx.visit(kid, tor, { session: morning, weekday: 1, local_date: '2026-10-12', check_in_at: at(TOR, '2026-10-12', '09:05'),
+    check_out_at: at(TOR, '2026-10-12', '11:25'), checkout_method: 'scan' });
+
+  const r = await t.as(fam.parent).get(`${A}/students/${kid.id}/history?period=week&date=2026-10-12`);
+  assert.deepEqual(pick(r.body.visits, ['check_in_local', 'check_out_local', 'minutes', 'timezone']),
+    [{ check_in_local: '09:05', check_out_local: '11:25', minutes: 140, timezone: TOR }]);
+
+  const csv = await t.as(fam.parent).get(`${A}/students/${kid.id}/log.csv?from=2026-10-12&to=2026-10-12`);
+  assert.deepEqual(parseCsv(csv.body)[1], ['visit', '2026-10-12', 'Noah Roy', 'Toronto', 'Morning Focus', '09:05', '11:25', '140', '2.33', 'scan', TOR]);
+  const pdf = await t.as(fam.parent).get(`${A}/students/${kid.id}/log.pdf?from=2026-10-12&to=2026-10-12`);
+  assert.ok(pdfText(pdf.body).includes('Mon, Oct 12, 2026 Morning Focus 9:05 AM 11:25 AM 2h 20m Scanned out'), pdfText(pdf.body));
+});
+
+// ---------------------------------------------------------------- AT-2
+
+test(['AT-2'], 'week view: Monday to Sunday around the date, with previous and next weeks but never a future one', async () => {
+  const w = await world();
+  w.visit('2026-10-11', '13:00', '15:00', { session: null });   // Sunday before: last week
+  w.visit('2026-10-12', '13:02', '15:58');
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=week&date=2026-10-14`);
+  assert.equal(r.status, 200);
+  const { kind, from, to, label, prev, next } = r.body.period;
+  assert.deepEqual({ kind, from, to, label, prev, next },
+    { kind: 'week', from: '2026-10-12', to: '2026-10-18', label: 'Oct 12 – Oct 18, 2026', prev: '2026-10-05', next: null });
+  assert.deepEqual(r.body.visits.map(v => v.date), ['2026-10-12']);
+
+  const earlier = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=week&date=2026-10-07`);
+  assert.deepEqual([earlier.body.period.from, earlier.body.period.to, earlier.body.period.next], ['2026-10-05', '2026-10-11', '2026-10-12']);
+  assert.deepEqual(earlier.body.visits.map(v => v.date), ['2026-10-11']);
+
+  const dflt = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history`);
+  assert.equal(dflt.body.period.kind, 'week');
+  assert.equal(dflt.body.period.from, '2026-10-12');
+});
+
+test(['AT-2'], 'month view: the calendar month with its totals', async () => {
+  const w = await world();
+  w.visit('2026-09-30', '13:00', '16:00');
+  w.visit('2026-10-02', '13:00', '15:30');
+  w.visit('2026-10-12', '13:00', '14:00');
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=month&date=2026-10-14`);
+  const { from, to, label, prev, next } = r.body.period;
+  assert.deepEqual({ from, to, label, prev, next }, { from: '2026-10-01', to: '2026-10-31', label: 'October 2026', prev: '2026-09-01', next: null });
+  assert.deepEqual(r.body.visits.map(v => v.date), ['2026-10-02', '2026-10-12']);
+  assert.equal(r.body.totals.visits, 2);
+  assert.equal(r.body.totals.minutes, 210);
+  assert.equal(r.body.totals.hours, 3.5);
+
+  const sept = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=month&date=2026-09-15`);
+  assert.deepEqual([sept.body.period.from, sept.body.period.to, sept.body.period.next], ['2026-09-01', '2026-09-30', '2026-10-01']);
+  assert.deepEqual(sept.body.visits.map(v => v.date), ['2026-09-30']);
+});
+
+test(['AT-2'], 'term view: the location\'s current term, with the earlier term one step back', async () => {
+  const w = await world();
+  w.t.fx.term(w.loc, { name: 'Summer 2026', start: '2026-06-15', end: '2026-08-14' });
+  w.visit('2026-08-10', '13:00', '16:00', { session: null });
+  w.visit('2026-09-30', '13:00', '16:00');
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=term`);
+  assert.equal(r.status, 200);
+  const { from, to, label, prev, next } = r.body.period;
+  assert.deepEqual({ from, to, label, prev, next }, { from: '2026-08-17', to: '2026-12-18', label: 'Fall 2026', prev: '2026-06-15', next: null });
+  assert.deepEqual(r.body.visits.map(v => v.date), ['2026-09-30']);
+
+  const summer = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=term&date=2026-06-15`);
+  assert.deepEqual([summer.body.period.label, summer.body.period.next], ['Summer 2026', '2026-08-17']);
+  assert.deepEqual(summer.body.visits.map(v => v.date), ['2026-08-10']);
+
+  const bad = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=year`);
+  assert.equal(bad.status, 400);
+});
+
+test(['AT-2'], 'a location with no term yet says so instead of failing', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Arcadia' });
+  const fam = t.fx.family(loc);
+  const r = await t.as(fam.parent).get(`${A}/students/${fam.student.id}/history?period=term`);
+  assert.equal(r.status, 404);
+  assert.match(r.body.message, /Arcadia hasn't set up a term yet/);
+});
+
+test(['AT-2'], 'absences (D-15): an enrolled session with no visit counts; attended and closure days do not; computed live', async () => {
+  const w = await world();
+  w.visit('2026-10-05', '13:00', '16:00');   // Mon attended
+  closure(w.t, w.loc, '2026-10-09');           // Fri closed
+  const url = `${A}/students/${w.kid.id}/history?period=week&date=2026-10-07`;
+  const r = await w.t.as(w.parent).get(url);
+  assert.deepEqual(pick(r.body.absences, ['date', 'session_name', 'start_time', 'end_time']),
+    [{ date: '2026-10-07', session_name: 'Afternoon Study', start_time: '13:00', end_time: '16:00' }]);
+  assert.equal(r.body.totals.absences, 1);
+  assert.equal(r.body.totals.visits, 1);
+
+  // Never stored: a visit recorded later (a staff fix) clears it on the next read.
+  w.visit('2026-10-07', '13:30', '15:00');
+  const again = await w.t.as(w.parent).get(url);
+  assert.deepEqual(again.body.absences, []);
+  assert.equal(again.body.totals.absences, 0);
+});
+
+// Staff checking a student in with no session right now ("check in anyway") records
+// a visit with no session. When it covers an enrolled session, the student was there.
+test(['AT-2', 'AT-3', 'AT-4'], 'a staff check-in with no session that covers an enrolled session clears that day\'s absence in history, files and reports', async () => {
+  const w = await world();
+  const staff = rename(w.t, w.t.fx.staff(w.loc), 'Chris Ortiz');
+  const director = w.t.fx.director(w.loc);
+  // Wed Oct 7: checked in by staff at noon with no session, out at 4pm. Mon Oct 5 and Fri Oct 9 she missed.
+  w.visit('2026-10-07', '12:00', '16:00', { session: null,
+    extra: { checkin_method: 'staff', checked_in_by: staff.id, checkout_method: 'staff', checked_out_by: staff.id } });
+  const p = w.t.as(w.parent);
+  const missed = ['2026-10-05', '2026-10-09'];
+
+  const h = await p.get(`${A}/students/${w.kid.id}/history?period=week&date=2026-10-07`);
+  assert.equal(h.status, 200);
+  assert.deepEqual(pick(h.body.visits, ['date', 'session_name', 'check_in_local', 'check_out_local', 'minutes', 'checkout_method']),
+    [{ date: '2026-10-07', session_name: null, check_in_local: '12:00', check_out_local: '16:00', minutes: 240, checkout_method: 'staff' }]);
+  assert.deepEqual(h.body.absences.map(a => a.date), missed);
+  assert.deepEqual([h.body.totals.visits, h.body.totals.minutes, h.body.totals.absences], [1, 240, 2]);
+
+  const q = 'from=2026-10-05&to=2026-10-09';
+  const csv = await p.get(`${A}/students/${w.kid.id}/log.csv?${q}`);
+  assert.equal(csv.status, 200);
+  assert.deepEqual(parseCsv(csv.body).slice(1), [
+    ['absent', '2026-10-05', 'Maya Johnson', 'Irvine', 'Afternoon Study', '', '', '', '', '', LA],
+    ['visit', '2026-10-07', 'Maya Johnson', 'Irvine', '', '12:00', '16:00', '240', '4.00', 'staff', LA],
+    ['absent', '2026-10-09', 'Maya Johnson', 'Irvine', 'Afternoon Study', '', '', '', '', '', LA],
+    ['total', '2026-10-05 to 2026-10-09', 'Maya Johnson', 'Irvine', '', '', '', '240', '4.00', '', ''],
+  ]);
+
+  const pdf = pdfText((await p.get(`${A}/students/${w.kid.id}/log.pdf?${q}`)).body);
+  assert.ok(pdf.includes('1 Visits 4.00 Total hours · 4h 0m 2 Absences'), pdf);
+  assert.ok(pdf.includes('Wed, Oct 7, 2026 No session 12:00 PM 4:00 PM 4h 0m By staff'), pdf);
+  assert.ok(pdf.includes('Fri, Oct 9, 2026 Afternoon Study 1:00 PM – 4:00 PM'), pdf);
+  assert.ok(!pdf.includes('Wed, Oct 7, 2026 Afternoon Study'), pdf);
+
+  const d = w.t.as(director);
+  const rep = await d.get(`${A}/report?${q}`);
+  assert.equal(rep.status, 200);
+  assert.deepEqual(rep.body.absences.map(a => [a.date, a.student_name]), missed.map(x => [x, 'Maya Johnson']));
+  assert.deepEqual([rep.body.totals.visits, rep.body.totals.minutes, rep.body.totals.absences], [1, 240, 2]);
+  assert.deepEqual(rep.body.by_student.map(s => [s.student_name, s.visits, s.minutes, s.absences]), [['Maya Johnson', 1, 240, 2]]);
+  const rcsv = parseCsv((await d.get(`${A}/report.csv?${q}`)).body);
+  assert.deepEqual(rcsv.filter(x => x[0] === 'absent').map(x => x[1]), missed);
+});
+
+test(['AT-2'], 'a check-in with no session clears an absence only if it overlaps the session at that location; a visit for another session never does', async () => {
+  const w = await world();
+  const lunch = w.t.fx.session(w.loc, { term: w.term, name: 'Lunch Club', weekdays: '1', start: '12:00', end: '13:30' });
+  enrollSince(w.t, w.kid, lunch, 1, at(LA, '2026-09-28', '08:00'));
+  const arcadia = w.t.fx.location({ name: 'Arcadia', lat: 34.14, lng: -118.03 });
+  w.visit('2026-10-05', '12:00', '16:00', { session: null, location: arcadia }); // at another location
+  w.visit('2026-10-07', '16:00', '17:00', { session: null });  // came just as the session ended
+  w.visit('2026-10-09', '10:00', '13:00', { session: null });  // left just as it began
+  w.visit('2026-10-12', '12:00', '13:30', { session: lunch }); // Lunch Club, which runs into the afternoon session
+  w.visit('2026-10-14', '12:30', null, { session: null });     // still here at 4:30pm
+  w.t.clock.set(at(LA, '2026-10-14', '16:30'));
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log?from=2026-10-05&to=2026-10-14`);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.absences.map(a => [a.date, a.session_name]), [
+    ['2026-10-05', 'Lunch Club'], ['2026-10-05', 'Afternoon Study'], ['2026-10-07', 'Afternoon Study'],
+    ['2026-10-09', 'Afternoon Study'], ['2026-10-12', 'Afternoon Study']]);
+  assert.equal(r.body.totals.absences, 5);
+});
+
+test(['AT-2'], 'absences count only sessions that have ended, and only after the family enrolled', async () => {
+  const w = await world();
+  const url = d => `${A}/students/${w.kid.id}/history?period=week&date=${d}`;
+  // Wed Oct 14, 10:00: Monday is over; today's 1-4pm session hasn't happened; Friday is ahead.
+  assert.deepEqual((await w.t.as(w.parent).get(url('2026-10-14'))).body.absences.map(a => a.date), ['2026-10-12']);
+  w.t.clock.set(at(LA, '2026-10-14', '16:30'));
+  assert.deepEqual((await w.t.as(w.parent).get(url('2026-10-14'))).body.absences.map(a => a.date), ['2026-10-12', '2026-10-14']);
+  // Enrolled Mon Sep 28 at 8am: the week before has nothing to miss; that week has all three.
+  assert.deepEqual((await w.t.as(w.parent).get(url('2026-09-23'))).body.absences, []);
+  assert.deepEqual((await w.t.as(w.parent).get(url('2026-09-30'))).body.absences.map(a => a.date), ['2026-09-28', '2026-09-30', '2026-10-02']);
+});
+
+test(['AT-2'], 'absences stop at the end of the term and at the day a slot was dropped', async () => {
+  const w = await world({ term: { name: 'Short term', start: '2026-08-17', end: '2026-10-07' } });
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=week&date=2026-10-07`);
+  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-10-05', '2026-10-07']);
+
+  const w2 = await world();
+  w2.t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(at(LA, '2026-10-06', '12:00'), w2.slots[3].id);
+  const r2 = await w2.t.as(w2.parent).get(`${A}/students/${w2.kid.id}/history?period=week&date=2026-10-07`);
+  assert.deepEqual(r2.body.absences.map(a => a.date), ['2026-10-05', '2026-10-09']);
+});
+
+test(['AT-2'], 'absences around an expired membership (D-15, D-16): misses before it lapsed still count; the paused weeks never do, even after renewal', async () => {
+  const w = await world();
+  const { t, kid } = w;
+  const all = Object.values(w.slots);
+  t.fx.membership(kid, { expires: '2026-10-02' });   // the last valid day is Fri Oct 2
+  w.visit('2026-09-30', '13:00', '16:00');
+  // Just after midnight the expiry job pauses all three slots.
+  t.clock.set(at(LA, '2026-10-03', '00:05'));
+  setSlots(t, 'paused', all);
+  const url = `${A}/students/${kid.id}/log?from=2026-09-28&to=2026-10-16`;
+  t.clock.set(at(LA, '2026-10-08', '18:00'));
+  const paused = await t.as(w.parent).get(url);
+  assert.deepEqual(paused.body.absences.map(a => a.date), ['2026-09-28', '2026-10-02']);
+  assert.equal(paused.body.totals.absences, 2);
+
+  // Renewed Mon Oct 12 at 9am: the slots come back, and Maya comes that afternoon.
+  staffSetsMembership(t, kid, { expires_on: '2027-06-30' }, at(LA, '2026-10-12', '09:00'));
+  setSlots(t, 'active', all);
+  w.visit('2026-10-12', '13:00', '16:00');
+  t.clock.set(at(LA, '2026-10-16', '17:00'));
+  const back = await t.as(w.parent).get(url);
+  assert.deepEqual(back.body.absences.map(a => a.date), ['2026-09-28', '2026-10-02', '2026-10-14', '2026-10-16']);
+  assert.equal(back.body.totals.absences, 4);
+  const week = await t.as(w.parent).get(`${A}/students/${kid.id}/history?period=week&date=2026-10-07`);
+  assert.deepEqual(week.body.absences, []);
+});
+
+test(['AT-2'], 'absences around a membership set inactive (D-15, D-16): count up to that moment; a slot still paused after reactivation adds none', async () => {
+  const w = await world();
+  const { t, kid } = w;
+  w.visit('2026-09-30', '13:00', '16:00');
+  // Staff set it inactive on Wed Oct 7 at 2pm, in the middle of that afternoon's session.
+  staffSetsMembership(t, kid, { status: 'inactive' }, at(LA, '2026-10-07', '14:00'));
+  setSlots(t, 'paused', Object.values(w.slots));
+  const url = `${A}/students/${kid.id}/log?from=2026-09-28&to=2026-10-16`;
+  t.clock.set(at(LA, '2026-10-08', '12:00'));
+  assert.deepEqual((await t.as(w.parent).get(url)).body.absences.map(a => a.date), ['2026-09-28', '2026-10-02', '2026-10-05']);
+
+  // Active again Fri Oct 9 at 8am with a weekly limit of 2: Monday and Wednesday
+  // come back; Friday stays paused (over the limit), so its Oct 9 and Oct 16 are not absences.
+  staffSetsMembership(t, kid, { status: 'active', weekly_cap: 2 }, at(LA, '2026-10-09', '08:00'));
+  setSlots(t, 'active', [w.slots[1], w.slots[3]]);
+  t.clock.set(at(LA, '2026-10-16', '17:00'));
+  const r = await t.as(w.parent).get(url);
+  assert.deepEqual(r.body.absences.map(a => [a.date, a.session_name]), [['2026-09-28', 'Afternoon Study'], ['2026-10-02', 'Afternoon Study'],
+    ['2026-10-05', 'Afternoon Study'], ['2026-10-12', 'Afternoon Study'], ['2026-10-14', 'Afternoon Study']]);
+  assert.equal(r.body.totals.absences, 5);
+});
+
+test(['AT-2'], 'a slot kept paused over the weekly limit adds no absences until it comes back, as the status log records it (D-16a, D-26)', async () => {
+  const w = await world();
+  const { t, kid } = w;
+  // Inactive Wed Oct 7 at 2pm. Active again Fri Oct 9 at 8am with a weekly limit of 2:
+  // Monday and Wednesday come back, Friday is kept paused.
+  staffSetsMembership(t, kid, { status: 'inactive' }, at(LA, '2026-10-07', '14:00'));
+  setSlots(t, 'paused', Object.values(w.slots));
+  staffSetsMembership(t, kid, { status: 'active', weekly_cap: 2 }, at(LA, '2026-10-09', '08:00'));
+  setSlots(t, 'active', [w.slots[1], w.slots[3]]);
+  // Tue Oct 13 at 9am the limit goes back to 3, and Friday comes back.
+  staffSetsMembership(t, kid, { weekly_cap: 3 }, at(LA, '2026-10-13', '09:00'));
+  setSlots(t, 'active', [w.slots[5]]);
+  t.clock.set(at(LA, '2026-10-16', '17:00'));
+  const r = await t.as(w.parent).get(`${A}/students/${kid.id}/log?from=2026-10-05&to=2026-10-16`);
+  // Fri Oct 9 was on hold, not missed, though the membership was valid that day. Fri Oct 16 was missed.
+  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-10-05', '2026-10-12', '2026-10-14', '2026-10-16']);
+  assert.equal(r.body.totals.absences, 4);
+  // The director's report counts the same weeks.
+  const rep = await t.as(t.fx.director(w.loc)).get(`${A}/report?from=2026-10-05&to=2026-10-16`);
+  assert.deepEqual(rep.body.absences.map(a => a.date), ['2026-10-05', '2026-10-12', '2026-10-14', '2026-10-16']);
+});
+
+test(['AT-2'], 'a slot paused with nothing in the status log (data from before the log) stops counting when the membership last lapsed', async () => {
+  const w = await world();
+  const { t } = w;
+  const fam = t.fx.family(w.loc);
+  const leo = rename(t, fam.student, 'Leo Garcia');
+  // Imported already paused, so no status change was ever logged for it.
+  const mon = t.fx.enroll(leo, w.pm, 1, { status: 'paused' });
+  t.db.prepare('UPDATE enrollments SET created_at = ? WHERE id = ?').run(at(LA, '2026-09-28', '08:00'), mon.id);
+  staffSetsMembership(t, leo, { status: 'inactive' }, at(LA, '2026-10-07', '14:00'));
+  staffSetsMembership(t, leo, { status: 'active' }, at(LA, '2026-10-09', '08:00')); // valid again; the slot stays paused
+  t.clock.set(at(LA, '2026-10-16', '17:00'));
+  const r = await t.as(fam.parent).get(`${A}/students/${leo.id}/log?from=2026-09-28&to=2026-10-16`);
+  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-09-28', '2026-10-05']);
+});
+
+test(['AT-2', 'NF-1'], 'the Hours list shows each linked student with this week\'s and this month\'s totals and range shortcuts', async () => {
+  const w = await world();
+  const second = rename(w.t, w.t.fx.user('student', { location: w.loc }), 'Ava Johnson');
+  w.t.fx.link(w.parent, second);
+  const other = w.t.fx.family(w.loc);
+  w.visit('2026-10-02', '13:00', '16:00');
+  w.visit('2026-10-12', '13:02', '15:58');
+  w.visit('2026-10-12', '13:00', '16:00', { student: other.student });
+
+  const r = await w.t.as(w.parent).get(`${A}/students`);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.students.map(s => s.name), ['Ava Johnson', 'Maya Johnson']);
+  const maya = r.body.students[1];
+  assert.equal(maya.location.name, 'Irvine');
+  assert.equal(maya.today, '2026-10-14');
+  assert.deepEqual([maya.week.from, maya.week.to, maya.week.totals.visits, maya.week.totals.minutes], ['2026-10-12', '2026-10-18', 1, 176]);
+  assert.deepEqual([maya.month.label, maya.month.totals.visits, maya.month.totals.minutes], ['October 2026', 2, 356]);
+  assert.deepEqual(maya.presets.map(p => [p.id, p.from, p.to]), [
+    ['this_week', '2026-10-12', '2026-10-18'], ['this_month', '2026-10-01', '2026-10-31'],
+    ['last_month', '2026-09-01', '2026-09-30'], ['this_term', '2026-08-17', '2026-12-18']]);
+  assert.equal(r.body.students[0].week.totals.visits, 0);
+});
+
+// ---------------------------------------------------------------- AT-3
+
+// Fri Oct 2 scanned out, Mon Oct 5 automatic, Wed Oct 7 missed, Fri Oct 9 checked out by staff.
+async function exportWorld() {
+  const w = await world();
+  const staff = rename(w.t, w.t.fx.staff(w.loc), 'Chris Ortiz');
+  w.visit('2026-10-02', '13:02', '15:58');
+  w.visit('2026-10-05', '13:00', '16:00', { extra: { checkout_method: 'auto', flagged: 1, flag_reason: 'Did not scan out' } });
+  w.visit('2026-10-09', '13:15', '15:15', { extra: { checkout_method: 'staff', checked_out_by: staff.id } });
+  return Object.assign(w, { staff });
+}
+
+test(['AT-3'], 'CSV export: a downloadable file with one row per visit and absence, then the total hours', async () => {
+  const w = await exportWorld();
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log.csv?from=2026-10-01&to=2026-10-09`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'text/csv; charset=utf-8');
+  assert.equal(r.headers.get('content-disposition'), 'attachment; filename="attendance-maya-johnson-2026-10-01-to-2026-10-09.csv"');
+  assert.deepEqual(parseCsv(r.body), [
+    ['record', 'date', 'student', 'location', 'session', 'check_in', 'check_out', 'minutes', 'hours', 'check_out_method', 'time_zone'],
+    ['visit', '2026-10-02', 'Maya Johnson', 'Irvine', 'Afternoon Study', '13:02', '15:58', '176', '2.93', 'scan', LA],
+    ['visit', '2026-10-05', 'Maya Johnson', 'Irvine', 'Afternoon Study', '13:00', '16:00', '180', '3.00', 'auto', LA],
+    ['absent', '2026-10-07', 'Maya Johnson', 'Irvine', 'Afternoon Study', '', '', '', '', '', LA],
+    ['visit', '2026-10-09', 'Maya Johnson', 'Irvine', 'Afternoon Study', '13:15', '15:15', '120', '2.00', 'staff', LA],
+    // The file says which dates it covers, so it still does once saved or forwarded.
+    ['total', '2026-10-01 to 2026-10-09', 'Maya Johnson', 'Irvine', '', '', '', '476', '7.93', '', ''],
+  ]);
+});
+
+test(['AT-3'], 'PDF export: student, location, dates, totals, one row per visit and the absences', async () => {
+  const w = await exportWorld();
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log.pdf?from=2026-10-01&to=2026-10-09`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'application/pdf');
+  assert.equal(r.headers.get('content-disposition'), 'attachment; filename="attendance-maya-johnson-2026-10-01-to-2026-10-09.pdf"');
+  assert.equal(r.body.subarray(0, 5).toString(), '%PDF-');
+  const text = pdfText(r.body);
+  for (const want of [
+    'Attendance and hours log', 'Student: Maya Johnson', 'Location: Irvine', 'Dates: Oct 1 – Oct 9, 2026',
+    '3 Visits 7.93 Total hours · 7h 56m 1 Absences',
+    'Fri, Oct 2, 2026 Afternoon Study 1:02 PM 3:58 PM 2h 56m Scanned out',
+    'Mon, Oct 5, 2026 Afternoon Study 1:00 PM 4:00 PM 3h 0m Automatic (did not scan out)',
+    'Fri, Oct 9, 2026 Afternoon Study 1:15 PM 3:15 PM 2h 0m By staff',
+    'Absences Date Session Scheduled Wed, Oct 7, 2026 Afternoon Study 1:00 PM – 4:00 PM',
+  ]) assert.ok(text.includes(want), `missing "${want}" in: ${text}`);
+});
+
+test(['AT-3', 'AT-4'], 'PDFs print names outside Windows-1252 (Vietnamese, Polish, Czech, Greek, Cyrillic) exactly as typed, in fonts embedded in the file', async () => {
+  const w = await exportWorld();
+  rename(w.t, w.kid, 'Nguyễn Thị Ánh');
+  rename(w.t, w.staff, 'Zoë Šťastná');
+  w.t.db.prepare('UPDATE locations SET name = ? WHERE id = ?').run('Łódź Study Hall', w.loc.id);
+  w.t.db.prepare('UPDATE sessions SET name = ? WHERE id = ?').run('Ελληνικά и Русский', w.pm.id);
+  const q = 'from=2026-10-01&to=2026-10-09';
+
+  const fam = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log.pdf?${q}`);
+  assert.equal(fam.status, 200);
+  // Both weights of the one Unicode font, embedded; no built-in (WinAnsi-only) font anywhere.
+  assert.deepEqual(pdfFonts(fam.body), ['Type0 DejaVuSans', 'Type0 DejaVuSans-Bold']);
+  // One glyph per letter: no ligature stands for "ff", which some readers copy, search and read aloud as "f".
+  assert.deepEqual(pdfGlyphs(fam.body).filter(g => [...g].length !== 1), []);
+  const text = pdfText(fam.body);
+  for (const want of [
+    'Student: Nguyễn Thị Ánh', 'Location: Łódź Study Hall',
+    'Fri, Oct 9, 2026 Ελληνικά и Русский 1:15 PM 3:15 PM 2h 0m By staff',
+    'Absences Date Session Scheduled Wed, Oct 7, 2026 Ελληνικά и Русский 1:00 PM – 4:00 PM',
+    'Times are local time at Łódź Study Hall (America/Los_Angeles).',
+    'ELITE Spaces · Nguyễn Thị Ánh · Oct 1 – Oct 9, 2026 · Page 1 of 1',
+  ]) assert.ok(text.includes(want), `missing "${want}" in: ${text}`);
+
+  const rep = await w.t.as(w.t.fx.director(w.loc)).get(`${A}/report.pdf?session=${w.pm.id}&${q}`);
+  assert.equal(rep.status, 200);
+  assert.deepEqual(pdfFonts(rep.body), ['Type0 DejaVuSans', 'Type0 DejaVuSans-Bold']);
+  assert.deepEqual(pdfGlyphs(rep.body).filter(g => [...g].length !== 1), []);
+  const rtext = pdfText(rep.body);
+  for (const want of [
+    'Location: Łódź Study Hall', 'Session: Ελληνικά и Русский · Mon/Wed/Fri 1:00 PM–4:00 PM',
+    'Nguyễn Thị Ánh 3 7.93 1',
+    'Fri, Oct 9, 2026 Nguyễn Thị Ánh Ελληνικά и Русский 1:15 PM 3:15 PM 2h 0m By staff (Zoë Šťastná)',
+    'Wed, Oct 7, 2026 Nguyễn Thị Ánh Ελληνικά и Русский 1:00 PM – 4:00 PM',
+  ]) assert.ok(rtext.includes(want), `missing "${want}" in: ${rtext}`);
+});
+
+test(['AT-3'], 'an empty range still exports: header and a zero total in the CSV, a plain sentence in the PDF', async () => {
+  const w = await world();
+  const csv = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log.csv?from=2026-09-01&to=2026-09-07`);
+  assert.equal(csv.status, 200);
+  assert.deepEqual(parseCsv(csv.body).slice(1), [['total', '2026-09-01 to 2026-09-07', 'Maya Johnson', 'Irvine', '', '', '', '0', '0.00', '', '']]);
+  const pdf = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log.pdf?from=2026-09-01&to=2026-09-07`);
+  const text = pdfText(pdf.body);
+  assert.ok(text.includes('No visits between Sep 1, 2026 and Sep 7, 2026.'), text);
+  assert.ok(text.includes('No absences in this range.'), text);
+});
+
+test(['AT-3'], 'CSV cells are quoted, and text that looks like a spreadsheet formula is defused', async () => {
+  const w = await world();
+  rename(w.t, w.kid, 'Leo "Lion" O\'Neil, Jr.');
+  w.t.db.prepare('UPDATE sessions SET name = ? WHERE id = ?').run('=HYPERLINK("http://x")', w.pm.id);
+  w.visit('2026-10-12', '13:00', '16:00');
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log.csv?from=2026-10-12&to=2026-10-12`);
+  assert.ok(r.body.includes('"Leo ""Lion"" O\'Neil, Jr."'), r.body);
+  const row = parseCsv(r.body)[1];
+  assert.equal(row.length, 11);
+  assert.equal(row[2], 'Leo "Lion" O\'Neil, Jr.');
+  assert.equal(row[4], '\'=HYPERLINK("http://x")');
+  assert.equal(r.headers.get('content-disposition'), 'attachment; filename="attendance-leo-lion-o-neil-jr-2026-10-12-to-2026-10-12.csv"');
+});
+
+test(['AT-3'], 'the export range must be two real dates in order, at most a year apart', async () => {
+  const w = await world();
+  const p = w.t.as(w.parent);
+  const base = `${A}/students/${w.kid.id}`;
+  for (const [q, code] of [['from=2026-10-09&to=2026-10-01', 'bad_range'], ['to=2026-10-01', 'bad_date'], ['from=2026-02-30&to=2026-03-01', 'bad_date'],
+    ['from=2025-01-01&to=2026-10-01', 'range_too_long']]) {
+    for (const ext of ['', '.csv', '.pdf']) {
+      const r = await p.get(`${base}/log${ext}?${q}`);
+      assert.equal(r.status, 400, `${ext} ${q}`);
+      assert.equal(r.body.error, code, `${ext} ${q}`);
+    }
+  }
+  const ok = await p.get(`${base}/log?from=2026-10-01&to=2026-10-31`);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.label, 'Oct 1 – Oct 31, 2026');
+});
+
+test(['AT-3', 'NF-1'], 'an export holds only that student: a sibling\'s and another family\'s visits and absences stay out', async () => {
+  const w = await world();
+  const other = w.t.fx.family(w.loc);
+  const sib = w.t.fx.user('student', { location: w.loc });
+  w.t.fx.link(w.parent, sib);
+  // The sibling and the other family's student also hold the Wednesday afternoon slot, and also missed Wed Oct 7.
+  for (const s of [other.student, sib]) enrollSince(w.t, s, w.pm, 3, at(LA, '2026-09-28', '08:00'));
+  w.visit('2026-10-12', '13:00', '16:00');
+  w.visit('2026-10-12', '13:05', '16:00', { student: other.student });
+  w.visit('2026-10-12', '13:10', '16:00', { student: sib });
+  const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log.csv?from=2026-10-12&to=2026-10-12`);
+  const rows = parseCsv(r.body);
+  assert.deepEqual(rows.map(x => x[0]), ['record', 'visit', 'total']);
+  assert.equal(rows[1][5], '13:00');
+  const j = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log?from=2026-10-12&to=2026-10-12`);
+  assert.deepEqual(j.body.visits.map(v => v.student_id), [w.kid.id]);
+
+  // Absences: Maya missed Mon Oct 5, Wed Oct 7 and Fri Oct 9, and only hers show.
+  const p = w.t.as(w.parent);
+  const mine = [['2026-10-05', w.kid.id], ['2026-10-07', w.kid.id], ['2026-10-09', w.kid.id]];
+  const week = await p.get(`${A}/students/${w.kid.id}/history?period=week&date=2026-10-07`);
+  assert.deepEqual(week.body.absences.map(a => [a.date, a.student_id]), mine);
+  assert.equal(week.body.totals.absences, 3);
+  const q = 'from=2026-10-05&to=2026-10-12';
+  const log = await p.get(`${A}/students/${w.kid.id}/log?${q}`);
+  assert.deepEqual(log.body.absences.map(a => [a.date, a.student_id]), mine);
+  assert.equal(log.body.totals.absences, 3);
+  const csv = parseCsv((await p.get(`${A}/students/${w.kid.id}/log.csv?${q}`)).body);
+  assert.deepEqual(csv.filter(x => x[0] === 'absent').map(x => [x[1], x[2]]),
+    [['2026-10-05', 'Maya Johnson'], ['2026-10-07', 'Maya Johnson'], ['2026-10-09', 'Maya Johnson']]);
+  const pdf = pdfText((await p.get(`${A}/students/${w.kid.id}/log.pdf?${q}`)).body);
+  assert.ok(pdf.includes('1 Visits 3.00 Total hours · 3h 0m 3 Absences'), pdf);
+  assert.equal(pdf.split('Wed, Oct 7, 2026 Afternoon Study 1:00 PM – 4:00 PM').length - 1, 1, pdf);
+});
+
+// ---------------------------------------------------------------- AT-4
+
+// Irvine: afternoon Mon/Wed/Fri (Maya) and Morning Focus Tue 9:30-12 (Ben).
+// Arcadia: Zoe, whose Mon Oct 5 visit and Wed Oct 7 absence must never show in Irvine's report.
+async function reportWorld() {
+  const w = await world();
+  const t = w.t;
+  const am = t.fx.session(w.loc, { term: w.term, name: 'Morning Focus', weekdays: '2,4', start: '09:30', end: '12:00' });
+  const ben = rename(t, t.fx.family(w.loc).student, 'Ben Cole');
+  enrollSince(t, ben, am, 2, at(LA, '2026-09-28', '08:00'));
+  const staff = rename(t, t.fx.staff(w.loc), 'Chris Ortiz');
+  const director = t.fx.director(w.loc);
+  const arcadia = t.fx.location({ name: 'Arcadia', lat: 34.14, lng: -118.03 });
+  const arcSession = t.fx.session(arcadia, { name: 'Arcadia Study' });
+  const zoe = rename(t, t.fx.family(arcadia).student, 'Zoe Park');
+  enrollSince(t, zoe, arcSession, 3, at(LA, '2026-09-28', '08:00'));
+  w.visit('2026-10-05', '13:00', '16:00');
+  w.visit('2026-10-07', '13:00', '16:00', { extra: { checkout_method: 'auto', flagged: 1, flag_reason: 'Did not scan out' } });
+  w.visit('2026-10-06', '09:30', '12:00', { student: ben, session: am, extra: { checkin_method: 'staff', checked_in_by: staff.id, checkout_method: 'staff', checked_out_by: staff.id } });
+  w.visit('2026-10-05', '13:00', '15:00', { student: zoe, location: arcadia, session: arcSession });
+  return Object.assign(w, { am, ben, staff, director, arcadia, arcSession, zoe, hq: t.fx.hq() });
+}
+
+test(['AT-4'], 'a director\'s report: their location\'s visits, totals, needs-review count, absences and per-student hours', async () => {
+  const w = await reportWorld();
+  const r = await w.t.as(w.director).get(`${A}/report?from=2026-10-05&to=2026-10-09`);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.filters.location.name, 'Irvine');
+  assert.equal(r.body.filters.session, null);
+  assert.equal(r.body.label, 'Oct 5 – Oct 9, 2026');
+  assert.deepEqual(r.body.visits.map(v => [v.date, v.student_name, v.session_name, v.checkout_method, v.needs_review]), [
+    ['2026-10-05', 'Maya Johnson', 'Afternoon Study', 'scan', false],
+    ['2026-10-06', 'Ben Cole', 'Morning Focus', 'staff', false],
+    ['2026-10-07', 'Maya Johnson', 'Afternoon Study', 'auto', true],
+  ]);
+  assert.equal(r.body.visits[1].checked_in_by_name, 'Chris Ortiz');
+  assert.deepEqual(r.body.totals, { visits: 3, minutes: 510, hours: 8.5, absences: 1, students: 2, needs_review: 1 });
+  assert.deepEqual(r.body.absences.map(a => [a.date, a.student_name]), [['2026-10-09', 'Maya Johnson']]);
+  assert.deepEqual(r.body.by_student.map(s => [s.student_name, s.visits, s.minutes, s.hours, s.absences]),
+    [['Ben Cole', 1, 150, 2.5, 0], ['Maya Johnson', 2, 360, 6, 1]]);
+
+  // Once staff confirm the automatic check-out, it no longer needs review.
+  w.t.db.prepare('UPDATE visits SET reviewed_by = ? WHERE flagged = 1').run(w.staff.id);
+  const after = await w.t.as(w.director).get(`${A}/report?from=2026-10-05&to=2026-10-09`);
+  assert.equal(after.body.totals.needs_review, 0);
+});
+
+test(['AT-4'], 'filtering by session narrows visits, absences and totals to that session', async () => {
+  const w = await reportWorld();
+  const r = await w.t.as(w.director).get(`${A}/report?location=${w.loc.id}&session=${w.am.id}&from=2026-10-05&to=2026-10-09`);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.filters.session.label, 'Morning Focus · Tue/Thu 9:30 AM–12:00 PM');
+  assert.deepEqual(r.body.visits.map(v => v.student_name), ['Ben Cole']);
+  assert.deepEqual(r.body.absences, []);
+  assert.deepEqual([r.body.totals.visits, r.body.totals.minutes, r.body.totals.absences], [1, 150, 0]);
+  const pm = await w.t.as(w.director).get(`${A}/report?session=${w.pm.id}&from=2026-10-05&to=2026-10-09`);
+  assert.deepEqual([pm.body.totals.visits, pm.body.totals.absences], [2, 1]);
+});
+
+// A staff check-in with no session that covers the afternoon session counts as
+// attending it (EN-7), so the session's report shows that visit and its hours,
+// as the schedule and the absences already do. Ava, who only missed, is a student
+// of the report too.
+test(['AT-4'], 'a session report includes staff check-ins with no session that cover it, and counts students who only missed', async () => {
+  const w = await reportWorld();
+  const { t } = w;
+  const ava = rename(t, t.fx.family(w.loc).student, 'Ava Diaz');
+  enrollSince(t, ava, w.pm, 3, at(LA, '2026-09-28', '08:00')); // Wednesdays; never came
+  closure(t, w.loc, '2026-10-02');
+  const byStaff = { checkin_method: 'staff', checked_in_by: w.staff.id, checkout_method: 'staff', checked_out_by: w.staff.id };
+  const noSession = (student, date, inAt, outAt, location = w.loc) => w.visit(date, inAt, outAt, { student, location, session: null, extra: byStaff });
+  noSession(w.kid, '2026-10-09', '12:30', '16:30'); // a dead phone: covers Friday's 1-4pm
+  noSession(w.ben, '2026-10-02', '13:00', '16:00'); // a closure day: no session that day
+  noSession(w.ben, '2026-10-05', '09:00', '11:00'); // a Monday, but not during the session
+  noSession(w.ben, '2026-10-06', '14:00', '15:00'); // during the hours, but a Tuesday
+  noSession(w.zoe, '2026-10-09', '13:00', '16:00', w.arcadia); // another location
+  const summer = t.fx.session(w.loc, { term: t.fx.term(w.loc, { name: 'Summer 2026', start: '2026-06-15', end: '2026-08-14' }),
+    name: 'Summer Study', weekdays: '1,3,5', start: '13:00', end: '16:00' });
+  const q = 'from=2026-10-02&to=2026-10-09';
+
+  const want = [
+    ['2026-10-05', 'Maya Johnson', 'Afternoon Study', 180, 'scan'],
+    ['2026-10-07', 'Maya Johnson', 'Afternoon Study', 180, 'auto'],
+    ['2026-10-09', 'Maya Johnson', null, 240, 'staff'],
+  ];
+  for (const [who, url] of [['director', `${A}/report?session=${w.pm.id}&${q}`], ['hq', `${A}/report?location=all&session=${w.pm.id}&${q}`]]) {
+    const r = await t.as(w[who]).get(url);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.visits.map(v => [v.date, v.student_name, v.session_name, v.minutes, v.checkout_method]), want, who);
+    assert.deepEqual(r.body.absences.map(a => [a.date, a.student_name]), [['2026-10-07', 'Ava Diaz']], who);
+    assert.deepEqual(r.body.totals, { visits: 3, minutes: 600, hours: 10, absences: 1, students: 2, needs_review: 1 }, who);
+    assert.deepEqual(r.body.by_student.map(s => [s.student_name, s.visits, s.minutes, s.absences]),
+      [['Ava Diaz', 0, 0, 1], ['Maya Johnson', 3, 600, 0]], who);
+  }
+
+  const csv = parseCsv((await t.as(w.director).get(`${A}/report.csv?session=${w.pm.id}&${q}`)).body);
+  assert.deepEqual(csv.filter(x => x[0] !== 'record').map(x => [x[0], x[1], x[2], x[4], x[7], x[11]]), [
+    ['visit', '2026-10-05', 'Maya Johnson', 'Afternoon Study', '180', ''],
+    ['visit', '2026-10-07', 'Maya Johnson', 'Afternoon Study', '180', ''],
+    ['absent', '2026-10-07', 'Ava Diaz', 'Afternoon Study', '', ''],
+    ['visit', '2026-10-09', 'Maya Johnson', '', '240', 'Chris Ortiz'],
+    ['total', '2026-10-02 to 2026-10-09', '', 'Afternoon Study · Mon/Wed/Fri 1:00 PM–4:00 PM', '600', ''],
+  ]);
+
+  const pdf = pdfText((await t.as(w.director).get(`${A}/report.pdf?session=${w.pm.id}&${q}`)).body);
+  for (const want of ['3 Visits 10.00 Total hours · 10h 0m 2 Students 1 Absences 1 Needs review', 'Ava Diaz 0 0.00 1', 'Maya Johnson 3 10.00 0',
+    'Fri, Oct 9, 2026 Maya Johnson No session 12:30 PM 4:30 PM 4h 0m By staff (Chris Ortiz)']) assert.ok(pdf.includes(want), `missing "${want}" in: ${pdf}`);
+  assert.ok(!pdf.includes('Ben Cole') && !pdf.includes('Zoe Park'), pdf);
+
+  // The same hours in another term's session: not covered, so nothing to report.
+  const other = await t.as(w.director).get(`${A}/report?session=${summer.id}&${q}`);
+  assert.deepEqual([other.body.visits, other.body.absences, other.body.totals.students], [[], [], 0]);
+});
+
+test(['AT-4'], 'HQ reports on all locations at once or on any single one', async () => {
+  const w = await reportWorld();
+  const hq = w.t.as(w.hq);
+  const all = await hq.get(`${A}/report?location=all&from=2026-10-05&to=2026-10-09`);
+  assert.equal(all.status, 200);
+  assert.equal(all.body.filters.location, null);
+  assert.deepEqual(all.body.visits.map(v => v.student_name).sort(), ['Ben Cole', 'Maya Johnson', 'Maya Johnson', 'Zoe Park']);
+  const dflt = await hq.get(`${A}/report?from=2026-10-05&to=2026-10-09`);
+  assert.equal(dflt.body.totals.visits, 4);
+  const arc = await hq.get(`${A}/report?location=${w.arcadia.id}&from=2026-10-05&to=2026-10-09`);
+  assert.deepEqual(arc.body.visits.map(v => [v.student_name, v.location_name]), [['Zoe Park', 'Arcadia']]);
+  assert.deepEqual([arc.body.totals.visits, arc.body.totals.minutes], [1, 120]);
+  const wrong = await hq.get(`${A}/report?location=${w.arcadia.id}&session=${w.am.id}&from=2026-10-05&to=2026-10-09`);
+  assert.equal(wrong.status, 400);
+  assert.equal(wrong.body.error, 'session_location');
+  const missing = await hq.get(`${A}/report?location=99999&from=2026-10-05&to=2026-10-09`);
+  assert.equal(missing.status, 404);
+});
+
+test(['AT-4'], 'report options: a director gets their own location and sessions; HQ gets every location', async () => {
+  const w = await reportWorld();
+  const d = await w.t.as(w.director).get(`${A}/report/options`);
+  assert.equal(d.status, 200);
+  assert.equal(d.body.all_locations, false);
+  assert.deepEqual(d.body.locations.map(l => l.name), ['Irvine']);
+  assert.deepEqual(d.body.locations[0].sessions.map(s => s.label), ['Afternoon Study · Mon/Wed/Fri 1:00 PM–4:00 PM', 'Morning Focus · Tue/Thu 9:30 AM–12:00 PM']);
+  assert.equal(d.body.locations[0].today, '2026-10-14');
+  assert.deepEqual(d.body.locations[0].presets.find(p => p.id === 'this_week'), { id: 'this_week', label: 'This week', from: '2026-10-12', to: '2026-10-18' });
+  const h = await w.t.as(w.hq).get(`${A}/report/options`);
+  assert.equal(h.body.all_locations, true);
+  assert.deepEqual(h.body.locations.map(l => [l.name, l.sessions.length]), [['Arcadia', 1], ['Irvine', 2]]);
+});
+
+test(['AT-4'], 'report CSV: the family columns plus who checked students in or out and what needs review', async () => {
+  const w = await reportWorld();
+  const r = await w.t.as(w.director).get(`${A}/report.csv?from=2026-10-05&to=2026-10-09`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'text/csv; charset=utf-8');
+  assert.equal(r.headers.get('content-disposition'), 'attachment; filename="attendance-report-irvine-2026-10-05-to-2026-10-09.csv"');
+  assert.deepEqual(parseCsv(r.body), [
+    ['record', 'date', 'student', 'location', 'session', 'check_in', 'check_out', 'minutes', 'hours', 'check_out_method', 'time_zone', 'checked_in_by', 'checked_out_by', 'needs_review'],
+    ['visit', '2026-10-05', 'Maya Johnson', 'Irvine', 'Afternoon Study', '13:00', '16:00', '180', '3.00', 'scan', LA, '', '', 'no'],
+    ['visit', '2026-10-06', 'Ben Cole', 'Irvine', 'Morning Focus', '09:30', '12:00', '150', '2.50', 'staff', LA, 'Chris Ortiz', 'Chris Ortiz', 'no'],
+    ['visit', '2026-10-07', 'Maya Johnson', 'Irvine', 'Afternoon Study', '13:00', '16:00', '180', '3.00', 'auto', LA, '', '', 'yes'],
+    ['absent', '2026-10-09', 'Maya Johnson', 'Irvine', 'Afternoon Study', '', '', '', '', '', LA, '', '', ''],
+    // The total row carries the report's filters: dates, location and session.
+    ['total', '2026-10-05 to 2026-10-09', '', 'Irvine', 'All sessions', '', '', '510', '8.50', '', '', '', '', ''],
+  ]);
+  const s = await w.t.as(w.director).get(`${A}/report.csv?session=${w.am.id}&from=2026-10-05&to=2026-10-09`);
+  assert.equal(s.headers.get('content-disposition'), 'attachment; filename="attendance-report-irvine-morning-focus-2026-10-05-to-2026-10-09.csv"');
+  assert.deepEqual(parseCsv(s.body).map(x => x[2]), ['student', 'Ben Cole', '']);
+  assert.deepEqual(parseCsv(s.body).pop().slice(0, 5), ['total', '2026-10-05 to 2026-10-09', '', 'Irvine', 'Morning Focus · Tue/Thu 9:30 AM–12:00 PM']);
+  const all = parseCsv((await w.t.as(w.hq).get(`${A}/report.csv?location=all&from=2026-10-05&to=2026-10-09`)).body).pop();
+  assert.deepEqual(all.slice(0, 5), ['total', '2026-10-05 to 2026-10-09', '', 'All locations', 'All sessions']);
+});
+
+test(['AT-4'], 'report PDF: filters, totals including needs review, per-student hours, visits and absences', async () => {
+  const w = await reportWorld();
+  const r = await w.t.as(w.director).get(`${A}/report.pdf?from=2026-10-05&to=2026-10-09`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'application/pdf');
+  assert.equal(r.headers.get('content-disposition'), 'attachment; filename="attendance-report-irvine-2026-10-05-to-2026-10-09.pdf"');
+  const text = pdfText(r.body);
+  for (const want of [
+    'Attendance report', 'Location: Irvine', 'Session: All sessions', 'Dates: Oct 5 – Oct 9, 2026',
+    '3 Visits 8.50 Total hours · 8h 30m 2 Students 1 Absences 1 Needs review',
+    'Ben Cole 1 2.50 0', 'Maya Johnson 2 6.00 1',
+    'Tue, Oct 6, 2026 Ben Cole Morning Focus 9:30 AM 12:00 PM 2h 30m By staff (Chris Ortiz)',
+    'Wed, Oct 7, 2026 Maya Johnson Afternoon Study 1:00 PM 4:00 PM 3h 0m Automatic (did not scan out) · needs review',
+    'Fri, Oct 9, 2026 Maya Johnson Afternoon Study 1:00 PM – 4:00 PM',
+  ]) assert.ok(text.includes(want), `missing "${want}" in: ${text}`);
+  assert.ok(!text.includes('Zoe Park'));
+  const all = pdfText((await w.t.as(w.hq).get(`${A}/report.pdf?location=all&from=2026-10-05&to=2026-10-09`)).body);
+  assert.ok(all.includes('Location: All locations'), all);
+  assert.ok(all.includes('Mon, Oct 5, 2026 Zoe Park Arcadia Arcadia Study 1:00 PM 3:00 PM 2h 0m Scanned out'), all);
+});
+
+// ---------------------------------------------------------------- AT-4: the Reports screen in a browser tab
+
+// Just enough DOM for public/js/app.js and the attendance view. As in a browser,
+// replaceChildren/append turn anything that isn't a node into text (false -> "false").
+class FakeNode {
+  constructor(tag, data = '') { Object.assign(this, { tag, data, childNodes: [], attrs: new Map(), on: {}, parentNode: null }); }
+  get textContent() { return this.tag ? this.childNodes.map(c => c.textContent).join('') : this.data; }
+  set textContent(s) { this.replaceChildren(String(s)); }
+  setAttribute(k, v) { this.attrs.set(k, String(v)); }
+  getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
+  get id() { return this.getAttribute('id') ?? ''; }
+  get dataset() { return Object.fromEntries([...this.attrs].filter(([k]) => k.startsWith('data-')).map(([k, v]) => [k.slice(5), v])); }
+  addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
+  dispatch(type) { for (const fn of this.on[type] || []) fn({ type, target: this, currentTarget: this, preventDefault() {} }); }
+  click() { this.dispatch('click'); }
+  append(...kids) {
+    for (const k of kids) {
+      const n = k instanceof FakeNode ? k : new FakeNode(null, String(k));
+      n.remove();
+      n.parentNode = this;
+      this.childNodes.push(n);
+    }
+  }
+  appendChild(k) { this.append(k); return k; }
+  replaceChildren(...kids) { this.childNodes.forEach(c => { c.parentNode = null; }); this.childNodes = []; this.picked = undefined; this.append(...kids); }
+  remove() { if (this.parentNode) this.parentNode.childNodes = this.parentNode.childNodes.filter(c => c !== this); this.parentNode = null; }
+  all() { return this.childNodes.flatMap(c => [c, ...c.all()]); }
+  find(pred) { return this.all().find(pred); }
+  // An <input> keeps what was typed; a <select> shows the option set by value (none if no option matches), else its first.
+  get value() {
+    if (this.tag !== 'select') return this.typed ?? this.getAttribute('value') ?? '';
+    const opts = this.all().filter(o => o.tag === 'option');
+    const own = o => o.getAttribute('value') ?? o.textContent;
+    if (this.picked !== undefined) return this.picked ? own(this.picked) : '';
+    const o = opts.find(x => x.getAttribute('selected') !== null) || opts[0];
+    return o ? own(o) : '';
+  }
+  set value(v) {
+    if (this.tag !== 'select') { this.typed = String(v); return; }
+    this.picked = this.all().find(o => o.tag === 'option' && (o.getAttribute('value') ?? o.textContent) === String(v)) || null;
+  }
+}
+
+// One browser tab running the real client code (read from ROOT, so the mutation
+// runner's copy is the one exercised) against the test server. Like a real tab,
+// the view's module state outlives a sign-out and the next person's sign-in.
+function browserTab(t) {
+  let cookie = '';
+  const requests = [], pending = new Set(), ids = {};
+  const fetchAs = (url, opts = {}) => {
+    const p = fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie }) }))
+      .then(async r => {
+        const body = await r.arrayBuffer();
+        requests.push({ url, status: r.status });
+        return new Response(body, { status: r.status, headers: r.headers });
+      });
+    pending.add(p);
+    const done = () => pending.delete(p);
+    p.then(done, done);
+    return p;
+  };
+  const document = {
+    head: new FakeNode('head'), body: new FakeNode('body'), addEventListener() {},
+    createElement: tag => new FakeNode(tag), createTextNode: s => new FakeNode(null, String(s)),
+    getElementById: id => (ids[id] = ids[id] || new FakeNode('div')),
+  };
+  const win = { document, Node: FakeNode, fetch: fetchAs, Response, URL, console, navigator: {}, location: { hash: '' },
+    history: { replaceState() {} }, addEventListener() {}, setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
+  win.window = win;
+  vm.createContext(win);
+  for (const f of ['public/js/app.js', 'public/js/views/attendance.js']) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
+  // Waits until every request has answered and the view has drawn what came back.
+  const settle = async () => {
+    do {
+      await Promise.allSettled([...pending]);
+      for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+    } while (pending.size);
+  };
+  return {
+    requests, settle, toasts: () => document.getElementById('toasts'),
+    signIn(user) {
+      const token = crypto.randomBytes(16).toString('hex');
+      t.ctx.sessions.set(token, user.id);
+      cookie = 'sid=' + token;
+    },
+    async open(id) {
+      const el = new FakeNode('div');
+      await win.App.views.find(v => v.id === id).render(el);
+      await settle();
+      return el;
+    },
+  };
+}
+const words = n => n.all().filter(c => !c.tag).map(c => c.data).join(' ').replace(/\s+/g, ' ').trim();
+const byId = (root, id) => root.find(n => n.getAttribute('id') === id);
+const field = (root, label) => root.find(n => n.tag === 'label' && n.childNodes[0] && n.childNodes[0].textContent === label).childNodes[1];
+const button = (root, label) => root.find(n => n.tag === 'button' && n.textContent === label);
+const reportBox = root => root.find(n => n.tag === 'section' && n.getAttribute('aria-label') === 'Report');
+
+test(['AT-4'], 'Reports in a tab HQ used first: the director who signs in next gets their own location, all sessions and this month, and every report and download is theirs', async () => {
+  const w = await reportWorld();
+  const tab = browserTab(w.t);
+  const R = `${A}/report`;
+
+  // HQ narrows the report to Arcadia, Arcadia's session and one week, and shows it.
+  tab.signIn(w.hq);
+  const hq = await tab.open('reports');
+  const pickLoc = byId(hq, 'rep-location');
+  pickLoc.value = String(w.arcadia.id);
+  pickLoc.dispatch('change');
+  const pickSes = byId(hq, 'rep-session');
+  pickSes.value = String(w.arcSession.id);
+  pickSes.dispatch('change');
+  for (const [label, d] of [['From', '2026-10-05'], ['To', '2026-10-09']]) {
+    const input = field(hq, label);
+    input.value = d;
+    input.dispatch('change');
+  }
+  hq.find(n => n.tag === 'form').dispatch('submit');
+  await tab.settle();
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}?location=${w.arcadia.id}&session=${w.arcSession.id}&from=2026-10-05&to=2026-10-09`, status: 200 });
+  assert.equal(words(reportBox(hq)), 'Oct 5 – Oct 9, 2026 Arcadia · Arcadia Study · Mon/Wed/Fri 1:00 PM–4:00 PM Download CSV Download PDF ' +
+    '1 visit 2 hours 1 student 1 absence By student Visits Absences Student Visits Hours Absences Zoe Park 1 2.00 1');
+
+  // Same tab ("Switch user"): the Irvine director signs in and opens Reports.
+  tab.signIn(w.director);
+  const view = await tab.open('reports');
+  const mine = `location=${w.loc.id}&from=2026-10-01&to=2026-10-31`;
+  assert.deepEqual(tab.requests.slice(-2), [{ url: `${R}/options`, status: 200 }, { url: `${R}?${mine}`, status: 200 }]);
+  assert.match(words(view), /Location: Irvine/);
+  assert.equal(byId(view, 'rep-session').value, '');
+  assert.deepEqual([field(view, 'From').value, field(view, 'To').value], ['2026-10-01', '2026-10-31']);
+  const box = reportBox(view);
+  assert.ok(!box.find(n => n.getAttribute('role') === 'alert'), words(box));
+  // This month so far: Maya missed Fri Oct 2, Fri Oct 9 and Mon Oct 12; Ben missed Tue Oct 13.
+  const head = 'Oct 1 – Oct 31, 2026 Irvine · All sessions Download CSV Download PDF 3 visits 8.5 hours 2 students 4 absences ';
+  const byStudent = 'By student Visits Absences Student Visits Hours Absences Ben Cole 1 2.50 1 Maya Johnson 2 6.00 3';
+  assert.equal(words(box), head + '1 visit needs review. These students didn\'t scan out and were checked out automatically. ' +
+    'Confirm or fix the times from the In the building list. ' + byStudent);
+
+  // Show report and both downloads ask for the director's own location too.
+  for (const [label, url] of [['Download CSV', `${R}.csv?${mine}`], ['Download PDF', `${R}.pdf?${mine}`]]) {
+    button(box, label).click();
+    await tab.settle();
+    assert.deepEqual(tab.requests.at(-1), { url, status: 200 }, label);
+  }
+  assert.deepEqual(tab.toasts().childNodes.map(n => n.textContent), [
+    'Downloaded attendance-report-irvine-2026-10-01-to-2026-10-31.csv', 'Downloaded attendance-report-irvine-2026-10-01-to-2026-10-31.pdf']);
+
+  // Staff confirm the automatic check-out; the next report has nothing to review, and says nothing about it.
+  w.t.db.prepare('UPDATE visits SET reviewed_by = ? WHERE flagged = 1').run(w.staff.id);
+  view.find(n => n.tag === 'form').dispatch('submit');
+  await tab.settle();
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}?${mine}`, status: 200 });
+  assert.equal(words(reportBox(view)), head + byStudent);
+});
+
+// ---------------------------------------------------------------- AT-2, AT-3: the Hours screen in a browser tab
+
+test(['AT-2', 'AT-3'], 'Hours in a browser tab: a parent of two picks a student, pages through week, month and term, and downloads that student\'s log for the dates chosen', async () => {
+  const w = await world();
+  const ava = rename(w.t, w.t.fx.user('student', { location: w.loc }), 'Ava Johnson');
+  w.t.fx.link(w.parent, ava);
+  w.visit('2026-10-13', '09:30', '12:00', { student: ava, session: null });
+  // Maya: Mon Sep 28 missed, Wed Sep 30 2h 30m, Fri Oct 2 2h 56m, Oct 5/7/9 missed, Mon Oct 12 3h.
+  w.visit('2026-09-30', '13:00', '15:30');
+  w.visit('2026-10-02', '13:02', '15:58');
+  w.visit('2026-10-12', '13:00', '16:00');
+  const S = `${A}/students`;
+  const tab = browserTab(w.t);
+  const after = i => tab.requests.slice(i).map(r => `${r.status} ${r.url}`).sort();
+  const act = async fn => { const i = tab.requests.length; fn(); await tab.settle(); return after(i); };
+
+  tab.signIn(w.parent);
+  const view = await tab.open('hours');
+  const history = byId(view, 'att-history');
+  const shown = () => ({
+    label: words(history.find(n => n.getAttribute('class') === 'att-nav-label')),
+    totals: words(history.find(n => /\batt-stats\b/.test(n.getAttribute('class') || ''))),
+  });
+  const preview = () => words(view.find(n => n.getAttribute('aria-live') === 'polite'));
+
+  // Ava sorts first, so she shows first: this week, and this month's log preview.
+  assert.deepEqual(after(0), [`200 ${S}`, `200 ${S}/${ava.id}/history?period=week`, `200 ${S}/${ava.id}/log?from=2026-10-01&to=2026-10-31`].sort());
+  assert.equal(field(view, 'Student').value, String(ava.id));
+  assert.deepEqual(shown(), { label: 'Oct 12 – Oct 18, 2026', totals: '1 visit 2.5 hours 0 absences' });
+  assert.equal(preview(), 'Oct 1 – Oct 31, 2026: 1 visit · 2.5 hours · 0 absences');
+
+  // Picking Maya redraws her history and her log preview.
+  const pick = field(view, 'Student');
+  assert.deepEqual(await act(() => { pick.value = String(w.kid.id); pick.dispatch('change'); }),
+    [`200 ${S}/${w.kid.id}/history?period=week`, `200 ${S}/${w.kid.id}/log?from=2026-10-01&to=2026-10-31`].sort());
+  assert.equal(words(history), '‹ Oct 12 – Oct 18, 2026 › 1 visit 3 hours 0 absences ' +
+    'Mon, Oct 12 · Afternoon Study 1:00 PM – 4:00 PM · 3h 0m Scanned out ' +
+    'Times are Irvine time. An absence is a scheduled session with no check-in; closure days don\'t count.');
+  assert.equal(preview(), 'Oct 1 – Oct 31, 2026: 2 visits · 5.93 hours · 3 absences');
+
+  // Month, the month before, term, and back to week: each asks for that period.
+  assert.deepEqual(await act(() => button(view, 'Month').click()), [`200 ${S}/${w.kid.id}/history?period=month`]);
+  assert.deepEqual(shown(), { label: 'October 2026', totals: '2 visits 5.93 hours 3 absences' });
+  assert.equal(button(view, 'Month').getAttribute('aria-selected'), 'true');
+  assert.deepEqual(await act(() => view.find(n => n.getAttribute('aria-label') === 'Previous month').click()),
+    [`200 ${S}/${w.kid.id}/history?period=month&date=2026-09-01`]);
+  assert.deepEqual(shown(), { label: 'September 2026', totals: '1 visit 2.5 hours 1 absence' });
+  assert.deepEqual(await act(() => button(view, 'Term').click()), [`200 ${S}/${w.kid.id}/history?period=term`]);
+  assert.deepEqual(shown(), { label: 'Fall 2026 Aug 17 – Dec 18, 2026', totals: '3 visits 8.43 hours 4 absences' });
+  assert.deepEqual(await act(() => button(view, 'Week').click()), [`200 ${S}/${w.kid.id}/history?period=week`]);
+  assert.deepEqual(shown(), { label: 'Oct 12 – Oct 18, 2026', totals: '1 visit 3 hours 0 absences' });
+
+  // Her own dates, then both downloads for exactly those dates.
+  assert.deepEqual(await act(() => {
+    for (const [label, d] of [['From', '2026-09-28'], ['To', '2026-10-09']]) {
+      const input = field(view, label);
+      input.value = d;
+      input.dispatch('change');
+    }
+  }), [`200 ${S}/${w.kid.id}/log?from=2026-09-28&to=2026-10-31`, `200 ${S}/${w.kid.id}/log?from=2026-09-28&to=2026-10-09`].sort());
+  assert.equal(preview(), 'Sep 28 – Oct 9, 2026: 2 visits · 5.43 hours · 4 absences');
+  const range = 'from=2026-09-28&to=2026-10-09';
+  assert.deepEqual(await act(() => button(view, 'Download PDF').click()), [`200 ${S}/${w.kid.id}/log.pdf?${range}`]);
+  assert.deepEqual(await act(() => button(view, 'Download CSV').click()), [`200 ${S}/${w.kid.id}/log.csv?${range}`]);
+  assert.deepEqual(tab.toasts().childNodes.map(n => n.textContent), [
+    'Downloaded attendance-maya-johnson-2026-09-28-to-2026-10-09.pdf', 'Downloaded attendance-maya-johnson-2026-09-28-to-2026-10-09.csv']);
+});
+
+// ---------------------------------------------------------------- NF-1
+
+test(['NF-1'], 'a parent cannot see or export another family\'s student, even with a pending link', async () => {
+  const w = await world();
+  w.visit('2026-10-12', '13:00', '16:00');
+  const strangers = w.t.fx.family(w.loc);
+  const stranger = strangers.parent;
+  const pending = w.t.fx.user('parent', { location: w.loc });
+  w.t.fx.link(pending, w.kid, 'pending');
+  const q = 'from=2026-10-01&to=2026-10-31';
+  for (const who of [stranger, pending]) {
+    for (const url of [`/students/${w.kid.id}/history`, `/students/${w.kid.id}/history?period=term`, `/students/${w.kid.id}/log?${q}`,
+      `/students/${w.kid.id}/log.csv?${q}`, `/students/${w.kid.id}/log.pdf?${q}`]) {
+      const r = await w.t.as(who).get(A + url);
+      assert.equal(r.status, 403, url);
+      assert.equal(r.body.error, 'forbidden', url);
+    }
+    const list = await w.t.as(who).get(`${A}/students`);
+    assert.equal(list.status, 200);
+    assert.ok(!list.body.students.some(s => s.id === w.kid.id));
+  }
+  assert.equal((await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log.csv?${q}`)).status, 200);
+
+  // The other family's student holds the same Wednesday slot. Each parent's own
+  // records carry only their own student's absences, never the other family's.
+  const theirs = rename(w.t, strangers.student, 'Zoe Park');
+  enrollSince(w.t, theirs, w.pm, 3, at(LA, '2026-09-28', '08:00'));
+  const week = 'period=week&date=2026-10-07', range = 'from=2026-10-05&to=2026-10-09';
+  for (const [parent, kid, name, dates] of [[stranger, theirs, 'Zoe Park', ['2026-10-07']],
+    [w.parent, w.kid, 'Maya Johnson', ['2026-10-05', '2026-10-07', '2026-10-09']]]) {
+    const p = w.t.as(parent);
+    const own = dates.map(d => [d, kid.id]);
+    const h = await p.get(`${A}/students/${kid.id}/history?${week}`);
+    assert.equal(h.status, 200);
+    assert.deepEqual(h.body.absences.map(a => [a.date, a.student_id]), own, name);
+    const l = await p.get(`${A}/students/${kid.id}/log?${range}`);
+    assert.deepEqual(l.body.absences.map(a => [a.date, a.student_id]), own, name);
+    const csv = parseCsv((await p.get(`${A}/students/${kid.id}/log.csv?${range}`)).body);
+    assert.deepEqual(csv.filter(x => x[0] === 'absent').map(x => [x[1], x[2]]), dates.map(d => [d, name]));
+    const pdf = pdfText((await p.get(`${A}/students/${kid.id}/log.pdf?${range}`)).body);
+    assert.ok(pdf.includes(`Student: ${name}`), pdf);
+    assert.ok(pdf.includes(`Total hours · 0m ${dates.length} Absences`), pdf);
+  }
+});
+
+test(['NF-1'], 'family routes are for parents: students, staff, directors, HQ and signed-out visitors are refused', async () => {
+  const w = await world();
+  const q = 'from=2026-10-01&to=2026-10-31';
+  const urls = ['/students', `/students/${w.kid.id}/history`, `/students/${w.kid.id}/log?${q}`, `/students/${w.kid.id}/log.csv?${q}`,
+    `/students/${w.kid.id}/log.pdf?${q}`];
+  for (const who of [w.kid, w.t.fx.staff(w.loc), w.t.fx.director(w.loc), w.t.fx.hq()]) {
+    for (const url of urls) assert.equal((await w.t.as(who).get(A + url)).status, 403, `${who.role} ${url}`);
+  }
+  for (const url of urls) assert.equal((await w.t.anon.get(A + url)).status, 401, url);
+});
+
+test(['NF-1'], 'reports are for directors and HQ: staff, parents, students and signed-out visitors are refused', async () => {
+  const w = await reportWorld();
+  const q = 'from=2026-10-05&to=2026-10-09';
+  const urls = ['/report/options', `/report?${q}`, `/report.csv?${q}`, `/report.pdf?${q}`];
+  for (const who of [w.staff, w.parent, w.kid]) {
+    for (const url of urls) {
+      const r = await w.t.as(who).get(A + url);
+      assert.equal(r.status, 403, `${who.role} ${url}`);
+      assert.equal(r.body.error, 'forbidden');
+    }
+  }
+  for (const url of urls) assert.equal((await w.t.anon.get(A + url)).status, 401, url);
+});
+
+test(['NF-1'], 'a director cannot report on another location, on all locations, or on another location\'s session', async () => {
+  const w = await reportWorld();
+  const d = w.t.as(w.director);
+  const q = 'from=2026-10-05&to=2026-10-09';
+  for (const ext of ['', '.csv', '.pdf']) {
+    for (const filter of [`location=${w.arcadia.id}`, 'location=all', `session=${w.arcSession.id}`, `location=${w.loc.id}&session=${w.arcSession.id}`]) {
+      const r = await d.get(`${A}/report${ext}?${filter}&${q}`);
+      assert.equal(r.status, 403, `${ext} ${filter}`);
+      assert.equal(r.body.error, 'forbidden', `${ext} ${filter}`);
+    }
+  }
+  const opts = await d.get(`${A}/report/options`);
+  assert.ok(opts.body.locations.every(l => l.id === w.loc.id));
+  const own = await d.get(`${A}/report?location=${w.loc.id}&${q}`);
+  assert.equal(own.status, 200);
+  assert.ok(own.body.visits.every(v => v.location_id === w.loc.id));
+  // The Arcadia director sees Arcadia only.
+  const arcDirector = w.t.fx.director(w.arcadia);
+  const arc = await w.t.as(arcDirector).get(`${A}/report?${q}`);
+  assert.deepEqual(arc.body.visits.map(v => v.student_name), ['Zoe Park']);
+  assert.deepEqual(arc.body.absences.map(a => [a.date, a.student_name]), [['2026-10-07', 'Zoe Park']]);
+
+  // Absences too: Zoe missed Arcadia's Wed Oct 7 session. Irvine's report, its
+  // per-student totals and both files leave her out; HQ's all-locations report has her.
+  for (const filter of ['', `location=${w.loc.id}&`]) {
+    const r = await d.get(`${A}/report?${filter}${q}`);
+    assert.deepEqual(r.body.absences.map(a => [a.date, a.student_name, a.location_id]), [['2026-10-09', 'Maya Johnson', w.loc.id]], filter);
+    assert.equal(r.body.totals.absences, 1, filter);
+    assert.deepEqual(r.body.by_student.map(s => [s.student_name, s.absences]), [['Ben Cole', 0], ['Maya Johnson', 1]], filter);
+  }
+  const csv = parseCsv((await d.get(`${A}/report.csv?${q}`)).body);
+  assert.deepEqual(csv.filter(x => x[0] === 'absent').map(x => [x[1], x[2], x[3]]), [['2026-10-09', 'Maya Johnson', 'Irvine']]);
+  assert.ok(!csv.some(x => x.includes('Zoe Park')));
+  const pdf = pdfText((await d.get(`${A}/report.pdf?${q}`)).body);
+  assert.ok(pdf.includes('2 Students 1 Absences'), pdf);
+  assert.ok(!pdf.includes('Zoe Park') && !pdf.includes('Arcadia'), pdf);
+  const all = await w.t.as(w.hq).get(`${A}/report?location=all&${q}`);
+  assert.deepEqual(all.body.absences.map(a => [a.date, a.student_name]), [['2026-10-07', 'Zoe Park'], ['2026-10-09', 'Maya Johnson']]);
+  assert.deepEqual(all.body.by_student.map(s => [s.student_name, s.absences]), [['Ben Cole', 0], ['Maya Johnson', 1], ['Zoe Park', 1]]);
+});

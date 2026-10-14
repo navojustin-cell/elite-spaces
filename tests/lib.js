@@ -31,7 +31,7 @@ const openServers = [];
 
 async function makeApp(opts = {}) {
   const { createApp, runJobs } = load('src/app.js');
-  const { app, ctx } = createApp({ now: opts.now ?? DEFAULT_NOW, dev: !!opts.dev });
+  const { app, ctx } = createApp({ now: opts.now ?? DEFAULT_NOW, dev: !!opts.dev, cookieName: opts.cookieName });
   const server = await new Promise(res => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
   openServers.push(server);
   const base = 'http://127.0.0.1:' + server.address().port;
@@ -146,10 +146,13 @@ function fixtures(ctx) {
       return db.prepare('SELECT * FROM enrollments WHERE id = ?').get(id);
     },
     visit(student, location, { session = null, weekday = null, local_date = '2026-10-14', check_in_at, check_out_at = null,
-      checkin_method = 'scan', checkout_method = null, flagged = 0 } = {}) {
+      checkin_method = 'scan', checkout_method = null, flagged = 0, flag_reason = null, reviewed_by = null,
+      checked_in_by = null, checked_out_by = null } = {}) {
       const id = ins(`INSERT INTO visits (student_id, location_id, session_id, weekday, local_date, check_in_at, check_out_at,
-        checkin_method, checkout_method, flagged) VALUES (?,?,?,?,?,?,?,?,?,?)`, student.id, location.id, session ? session.id : null,
-        weekday, local_date, check_in_at ?? now(), check_out_at, checkin_method, checkout_method, flagged);
+        checkin_method, checkout_method, flagged, flag_reason, reviewed_by, checked_in_by, checked_out_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, student.id, location.id, session ? session.id : null,
+        weekday, local_date, check_in_at ?? now(), check_out_at, checkin_method, checkout_method, flagged, flag_reason,
+        reviewed_by, checked_in_by, checked_out_by);
       return db.prepare('SELECT * FROM visits WHERE id = ?').get(id);
     },
     notifications: (u, kind) => db.prepare(`SELECT * FROM notifications WHERE user_id = ?${kind ? ' AND kind = ?' : ''} ORDER BY id`)

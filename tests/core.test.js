@@ -91,3 +91,32 @@ test('CORE', 'unknown API paths return JSON 404 and errors never leak a stack', 
   assert.equal(r.status, 404);
   assert.equal(r.body.error, 'not_found');
 });
+
+test('CORE', "the sign-in cookie carries the app's own name, so local servers on other ports never share or end each other's sessions", async () => {
+  const t = await makeApp({ cookieName: 'sid_4199' });
+  const loc = t.fx.location();
+  const p = t.fx.family(loc).parent;
+  const r = await t.anon.post('/api/auth/login', { email: p.email, password: 'demo1234' });
+  assert.equal(r.status, 200);
+  const set = r.headers.get('set-cookie') || '';
+  assert.match(set, /^sid_4199=[0-9a-f]{48};/);
+  assert.equal(set.match(/^sid_4199=([^;]+)/)[1], r.body.token);
+  const me = cookie => fetch(t.base + '/api/auth/me', { headers: { cookie } });
+  assert.equal((await me('sid_4199=' + r.body.token)).status, 200);
+  assert.equal((await me('sid=' + r.body.token)).status, 401, 'a cookie under another server\'s name is ignored');
+  const out = await fetch(t.base + '/api/auth/logout', { method: 'POST', headers: { cookie: 'sid_4199=' + r.body.token } });
+  assert.equal(out.status, 200);
+  assert.match(out.headers.get('set-cookie') || '', /^sid_4199=;/);
+  assert.equal((await me('sid_4199=' + r.body.token)).status, 401, 'signing out ends the session');
+});
+
+test('CORE', '/api/auth/me says whether the clock is pinned, so the app knows whether to trust its own clock', async () => {
+  const t = await makeApp();
+  const p = t.fx.family(t.fx.location()).parent;
+  const pinned = await t.as(p).get('/api/auth/me');
+  assert.deepEqual([pinned.body.now, pinned.body.clock_fixed], [t.clock.now(), true]);
+  t.clock.set(null);
+  const live = await t.as(p).get('/api/auth/me');
+  assert.equal(live.body.clock_fixed, false);
+  assert.ok(Math.abs(live.body.now - Date.now()) < 5000);
+});

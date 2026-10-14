@@ -1,0 +1,749 @@
+'use strict';
+// accounts: parent sign-up, student and guardian invites, parent approval,
+// staff and director accounts, locations, the staff roster, and scope (NF-1).
+const crypto = require('crypto');
+const { test, makeApp, assert, load, DEFAULT_NOW } = require('./lib');
+
+const A = '/api/accounts';
+const DAY = 24 * 3600 * 1000;
+
+const login = (t, email, password) => t.anon.post('/api/auth/login', { email, password });
+const userRow = (t, id) => t.db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+const links = (t, studentId) => t.db.prepare('SELECT parent_id, status FROM family_links WHERE student_id = ? ORDER BY parent_id')
+  .all(studentId).map(r => ({ parent_id: r.parent_id, status: r.status }));
+const parentAt = (t, loc, o) => t.fx.user('parent', Object.assign({ location: loc }, o));
+
+async function inviteStudent(t, parent, body) {
+  const r = await t.as(parent).post(A + '/students/invite', body);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  return r.body;
+}
+async function inviteGuardian(t, parent, body) {
+  const r = await t.as(parent).post(A + '/guardians/invite', body);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  return r.body;
+}
+// Invite, accept and approve: a student who can sign in.
+async function approvedStudent(t, parent, name, email) {
+  const inv = await inviteStudent(t, parent, { name, email });
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12' })).status, 200);
+  assert.equal((await t.as(parent).post(A + '/students/' + inv.invite.user_id + '/approve')).status, 200);
+  return userRow(t, inv.invite.user_id);
+}
+
+// ---------------------------------------------------------------- AC-1 sign-up
+
+test(['AC-1'], 'a parent signs up from the sign-in screen, picks a home location and is signed in', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine' });
+  const r = await t.anon.post(A + '/signup', { name: '  Rosa Diaz ', email: 'Rosa@Family.Test', phone: '555-0142', password: 'goodpass1', location_id: loc.id });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.user.role, 'parent');
+  assert.equal(r.body.user.name, 'Rosa Diaz');
+  assert.equal(r.body.user.email, 'rosa@family.test');
+  assert.equal(r.body.user.phone, '555-0142');
+  assert.equal(r.body.user.location_id, loc.id);
+  assert.match(r.headers.get('set-cookie') || '', /sid=/);
+  const me = await fetch(t.base + '/api/auth/me', { headers: { cookie: 'sid=' + r.body.token } }).then(x => x.json());
+  assert.equal(me.user.id, r.body.user.id);
+  assert.equal((await login(t, 'ROSA@family.test', 'goodpass1')).status, 200);
+  const fam = await t.as(r.body.user).get(A + '/family');
+  assert.equal(fam.status, 200);
+  assert.deepEqual(fam.body.students, []);
+  assert.deepEqual(fam.body.guardians.map(g => [g.id, g.you]), [[r.body.user.id, true]]);
+  assert.equal(fam.body.location.name, 'Irvine');
+});
+
+test(['AC-1', 'NF-1'], 'sign-up always makes a parent, and refuses taken emails, short passwords, no phone and closed locations', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const closed = t.fx.location();
+  t.db.prepare('UPDATE locations SET active = 0 WHERE id = ?').run(closed.id);
+  const base = { name: 'Sam Hill', email: 'sam@family.test', phone: '555-0100', password: 'goodpass1', location_id: loc.id };
+  const sneaky = await t.anon.post(A + '/signup', Object.assign({}, base, { role: 'hq', location_id: loc.id }));
+  assert.equal(sneaky.status, 201);
+  assert.equal(userRow(t, sneaky.body.user.id).role, 'parent');
+  const staff = t.fx.staff(loc);
+  const taken = await t.anon.post(A + '/signup', Object.assign({}, base, { email: staff.email.toUpperCase() }));
+  assert.equal(taken.status, 409);
+  assert.equal(taken.body.error, 'email_taken');
+  const again = await t.anon.post(A + '/signup', Object.assign({}, base, { email: 'SAM@family.test' }));
+  assert.equal(again.status, 409);
+  const fresh = Object.assign({}, base, { email: 'new@family.test' });
+  assert.equal((await t.anon.post(A + '/signup', Object.assign({}, fresh, { password: 'short12' }))).body.error, 'password');
+  assert.equal((await t.anon.post(A + '/signup', Object.assign({}, fresh, { phone: '' }))).body.error, 'phone');
+  assert.equal((await t.anon.post(A + '/signup', Object.assign({}, fresh, { location_id: closed.id }))).body.error, 'location');
+  assert.equal((await t.anon.post(A + '/signup', Object.assign({}, fresh, { location_id: 9999 }))).body.error, 'location');
+  assert.equal((await t.anon.post(A + '/signup', Object.assign({}, fresh, { email: 'not-an-email' }))).body.error, 'email');
+  assert.equal((await t.anon.post(A + '/signup', Object.assign({}, fresh, { name: '   ' }))).body.error, 'name');
+  assert.equal(t.db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'parent'").get().n, 1);
+});
+
+test(['AC-1', 'NF-1'], 'the sign-up location picker lists open locations by name only', async () => {
+  const t = await makeApp();
+  const a = t.fx.location({ name: 'Irvine' }), b = t.fx.location({ name: 'Arcadia' }), c = t.fx.location({ name: 'Closed' });
+  t.db.prepare('UPDATE locations SET active = 0 WHERE id = ?').run(c.id);
+  const r = await t.anon.get(A + '/public/locations');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.locations, [{ id: b.id, name: 'Arcadia' }, { id: a.id, name: 'Irvine' }]);
+});
+
+// ---------------------------------------------------------------- AC-1 / AC-3 student invites
+
+test(['AC-1', 'AC-3'], 'a parent invites a student by email: a pending student with no password and a hashed one-time code', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  const r = await t.as(p).post(A + '/students/invite', { name: 'Leo Diaz', email: 'Leo@Kid.Test' });
+  assert.equal(r.status, 201);
+  assert.match(r.body.code, /^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
+  assert.equal(r.body.link, '/#/invite/' + r.body.code);
+  const inv = t.db.prepare('SELECT * FROM account_invites WHERE id = ?').get(r.body.invite.id);
+  assert.equal(inv.kind, 'student');
+  assert.equal(inv.invited_by, p.id);
+  assert.equal(inv.email, 'leo@kid.test');
+  assert.equal(inv.code_hash, crypto.createHash('sha256').update(r.body.code.replace('-', '')).digest('hex'));
+  assert.equal(JSON.stringify(t.db.prepare('SELECT * FROM account_invites').all()).includes(r.body.code.replace('-', '')), false);
+  assert.equal(inv.expires_at - inv.created_at, 7 * DAY);
+  const s = userRow(t, inv.user_id);
+  assert.equal(s.role, 'student');
+  assert.equal(s.password_hash, null);
+  assert.equal(s.location_id, loc.id);
+  assert.equal(s.name, 'Leo Diaz');
+  assert.deepEqual(links(t, s.id), [{ parent_id: p.id, status: 'pending' }]);
+  const fam = await t.as(p).get(A + '/family');
+  assert.equal(fam.body.students.length, 1);
+  assert.equal(fam.body.students[0].state, 'invited');
+  assert.equal(fam.body.students[0].invite.email, 'leo@kid.test');
+  // a name and a way to reach the student are required
+  assert.equal((await t.as(p).post(A + '/students/invite', { name: '', email: 'x@kid.test' })).body.error, 'name');
+  assert.equal((await t.as(p).post(A + '/students/invite', { name: 'Ana' })).body.error, 'contact');
+});
+
+test(['AC-1', 'AC-3'], 'a student invited by phone adds their own email when accepting', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  const inv = await inviteStudent(t, p, { name: 'Ana Diaz', phone: '(555) 010-2030' });
+  const pre = await t.anon.get(A + '/invites/' + inv.code);
+  assert.equal(pre.status, 200);
+  assert.equal(pre.body.invite.needs_email, true);
+  assert.equal(pre.body.invite.phone, '•••30');
+  const noEmail = await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12' });
+  assert.equal(noEmail.status, 400);
+  assert.equal(noEmail.body.error, 'email');
+  const ok = await t.anon.post(A + '/invites/accept', { code: inv.code.toLowerCase(), password: 'kidpass12', email: 'Ana@Kid.Test' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.status, 'awaiting_approval');
+  const s = userRow(t, inv.invite.user_id);
+  assert.equal(s.email, 'ana@kid.test');
+  assert.equal(s.phone, '(555) 010-2030');
+});
+
+test(['AC-3', 'AC-1'], 'end to end: the student sets a password, cannot sign in until a parent approves, then can', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine' });
+  const p = parentAt(t, loc, { name: 'Rosa Diaz' });
+  const inv = await inviteStudent(t, p, { name: 'Leo Diaz', email: 'leo@kid.test' });
+  const sid = inv.invite.user_id;
+  const pre = await t.anon.get(A + '/invites/' + inv.code);
+  assert.deepEqual(pre.body.invite, {
+    kind: 'student', name: 'Leo Diaz', invited_by: 'Rosa Diaz', location: 'Irvine', email: 'l•••@kid.test',
+    phone: null, needs_email: false, expires_at: DEFAULT_NOW + 7 * DAY,
+  });
+  assert.equal((await login(t, 'leo@kid.test', 'kidpass12')).status, 401);
+  const acc = await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12' });
+  assert.equal(acc.status, 200);
+  assert.equal(acc.headers.get('set-cookie'), null);
+  const n = t.fx.notifications(p, 'account_student_accepted');
+  assert.equal(n.length, 1);
+  assert.equal(n[0].title, 'Leo accepted your invite');
+  assert.equal(n[0].ref_id, sid);
+  // accepted but not approved: sign-in and sessions are refused
+  const early = await login(t, 'leo@kid.test', 'kidpass12');
+  assert.equal(early.status, 403);
+  assert.equal(early.body.error, 'link_pending');
+  assert.equal((await t.as({ id: sid }).get('/api/auth/me')).status, 401);
+  assert.deepEqual(links(t, sid), [{ parent_id: p.id, status: 'pending' }]);
+  assert.equal((await t.as(p).get(A + '/family')).body.students[0].state, 'awaiting_approval');
+  const ok = await t.as(p).post(A + '/students/' + sid + '/approve');
+  assert.equal(ok.status, 200);
+  assert.deepEqual(links(t, sid), [{ parent_id: p.id, status: 'active' }]);
+  assert.equal(t.db.prepare('SELECT approved_at FROM family_links WHERE student_id = ?').get(sid).approved_at, DEFAULT_NOW);
+  const s = await login(t, 'leo@kid.test', 'kidpass12');
+  assert.equal(s.status, 200);
+  assert.equal(s.body.user.role, 'student');
+  assert.equal(t.fx.notifications({ id: sid }, 'account_approved').length, 1);
+  assert.equal((await t.as(p).get(A + '/family')).body.students[0].state, 'active');
+  assert.equal((await t.as(p).post(A + '/students/' + sid + '/approve')).status, 409);
+});
+
+test(['AC-3'], 'a parent cannot approve a student who has not accepted the invite yet', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  const inv = await inviteStudent(t, p, { name: 'Leo Diaz', email: 'leo@kid.test' });
+  const r = await t.as(p).post(A + '/students/' + inv.invite.user_id + '/approve');
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, 'not_accepted');
+  assert.deepEqual(links(t, inv.invite.user_id), [{ parent_id: p.id, status: 'pending' }]);
+});
+
+test(['AC-3', 'NF-1'], 'invite codes work once, expire after 7 days, and a wrong code is refused', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  const a = await inviteStudent(t, p, { name: 'Leo Diaz', email: 'leo@kid.test' });
+  const b = await inviteStudent(t, p, { name: 'Ana Diaz', email: 'ana@kid.test' });
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: a.code, password: 'kidpass12' })).status, 200);
+  const again = await t.anon.post(A + '/invites/accept', { code: a.code, password: 'otherpass1' });
+  assert.equal(again.status, 410);
+  assert.equal(again.body.error, 'invite_used');
+  assert.equal((await t.anon.get(A + '/invites/' + a.code)).body.error, 'invite_used');
+  assert.equal((await login(t, 'leo@kid.test', 'otherpass1')).status, 401);
+  t.clock.set(DEFAULT_NOW + 7 * DAY - 60000);
+  assert.equal((await t.anon.get(A + '/invites/' + b.code)).status, 200);
+  t.clock.set(DEFAULT_NOW + 7 * DAY);
+  const late = await t.anon.get(A + '/invites/' + b.code);
+  assert.equal(late.status, 410);
+  assert.equal(late.body.error, 'invite_expired');
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: b.code, password: 'kidpass12' })).status, 410);
+  assert.equal(userRow(t, b.invite.user_id).password_hash, null);
+  const wrong = await t.anon.get(A + '/invites/ZZZZ-ZZZZ');
+  assert.equal(wrong.status, 404);
+  assert.equal(wrong.body.error, 'invite_invalid');
+  assert.equal((await t.anon.post(A + '/invites/accept', { password: 'kidpass12' })).status, 404);
+});
+
+test(['AC-3', 'AC-1'], 'resending replaces the code; cancelling stops it and removes the pending student', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  const inv = await inviteStudent(t, p, { name: 'Leo Diaz', email: 'leo@kid.test' });
+  t.clock.set(DEFAULT_NOW + 6 * DAY);
+  const re = await t.as(p).post(A + '/invites/' + inv.invite.id + '/resend');
+  assert.equal(re.status, 200);
+  assert.notEqual(re.body.code, inv.code);
+  assert.equal(re.body.invite.expires_at, DEFAULT_NOW + 13 * DAY);
+  assert.equal((await t.anon.get(A + '/invites/' + inv.code)).status, 404);
+  assert.equal((await t.anon.get(A + '/invites/' + re.body.code)).status, 200);
+  const cancel = await t.as(p).post(A + '/invites/' + inv.invite.id + '/cancel');
+  assert.equal(cancel.status, 200);
+  assert.equal((await t.anon.get(A + '/invites/' + re.body.code)).status, 404);
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: re.body.code, password: 'kidpass12' })).status, 404);
+  assert.equal(userRow(t, inv.invite.user_id).active, 0);
+  assert.deepEqual(links(t, inv.invite.user_id), []);
+  assert.deepEqual((await t.as(p).get(A + '/family')).body.students, []);
+  // an approved student's invite cannot be cancelled
+  const leo = await approvedStudent(t, p, 'Leo Diaz', 'leo2@kid.test');
+  const invId = t.db.prepare('SELECT id FROM account_invites WHERE user_id = ?').get(leo.id).id;
+  const late = await t.as(p).post(A + '/invites/' + invId + '/cancel');
+  assert.equal(late.status, 409);
+  assert.equal(userRow(t, leo.id).active, 1);
+});
+
+// ---------------------------------------------------------------- AC-2 several students, second guardian
+
+test(['AC-2'], 'one parent account holds several students', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  const leo = await approvedStudent(t, p, 'Leo Diaz', 'leo@kid.test');
+  const ana = await approvedStudent(t, p, 'Ana Diaz', 'ana@kid.test');
+  const fam = await t.as(p).get(A + '/family');
+  assert.deepEqual(fam.body.students.map(s => [s.name, s.state]), [['Ana Diaz', 'active'], ['Leo Diaz', 'active']]);
+  const auth = load('src/auth.js');
+  assert.deepEqual(auth.linkedStudentIds(t.ctx, p.id).sort(), [leo.id, ana.id].sort());
+});
+
+test(['AC-2'], 'a second guardian joins by email invite and sees the same students and records', async () => {
+  const t = await makeApp();
+  const auth = load('src/auth.js');
+  const notify = load('src/notify.js');
+  const loc = t.fx.location();
+  const f = t.fx.family(loc, { students: 2 });
+  const g = await inviteGuardian(t, f.parent, { name: 'Mark Johnson', email: 'Mark@Family.Test' });
+  const pre = await t.anon.get(A + '/invites/' + g.code);
+  assert.equal(pre.body.invite.kind, 'guardian');
+  assert.equal(pre.body.invite.email, 'm•••@family.test');
+  const pending = await t.as(f.parent).get(A + '/family');
+  assert.deepEqual(pending.body.invites.map(i => [i.name, i.email]), [['Mark Johnson', 'mark@family.test']]);
+  const acc = await t.anon.post(A + '/invites/accept', { code: g.code, password: 'markpass1', phone: '555-0199' });
+  assert.equal(acc.status, 201);
+  const mark = acc.body.user;
+  assert.equal(mark.role, 'parent');
+  assert.equal(mark.email, 'mark@family.test');
+  assert.equal(mark.name, 'Mark Johnson');
+  assert.equal(mark.location_id, loc.id);
+  assert.match(acc.headers.get('set-cookie') || '', /sid=/);
+  for (const s of f.students) {
+    assert.equal(auth.canSeeStudent(t.ctx, mark, s.id), true);
+    assert.deepEqual(notify.parentsOf(t.ctx, s.id).sort(), [f.parent.id, mark.id].sort());
+  }
+  const mine = await t.as(f.parent).get(A + '/family');
+  const his = await t.as(mark).get(A + '/family');
+  assert.deepEqual(his.body.students.map(s => [s.id, s.state]), mine.body.students.map(s => [s.id, s.state]));
+  assert.equal(his.body.students.length, 2);
+  assert.deepEqual(his.body.guardians.map(x => x.id).sort(), [f.parent.id, mark.id].sort());
+  assert.deepEqual(mine.body.invites, []);
+  const joined = t.fx.notifications(f.parent, 'account_guardian_joined');
+  assert.equal(joined.length, 1);
+  assert.equal(joined[0].title, 'Mark Johnson joined your family');
+  assert.equal((await login(t, 'mark@family.test', 'markpass1')).status, 200);
+});
+
+test(['AC-2', 'AC-3'], 'a student added after the guardian joined is shared with both, and either guardian can approve', async () => {
+  const t = await makeApp();
+  const auth = load('src/auth.js');
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  const g = await inviteGuardian(t, p, { name: 'Mark Johnson', email: 'mark@family.test' });
+  const mark = (await t.anon.post(A + '/invites/accept', { code: g.code, password: 'markpass1' })).body.user;
+  const inv = await inviteStudent(t, mark, { name: 'Leo Diaz', email: 'leo@kid.test' });
+  const sid = inv.invite.user_id;
+  assert.deepEqual(links(t, sid), [{ parent_id: p.id, status: 'pending' }, { parent_id: mark.id, status: 'pending' }]);
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12' })).status, 200);
+  assert.equal(t.fx.notifications(p, 'account_student_accepted').length, 1);
+  assert.equal(t.fx.notifications(mark, 'account_student_accepted').length, 1);
+  assert.equal((await t.as(p).get(A + '/family')).body.students[0].state, 'awaiting_approval');
+  assert.equal((await t.as(p).post(A + '/students/' + sid + '/approve')).status, 200);
+  assert.deepEqual(links(t, sid), [{ parent_id: p.id, status: 'active' }, { parent_id: mark.id, status: 'active' }]);
+  assert.equal(auth.canSeeStudent(t.ctx, mark, sid), true);
+});
+
+test(['AC-3', 'AC-2'], 'a guardian who joins while a student waits for approval gets a pending link; the student still cannot sign in until a parent approves', async () => {
+  const t = await makeApp();
+  const auth = load('src/auth.js');
+  const loc = t.fx.location();
+  const eve = parentAt(t, loc, { email: 'eve@family.test' });
+  // Both ways a second guardian joins: a new account from the invite, or an existing parent signed in.
+  const ways = [
+    { how: 'accept', kid: 'Leo Diaz', kidEmail: 'leo@kid.test', guardianEmail: 'mark@family.test', join: async code => {
+      const r = await t.anon.post(A + '/invites/accept', { code, password: 'markpass1' });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      return r.body.user;
+    } },
+    { how: 'join', kid: 'Ana Ruiz', kidEmail: 'ana@kid.test', guardianEmail: eve.email, join: async code => {
+      const r = await t.as(eve).post(A + '/invites/join', { code });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      return eve;
+    } },
+  ];
+  for (const w of ways) {
+    const p = parentAt(t, loc);
+    const inv = await inviteStudent(t, p, { name: w.kid, email: w.kidEmail });
+    const sid = inv.invite.user_id;
+    assert.equal((await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12' })).status, 200, w.how);
+    const g = await inviteGuardian(t, p, { name: 'Second Guardian', email: w.guardianEmail });
+    const guardian = await w.join(g.code);
+    const pending = [p.id, guardian.id].sort((a, b) => a - b).map(id => ({ parent_id: id, status: 'pending' }));
+    assert.deepEqual(links(t, sid), pending, w.how);
+    assert.equal(t.db.prepare('SELECT approved_at FROM family_links WHERE parent_id = ? AND student_id = ?').get(guardian.id, sid).approved_at, null, w.how);
+    // joining does not approve the student: sign-in, sessions and the guardian's access all wait
+    const early = await login(t, w.kidEmail, 'kidpass12');
+    assert.equal(early.status, 403, w.how);
+    assert.equal(early.body.error, 'link_pending', w.how);
+    assert.equal((await t.as({ id: sid }).get('/api/auth/me')).status, 401, w.how);
+    assert.equal(auth.canSeeStudent(t.ctx, guardian, sid), false, w.how);
+    const fam = await t.as(guardian).get(A + '/family');
+    assert.deepEqual(fam.body.students.map(s => [s.id, s.state]), [[sid, 'awaiting_approval']], w.how);
+    // either guardian may approve: the new one here, the inviting parent when an existing parent joined
+    const approver = w.how === 'accept' ? guardian : p;
+    assert.equal((await t.as(approver).post(A + '/students/' + sid + '/approve')).status, 200, w.how);
+    assert.deepEqual(links(t, sid), pending.map(l => ({ parent_id: l.parent_id, status: 'active' })), w.how);
+    const ok = await login(t, w.kidEmail, 'kidpass12');
+    assert.equal(ok.status, 200, w.how);
+    assert.equal(ok.body.user.id, sid, w.how);
+    assert.equal(auth.canSeeStudent(t.ctx, guardian, sid), true, w.how);
+  }
+});
+
+test(['AC-2', 'NF-1'], 'an existing parent joins only with an invite sent to their email, and joining never bridges two families', async () => {
+  const t = await makeApp();
+  const auth = load('src/auth.js');
+  const loc = t.fx.location();
+  const z = t.fx.family(loc);                      // Z and their student K2
+  const xy = t.fx.family(loc);                     // X and their student K1 ...
+  const y = parentAt(t, loc);
+  t.fx.link(y, xy.student);                        // ... shared with an ex, Y
+  const g = await inviteGuardian(t, z.parent, { name: 'X', email: xy.parent.email });
+  const stranger = parentAt(t, loc);
+  const wrong = await t.as(stranger).post(A + '/invites/join', { code: g.code });
+  assert.equal(wrong.status, 403);
+  assert.equal(wrong.body.error, 'invite_mismatch');
+  assert.equal(wrong.body.message.includes(xy.parent.email), false);
+  assert.equal(auth.canSeeStudent(t.ctx, stranger, z.student.id), false);
+  const dup = await t.anon.post(A + '/invites/accept', { code: g.code, password: 'whatever1' });
+  assert.equal(dup.status, 409);
+  assert.equal(dup.body.error, 'email_taken');
+  const ok = await t.as(xy.parent).post(A + '/invites/join', { code: g.code });
+  assert.equal(ok.status, 200);
+  assert.equal(auth.canSeeStudent(t.ctx, xy.parent, z.student.id), true);
+  assert.equal(t.fx.notifications(z.parent, 'account_guardian_joined').length, 1);
+  assert.equal((await t.as(xy.parent).post(A + '/invites/join', { code: g.code })).status, 410);
+  // Y (X's ex) gains nothing from Z's family, and Z nothing from Y's
+  assert.equal(auth.canSeeStudent(t.ctx, y, z.student.id), false);
+  assert.equal(auth.canSeeStudent(t.ctx, z.parent, xy.student.id), false);
+  const k3 = await inviteStudent(t, z.parent, { name: 'New Kid', email: 'k3@kid.test' });
+  assert.deepEqual(links(t, k3.invite.user_id).map(l => l.parent_id).sort(), [z.parent.id, xy.parent.id].sort());
+  const yFam = await t.as(y).get(A + '/family');
+  assert.deepEqual(yFam.body.students.map(s => s.id), [xy.student.id]);
+  assert.equal(yFam.body.guardians.some(x => x.id === z.parent.id), false);
+});
+
+test(['AC-2', 'NF-1'], 'a parent in two families never carries one family\'s students into the other when either adds a student', async () => {
+  const t = await makeApp();
+  const auth = load('src/auth.js');
+  const notify = load('src/notify.js');
+  const loc = t.fx.location();
+  const z = t.fx.family(loc);                      // Z, X's new partner
+  const xy = t.fx.family(loc);                     // X and their student K1 ...
+  const y = parentAt(t, loc);
+  t.fx.link(y, xy.student);                        // ... shared with an ex, Y
+  const g = await inviteGuardian(t, z.parent, { name: 'X', email: xy.parent.email });
+  assert.equal((await t.as(xy.parent).post(A + '/invites/join', { code: g.code })).status, 200);
+  // X adds a student first: shared with Z, whose family X joined, and not with X's ex
+  const k3 = await inviteStudent(t, xy.parent, { name: 'Kid Three', email: 'k3@kid.test' });
+  assert.deepEqual(links(t, k3.invite.user_id).map(l => l.parent_id).sort(), [z.parent.id, xy.parent.id].sort());
+  // then Z adds one: Y gets no link, no notification, no approval and no access
+  const k4 = await inviteStudent(t, z.parent, { name: 'Kid Four', email: 'k4@kid.test' });
+  const sid = k4.invite.user_id;
+  assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM family_links WHERE parent_id = ? AND student_id = ?').get(y.id, sid).n, 0);
+  assert.deepEqual(links(t, sid).map(l => l.parent_id).sort(), [z.parent.id, xy.parent.id].sort());
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: k4.code, password: 'kidpass12' })).status, 200);
+  assert.equal(t.fx.notifications(y, 'account_student_accepted').length, 0);
+  assert.equal(t.fx.notifications(z.parent, 'account_student_accepted').length, 1);
+  const yApprove = await t.as(y).post(A + '/students/' + sid + '/approve');
+  assert.equal(yApprove.status, 403);
+  assert.equal(links(t, sid).every(l => l.status === 'pending'), true);
+  assert.equal((await t.as(z.parent).post(A + '/students/' + sid + '/approve')).status, 200);
+  assert.equal(auth.canSeeStudent(t.ctx, y, sid), false);
+  assert.deepEqual(notify.parentsOf(t.ctx, sid).sort(), [z.parent.id, xy.parent.id].sort());
+  // Z's Family screen lists only Z and X; Y's lists neither Z nor Z's students
+  const zFam = await t.as(z.parent).get(A + '/family');
+  assert.deepEqual(zFam.body.guardians.map(x => x.id).sort(), [z.parent.id, xy.parent.id].sort());
+  assert.equal(JSON.stringify(zFam.body).includes(y.email), false);
+  const yFam = await t.as(y).get(A + '/family');
+  assert.deepEqual(yFam.body.students.map(s => s.id), [xy.student.id]);
+  assert.equal(yFam.body.guardians.some(x => x.id === z.parent.id), false);
+  // Y can't resend or cancel the invites of Z's family either
+  assert.equal((await t.as(y).post(A + '/invites/' + k4.invite.id + '/resend')).status, 403);
+  const zInv = await inviteGuardian(t, z.parent, { name: 'Grandma Z', email: 'grandma@family.test' });
+  assert.equal((await t.as(y).post(A + '/invites/' + zInv.invite.id + '/cancel')).status, 403);
+  assert.equal((await t.as(xy.parent).post(A + '/invites/' + zInv.invite.id + '/resend')).status, 200);
+});
+
+// ---------------------------------------------------------------- AC-4 staff accounts
+
+test(['AC-4'], 'a director creates staff at their location with a temporary password shown once', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const dir = t.fx.director(loc);
+  const r = await t.as(dir).post(A + '/staff', { name: 'Chris Ortiz', email: 'Chris@Elite.Test', phone: '555-0111' });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.user.role, 'staff');
+  assert.equal(r.body.user.location_id, loc.id);
+  assert.equal(r.body.user.email, 'chris@elite.test');
+  assert.match(r.body.temp_password, /^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$/);
+  const signin = await login(t, 'chris@elite.test', r.body.temp_password);
+  assert.equal(signin.status, 200);
+  const chris = signin.body.user;
+  assert.equal((await t.as(chris).get(A + '/me')).body.temp_password, true);
+  const list = await t.as(dir).get(A + '/staff');
+  const row = list.body.staff.find(s => s.id === chris.id);
+  assert.equal(row.temp_password, true);
+  assert.equal(JSON.stringify(list.body).includes(r.body.temp_password), false);
+  const log = t.fx.audit('staff.create');
+  assert.equal(log.length, 1);
+  assert.equal(log[0].actor_id, dir.id);
+  assert.equal(log[0].target_id, chris.id);
+  assert.equal(log[0].location_id, loc.id);
+  assert.equal(JSON.stringify(log).includes(r.body.temp_password), false);
+  // choosing their own password retires the temporary one
+  const pw = await t.as(chris).post(A + '/password', { current_password: r.body.temp_password, new_password: 'chrispass9' });
+  assert.equal(pw.status, 200);
+  assert.equal((await t.as(chris).get(A + '/me')).body.temp_password, false);
+  assert.equal((await login(t, 'chris@elite.test', r.body.temp_password)).status, 401);
+  assert.equal((await login(t, 'chris@elite.test', 'chrispass9')).status, 200);
+  const dup = await t.as(dir).post(A + '/staff', { name: 'Chris Again', email: 'CHRIS@elite.test' });
+  assert.equal(dup.status, 409);
+});
+
+test(['AC-4'], 'a director deactivates, reactivates and resets staff at their location; a deactivated account is shut out at once', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const dir = t.fx.director(loc);
+  const s = t.fx.staff(loc);
+  const session = t.as(s);
+  assert.equal((await session.get(A + '/roster')).status, 200);
+  const off = await t.as(dir).post(A + '/staff/' + s.id + '/deactivate');
+  assert.equal(off.status, 200);
+  assert.equal(userRow(t, s.id).active, 0);
+  assert.equal((await session.get(A + '/roster')).status, 401);
+  assert.equal((await login(t, s.email, 'demo1234')).status, 403);
+  assert.equal(t.fx.audit('staff.deactivate')[0].target_id, s.id);
+  assert.equal((await t.as(dir).post(A + '/staff/' + s.id + '/reactivate')).status, 200);
+  assert.equal((await login(t, s.email, 'demo1234')).status, 200);
+  assert.equal(t.fx.audit('staff.reactivate').length, 1);
+  const reset = await t.as(dir).post(A + '/staff/' + s.id + '/reset-password');
+  assert.equal(reset.status, 200);
+  assert.equal((await login(t, s.email, 'demo1234')).status, 401);
+  const back = await login(t, s.email, reset.body.temp_password);
+  assert.equal(back.status, 200);
+  assert.equal((await t.as(s).get(A + '/me')).body.temp_password, true);
+  assert.equal(t.fx.audit('staff.reset_password').length, 1);
+  assert.equal((await t.as(dir).post(A + '/staff/' + dir.id + '/deactivate')).status, 400);
+});
+
+test(['AC-4', 'NF-1'], 'a director cannot see or change staff at another location, or touch a director', async () => {
+  const t = await makeApp();
+  const a = t.fx.location(), b = t.fx.location();
+  const dirA = t.fx.director(a), dirA2 = t.fx.director(a), staffB = t.fx.staff(b), staffA = t.fx.staff(a);
+  const list = await t.as(dirA).get(A + '/staff');
+  assert.deepEqual(list.body.staff.map(x => x.id).sort(), [dirA.id, dirA2.id, staffA.id].sort());
+  assert.equal((await t.as(dirA).get(A + '/staff?location_id=' + b.id)).status, 403);
+  const create = await t.as(dirA).post(A + '/staff', { name: 'Elsewhere', email: 'else@elite.test', location_id: b.id });
+  assert.equal(create.status, 403);
+  assert.equal(t.db.prepare("SELECT COUNT(*) AS n FROM users WHERE email = 'else@elite.test'").get().n, 0);
+  for (const action of ['deactivate', 'reactivate', 'reset-password']) {
+    assert.equal((await t.as(dirA).post(A + '/staff/' + staffB.id + '/' + action)).status, 403, action + ' other location');
+    assert.equal((await t.as(dirA).post(A + '/staff/' + dirA2.id + '/' + action)).status, 403, action + ' a director');
+  }
+  assert.equal(userRow(t, staffB.id).active, 1);
+  assert.equal(userRow(t, dirA2.id).active, 1);
+  assert.equal(t.fx.audit().length, 0);
+});
+
+// ---------------------------------------------------------------- AC-5 locations and directors
+
+test(['AC-5'], 'HQ creates a location with its own time zone, radius, QR time and hours', async () => {
+  const t = await makeApp();
+  const hq = t.fx.hq();
+  const body = { name: 'Toronto', timezone: 'America/Toronto', address: '100 Queen St W', lat: 43.6532, lng: -79.3832,
+    geofence_m: 200, qr_rotate_at: '05:00', open_time: '08:00', close_time: '19:30' };
+  const r = await t.as(hq).post(A + '/locations', body);
+  assert.equal(r.status, 201);
+  const row = t.db.prepare('SELECT * FROM locations WHERE id = ?').get(r.body.location.id);
+  for (const [k, v] of Object.entries(body)) assert.equal(row[k], v, k);
+  assert.equal(row.active, 1);
+  assert.match(row.qr_secret, /^[0-9a-f]{32}$/);
+  assert.equal(r.body.location.qr_secret, undefined);
+  assert.equal(t.fx.audit('location.create')[0].target_id, row.id);
+  const defaults = await t.as(hq).post(A + '/locations', { name: 'Plain', timezone: 'America/Chicago', lat: 41.9, lng: -87.6 });
+  assert.equal(defaults.body.location.geofence_m, 150);
+  assert.equal(defaults.body.location.qr_rotate_at, '04:00');
+  const bad = async (over, field) => {
+    const x = await t.as(hq).post(A + '/locations', Object.assign({}, body, over));
+    assert.equal(x.status, 400, field);
+    assert.equal(x.body.error, field);
+  };
+  await bad({ timezone: 'Mars/Olympus' }, 'timezone');
+  await bad({ lat: 120 }, 'lat');
+  await bad({ lng: 'west' }, 'lng');
+  await bad({ geofence_m: 5 }, 'geofence_m');
+  await bad({ qr_rotate_at: '4am' }, 'qr_rotate_at');
+  await bad({ open_time: '20:00', close_time: '09:00' }, 'close_time');
+  await bad({ name: '' }, 'name');
+  assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM locations').get().n, 2);
+});
+
+test(['AC-5'], 'HQ creates a director at a location and assigns an existing staff member as director', async () => {
+  const t = await makeApp();
+  const hq = t.fx.hq();
+  const a = t.fx.location({ name: 'Irvine' }), b = t.fx.location({ name: 'Arcadia' });
+  const r = await t.as(hq).post(A + '/directors', { name: 'Dana Park', email: 'dana@elite.test', location_id: a.id });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.user.role, 'director');
+  assert.equal(r.body.user.location_id, a.id);
+  assert.equal((await login(t, 'dana@elite.test', r.body.temp_password)).status, 200);
+  assert.equal(t.fx.audit('director.create')[0].target_id, r.body.user.id);
+  assert.equal((await t.as(hq).post(A + '/directors', { name: 'No Place', email: 'np@elite.test' })).status, 400);
+  const s = t.fx.staff(a);
+  const as = await t.as(hq).post(A + '/directors/assign', { user_id: s.id, location_id: b.id });
+  assert.equal(as.status, 200);
+  assert.equal(userRow(t, s.id).role, 'director');
+  assert.equal(userRow(t, s.id).location_id, b.id);
+  const n = t.fx.notifications(s, 'account_role');
+  assert.equal(n.length, 1);
+  assert.equal(n[0].title, "You're now the director at Arcadia");
+  assert.deepEqual(JSON.parse(t.fx.audit('director.assign')[0].detail).to, { role: 'director', location_id: b.id });
+  const list = await t.as(hq).get(A + '/locations');
+  const arc = list.body.locations.find(l => l.id === b.id);
+  assert.deepEqual(arc.directors.map(d => d.id), [s.id]);
+  // the new director now has director powers at Arcadia
+  assert.equal((await t.as(userRow(t, s.id)).post(A + '/staff', { name: 'New Hire', email: 'hire@elite.test' })).status, 201);
+  assert.equal((await t.as(hq).post(A + '/directors/assign', { user_id: t.fx.family(a).parent.id, location_id: b.id })).status, 404);
+});
+
+test(['AC-5', 'NF-1'], 'directors edit only their own location\'s radius, QR time and hours; HQ edits anything', async () => {
+  const t = await makeApp();
+  const a = t.fx.location({ name: 'Irvine' }), b = t.fx.location({ name: 'Arcadia' });
+  const dirA = t.fx.director(a), staffA = t.fx.staff(a), hq = t.fx.hq();
+  const ok = await t.as(dirA).patch(A + '/locations/' + a.id, { geofence_m: 250, qr_rotate_at: '03:30', open_time: '08:30', close_time: '21:00' });
+  assert.equal(ok.status, 200);
+  const row = t.db.prepare('SELECT * FROM locations WHERE id = ?').get(a.id);
+  assert.deepEqual([row.geofence_m, row.qr_rotate_at, row.open_time, row.close_time], [250, '03:30', '08:30', '21:00']);
+  const log = t.fx.audit('location.update');
+  assert.equal(log.length, 1);
+  assert.deepEqual(JSON.parse(log[0].detail).geofence_m, [150, 250]);
+  for (const over of [{ name: 'Mine Now' }, { timezone: 'America/New_York' }, { lat: 1 }, { address: 'Elsewhere' }, { active: 0 }]) {
+    const x = await t.as(dirA).patch(A + '/locations/' + a.id, over);
+    assert.equal(x.status, 403, JSON.stringify(over));
+  }
+  assert.equal(t.db.prepare('SELECT name, timezone FROM locations WHERE id = ?').get(a.id).name, 'Irvine');
+  assert.equal((await t.as(dirA).patch(A + '/locations/' + b.id, { geofence_m: 999 })).status, 403);
+  assert.equal(t.db.prepare('SELECT geofence_m FROM locations WHERE id = ?').get(b.id).geofence_m, 150);
+  assert.equal((await t.as(staffA).patch(A + '/locations/' + a.id, { geofence_m: 300 })).status, 403);
+  assert.equal((await t.as(dirA).patch(A + '/locations/' + a.id, { open_time: '22:00' })).body.error, 'close_time');
+  const own = await t.as(dirA).get(A + '/locations');
+  assert.deepEqual(own.body.locations.map(l => l.id), [a.id]);
+  const hqEdit = await t.as(hq).patch(A + '/locations/' + b.id, { name: 'Arcadia Center', timezone: 'America/Denver', geofence_m: 300 });
+  assert.equal(hqEdit.status, 200);
+  assert.equal(hqEdit.body.location.name, 'Arcadia Center');
+  assert.equal(hqEdit.body.location.timezone, 'America/Denver');
+  assert.equal((await t.as(hq).get(A + '/locations')).body.locations.length, 2);
+});
+
+test(['AC-5', 'AC-6'], 'only HQ creates locations and directors or assigns directors', async () => {
+  const t = await makeApp();
+  const a = t.fx.location();
+  const dir = t.fx.director(a), s = t.fx.staff(a);
+  const loc = { name: 'Rogue', timezone: 'America/Chicago', lat: 41.9, lng: -87.6 };
+  assert.equal((await t.as(dir).post(A + '/locations', loc)).status, 403);
+  assert.equal((await t.as(dir).post(A + '/directors', { name: 'Co Director', email: 'co@elite.test', location_id: a.id })).status, 403);
+  assert.equal((await t.as(dir).post(A + '/directors/assign', { user_id: s.id, location_id: a.id })).status, 403);
+  assert.equal((await t.as(dir).post(A + '/staff', { name: 'Not A Director', email: 'nd@elite.test', role: 'director' })).body.user.role, 'staff');
+  assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM locations').get().n, 1);
+  assert.equal(userRow(t, s.id).role, 'staff');
+});
+
+// ---------------------------------------------------------------- AC-6 role inheritance
+
+test(['AC-6', 'AC-4'], 'roles inherit within scope: directors do staff things at their location, staff cannot do director things, HQ does everything', async () => {
+  const t = await makeApp();
+  const a = t.fx.location(), b = t.fx.location();
+  const dirA = t.fx.director(a), staffA = t.fx.staff(a), hq = t.fx.hq();
+  const fa = t.fx.family(a), fb = t.fx.family(b);
+  // director inherits the staff roster at their own location
+  const dr = await t.as(dirA).get(A + '/roster');
+  assert.equal(dr.status, 200);
+  assert.deepEqual(dr.body.students.map(s => s.id), [fa.student.id]);
+  // staff do not inherit director powers
+  assert.equal((await t.as(staffA).get(A + '/staff')).status, 403);
+  assert.equal((await t.as(staffA).post(A + '/staff', { name: 'Self Made', email: 'sm@elite.test' })).status, 403);
+  assert.equal((await t.as(staffA).post(A + '/staff/' + t.fx.staff(a).id + '/deactivate')).status, 403);
+  assert.equal((await t.as(staffA).get(A + '/locations')).status, 403);
+  // HQ: every location, every power
+  const hr = await t.as(hq).get(A + '/roster?location_id=' + b.id);
+  assert.deepEqual(hr.body.students.map(s => s.id), [fb.student.id]);
+  assert.equal((await t.as(hq).get(A + '/roster')).body.students.length, 2);
+  const made = await t.as(hq).post(A + '/staff', { name: 'B Staff', email: 'bstaff@elite.test', location_id: b.id });
+  assert.equal(made.status, 201);
+  assert.equal(made.body.user.location_id, b.id);
+  assert.equal((await t.as(hq).post(A + '/staff/' + dirA.id + '/deactivate')).status, 200);
+  assert.equal((await t.as(hq).get(A + '/staff?location_id=' + b.id)).body.staff.length, 1);
+});
+
+// ---------------------------------------------------------------- NF-1 roster and family scope
+
+test(['NF-1', 'AC-6'], 'roster: staff see their own location\'s students with linked parents, never another location', async () => {
+  const t = await makeApp();
+  const a = t.fx.location(), b = t.fx.location();
+  const staffA = t.fx.staff(a);
+  const fa = t.fx.family(a, { students: 2 }), fb = t.fx.family(b);
+  const second = parentAt(t, a);
+  t.fx.link(second, fa.students[0]);
+  const pending = await inviteStudent(t, fa.parent, { name: 'Zed Pending', phone: '555-0177' });
+  const r = await t.as(staffA).get(A + '/roster');
+  assert.equal(r.status, 200);
+  assert.equal(r.body.location_id, a.id);
+  const ids = r.body.students.map(s => s.id);
+  assert.deepEqual(ids.slice().sort(), [fa.students[0].id, fa.students[1].id, pending.invite.user_id].sort());
+  assert.equal(ids.includes(fb.student.id), false);
+  const first = r.body.students.find(s => s.id === fa.students[0].id);
+  assert.equal(first.state, 'active');
+  assert.deepEqual(first.parents.map(p => p.id).sort(), [fa.parent.id, second.id].sort());
+  assert.deepEqual(Object.keys(first.parents[0]).sort(), ['email', 'id', 'link_status', 'name', 'phone']);
+  assert.equal(r.body.students.find(s => s.id === pending.invite.user_id).state, 'invited');
+  assert.equal(JSON.stringify(r.body).includes('password'), false);
+  assert.equal((await t.as(staffA).get(A + '/roster?location_id=' + b.id)).status, 403);
+  assert.equal((await t.as(fa.parent).get(A + '/roster')).status, 403);
+  assert.equal((await t.as(fa.student).get(A + '/roster')).status, 403);
+});
+
+test(['NF-1'], 'a parent never sees or changes another family\'s students or invites', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const pa = parentAt(t, loc), pb = parentAt(t, loc);
+  const leo = await approvedStudent(t, pa, 'Leo Diaz', 'leo@kid.test');
+  const inv = await inviteStudent(t, pa, { name: 'Ana Diaz', email: 'ana@kid.test' });
+  const g = await inviteGuardian(t, pa, { name: 'Mark Diaz', email: 'mark@family.test' });
+  const b = await t.as(pb).get(A + '/family');
+  assert.deepEqual(b.body.students, []);
+  assert.deepEqual(b.body.invites, []);
+  assert.deepEqual(b.body.guardians.map(x => x.id), [pb.id]);
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12' })).status, 200);
+  assert.equal((await t.as(pb).post(A + '/students/' + inv.invite.user_id + '/approve')).status, 403);
+  assert.equal(links(t, inv.invite.user_id)[0].status, 'pending');
+  for (const id of [inv.invite.id, g.invite.id]) {
+    assert.equal((await t.as(pb).post(A + '/invites/' + id + '/resend')).status, 403);
+    assert.equal((await t.as(pb).post(A + '/invites/' + id + '/cancel')).status, 403);
+  }
+  assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM account_invites WHERE revoked_at IS NOT NULL').get().n, 0);
+  assert.equal(userRow(t, inv.invite.user_id).active, 1);
+  // students, staff and HQ have no family screen; a student cannot invite or approve
+  const student = userRow(t, leo.id);
+  for (const who of [student, t.fx.staff(loc), t.fx.hq()]) {
+    assert.equal((await t.as(who).get(A + '/family')).status, 403);
+    assert.equal((await t.as(who).post(A + '/students/invite', { name: 'Sneaky', email: 's@kid.test' })).status, 403);
+    assert.equal((await t.as(who).post(A + '/students/' + inv.invite.user_id + '/approve')).status, 403);
+    assert.equal((await t.as(who).post(A + '/guardians/invite', { name: 'Sneaky', email: 'sg@kid.test' })).status, 403);
+  }
+  assert.equal(links(t, inv.invite.user_id)[0].status, 'pending');
+});
+
+test(['NF-1'], 'every signed-in route refuses a signed-out caller, and lower roles are refused the higher routes', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const f = t.fx.family(loc);
+  const staff = t.fx.staff(loc), dir = t.fx.director(loc);
+  const routes = [
+    ['get', '/me'], ['post', '/password'], ['get', '/family'], ['post', '/students/invite'], ['post', '/students/1/approve'],
+    ['post', '/guardians/invite'], ['post', '/invites/join'], ['post', '/invites/1/resend'], ['post', '/invites/1/cancel'],
+    ['get', '/roster'], ['get', '/staff'], ['post', '/staff'], ['post', '/staff/1/deactivate'], ['post', '/staff/1/reactivate'],
+    ['post', '/staff/1/reset-password'], ['get', '/locations'], ['post', '/locations'], ['patch', '/locations/' + loc.id],
+    ['post', '/directors'], ['post', '/directors/assign'],
+  ];
+  for (const [m, path] of routes) {
+    const r = await t.anon[m](A + path, m === 'get' ? undefined : {});
+    assert.equal(r.status, 401, m + ' ' + path);
+  }
+  const refused = [
+    [[f.parent, f.student], [['get', '/roster'], ['get', '/staff'], ['post', '/staff'], ['get', '/locations'], ['patch', '/locations/' + loc.id], ['post', '/locations'], ['post', '/directors']]],
+    [[staff], [['get', '/staff'], ['post', '/staff'], ['post', '/staff/' + staff.id + '/reset-password'], ['get', '/locations'], ['patch', '/locations/' + loc.id], ['post', '/locations'], ['post', '/directors'], ['post', '/directors/assign']]],
+    [[dir], [['post', '/locations'], ['post', '/directors'], ['post', '/directors/assign'], ['post', '/invites/join'], ['get', '/family']]],
+  ];
+  for (const [who, list] of refused) {
+    for (const u of who) {
+      for (const [m, path] of list) {
+        const r = await t.as(u)[m](A + path, m === 'get' ? undefined : {});
+        assert.equal(r.status, 403, u.role + ' ' + m + ' ' + path);
+      }
+    }
+  }
+});
+
+test(['NF-1', 'AC-1'], 'changing your password needs your current one', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc);
+  const wrong = await t.as(p).post(A + '/password', { current_password: 'nope-nope', new_password: 'brandnew1' });
+  assert.equal(wrong.status, 400);
+  assert.equal(wrong.body.error, 'current_password');
+  assert.equal((await t.as(p).post(A + '/password', { current_password: 'demo1234', new_password: 'short' })).body.error, 'new_password');
+  assert.equal((await t.as(p).post(A + '/password', { current_password: 'demo1234', new_password: 'demo1234' })).body.error, 'new_password');
+  assert.equal((await login(t, p.email, 'brandnew1')).status, 401);
+  assert.equal((await t.as(p).post(A + '/password', { current_password: 'demo1234', new_password: 'brandnew1' })).status, 200);
+  assert.equal((await login(t, p.email, 'brandnew1')).status, 200);
+  assert.equal((await login(t, p.email, 'demo1234')).status, 401);
+});

@@ -67,15 +67,21 @@
   // Times: always show in the relevant location's zone.
   App.tz = () => (App.me && App.me.location && App.me.location.timezone) || Intl.DateTimeFormat().resolvedOptions().timeZone;
   App.fmtTime = (ms, tz) => ms == null ? '—' : new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: tz || App.tz() }).format(ms);
+  // A 'YYYY-MM-DD' string is a calendar date and always reads as that date. An
+  // instant (ms) reads in opts.timeZone when the caller passes one (e.g. the
+  // event's location, for HQ), otherwise in App.tz().
   App.fmtDate = (d, opts) => {
     const date = typeof d === 'string' ? new Date(d + 'T12:00:00Z') : new Date(d);
-    return new Intl.DateTimeFormat('en-US', Object.assign({ weekday: 'short', month: 'short', day: 'numeric' }, opts || {}, typeof d === 'string' ? { timeZone: 'UTC' } : { timeZone: App.tz() })).format(date);
+    return new Intl.DateTimeFormat('en-US', Object.assign({ weekday: 'short', month: 'short', day: 'numeric', timeZone: App.tz() },
+      opts || {}, typeof d === 'string' ? { timeZone: 'UTC' } : {})).format(date);
   };
   App.fmtDateTime = (ms, tz) => ms == null ? '—' : new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz || App.tz() }).format(ms);
   App.fmtDuration = mins => mins == null ? '—' : (Math.floor(mins / 60) ? Math.floor(mins / 60) + 'h ' : '') + (Math.round(mins % 60)) + 'm';
   App.hhmm = s => { const [hh, mm] = String(s).split(':').map(Number); return ((hh + 11) % 12 + 1) + (mm ? ':' + String(mm).padStart(2, '0') : '') + (hh < 12 ? 'am' : 'pm'); };
   App.WEEKDAYS = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  App.now = () => (App.me && App.me.now) || Date.now();
+  // The server's instant while the dev clock is pinned; otherwise this device's clock,
+  // so a page left open never works from a stale time.
+  App.now = () => (App.me && App.me.clock_fixed ? App.me.now : Date.now());
   App.role = () => App.me && App.me.user.role;
   App.isOps = () => ['staff', 'director', 'hq'].includes(App.role());
 
@@ -113,6 +119,17 @@
   });
 
   // ---------- inbox (foundation view) ----------
+  // A module says where a notification about one of its records opens:
+  // App.inboxLink('daily_note', n => 'notes'). The route's view must be open to
+  // the signed-in role, or the item stays plain text.
+  const inboxLinks = {};
+  App.inboxLink = (refType, route) => { inboxLinks[refType] = route; };
+  function inboxRoute(n) {
+    const fn = inboxLinks[n.ref_type];
+    const route = fn && (typeof fn === 'function' ? fn(n) : fn);
+    const view = route && App.views.find(v => v.id === String(route).split('/')[0]);
+    return view && App.allowed(view.roles) ? String(route) : null;
+  }
   App.register({
     id: 'inbox', title: 'Inbox', icon: '🔔', order: 90, nav: false,
     async render(el) {
@@ -122,10 +139,12 @@
       if (!notifications.length) return el.append(h('div', { class: 'card empty' }, 'Nothing yet. Check-ins, notes and announcements will show up here.'));
       const list = h('ul', { class: 'list card' });
       for (const n of notifications) {
+        const route = inboxRoute(n);
+        const wrap = kids => (route ? h('a', { class: 'inbox-link', href: '#/' + route }, kids) : kids);
         const item = n.priority === 'emergency'
-          ? h('li', null, h('div', { class: 'emergency grow' }, h('div', { class: 'label' }, 'Emergency alert'), h('strong', null, n.title), n.body && h('p', { style: 'margin:.25rem 0 0' }, n.body)))
-          : h('li', null, h('div', { class: 'grow' }, h('div', null, !n.read_at && h('span', { class: 'badge badge-accent', style: 'margin-right:.4rem' }, 'New'), h('strong', null, n.title)),
-            n.body && h('div', { class: 'muted small' }, n.body)), h('time', { class: 'muted small' }, App.fmtDateTime(n.created_at)));
+          ? h('li', null, wrap(h('div', { class: 'emergency grow' }, h('div', { class: 'label' }, 'Emergency alert'), h('strong', null, n.title), n.body && h('p', { style: 'margin:.25rem 0 0' }, n.body))))
+          : h('li', null, wrap([h('div', { class: 'grow' }, h('div', null, !n.read_at && h('span', { class: 'badge badge-accent', style: 'margin-right:.4rem' }, 'New'), h('strong', null, n.title)),
+            n.body && h('div', { class: 'muted small' }, n.body)), h('time', { class: 'muted small' }, App.fmtDateTime(n.created_at))]));
         list.append(item);
         if (!n.read_at) App.api.post('/api/notifications/' + n.id + '/read').catch(() => {});
       }
@@ -158,7 +177,18 @@
       if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
         try { new Notification(n.title, { body: n.body || '', tag: 'n' + n.id }); } catch (_) {}
       }
+      recheckMe();
     };
+  }
+  // Something just happened to this account (a promotion, a new location...):
+  // re-read who we are, and redraw only if the role or location changed.
+  async function recheckMe() {
+    try {
+      const me = await App.api.get('/api/auth/me');
+      const was = App.me;
+      App.me = me;
+      if (!was || me.user.role !== was.user.role || me.user.location_id !== was.user.location_id) render();
+    } catch (_) { /* signed out: api() already redrew the sign-in screen */ }
   }
   function showEmergency(n) {
     const box = h('div', { class: 'emergency', role: 'alertdialog', 'aria-labelledby': 'em-t', style: 'position:fixed;inset:auto 12px 90px 12px;z-index:60;max-width:560px;margin:auto' },
@@ -179,12 +209,45 @@
       h('button', { id: 'bell', 'aria-label': 'Inbox', onclick: () => App.go('inbox') }, '🔔', h('span', { class: 'bell-count', hidden: true }, '0')),
       h('button', { 'aria-label': 'Sign out ' + u.name, title: 'Sign out', onclick: signOut }, u.name.split(' ')[0] + ' ⏻'),
     );
-    const cur = currentRoute().id;
-    nav.replaceChildren(...navViews().map(v => h('a', { href: '#/' + v.id, 'aria-current': v.id === cur ? 'page' : null },
-      h('span', { class: 'ico', 'aria-hidden': 'true' }, v.icon || '•'), h('span', null, v.title))));
+    renderNav(nav, currentRoute().id);
     renderDevbar();
   }
   const navViews = () => App.views.filter(v => v.nav && App.allowed(v.roles));
+
+  // A phone's bottom bar fits five tabs. With more, the first four stay and the
+  // rest move under More (a small menu above the bar). Desktop's left rail shows
+  // every tab, so there the extra links show and More hides (app.css).
+  const NAV_MAX = 5;
+  function renderNav(nav, cur) {
+    const views = navViews();
+    const link = (v, cls) => h('a', { href: '#/' + v.id, class: cls || null, 'aria-current': v.id === cur ? 'page' : null },
+      h('span', { class: 'ico', 'aria-hidden': 'true' }, v.icon || '•'), h('span', null, v.title));
+    if (views.length <= NAV_MAX) return nav.replaceChildren(...views.map(v => link(v)));
+    const main = views.slice(0, NAV_MAX - 1), rest = views.slice(NAV_MAX - 1);
+    const here = rest.find(v => v.id === cur);
+    const sheet = h('div', { class: 'nav-sheet', id: 'nav-sheet', hidden: true, onkeydown: e => { if (e.key === 'Escape') { close(); more.focus(); } } },
+      rest.map(v => link(v)));
+    const more = h('button', { type: 'button', class: 'nav-more', 'aria-expanded': 'false', 'aria-controls': 'nav-sheet',
+      'aria-current': here ? 'page' : null, onclick: () => (sheet.hidden ? open() : close()) },
+      h('span', { class: 'ico', 'aria-hidden': 'true' }, here ? here.icon || '•' : '☰'), h('span', null, here ? here.title : 'More'));
+    function open() {
+      sheet.hidden = false;
+      more.setAttribute('aria-expanded', 'true');
+      const first = sheet.querySelector('a');
+      if (first) first.focus();
+    }
+    function close() { sheet.hidden = true; more.setAttribute('aria-expanded', 'false'); }
+    nav.replaceChildren(...main.map(v => link(v)), ...rest.map(v => link(v, 'nav-extra')), more, sheet);
+  }
+  // A tap anywhere outside the nav closes an open More menu.
+  document.addEventListener('click', e => {
+    const sheet = document.getElementById('nav-sheet');
+    if (sheet && !sheet.hidden && !e.target.closest('#nav')) {
+      sheet.hidden = true;
+      const more = document.querySelector('#nav .nav-more');
+      if (more) more.setAttribute('aria-expanded', 'false');
+    }
+  });
 
   async function renderDevbar() {
     const bar = document.getElementById('devbar');
@@ -287,6 +350,9 @@
     render();
     if (App.me) { updateBell(); listen(); }
   }
+  // Re-read the signed-in user and draw the app again, e.g. right after a module
+  // signs someone in (family sign-up, accepting an invite). App.start() runs once.
+  App.boot = boot;
 
   App.start = () => {
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

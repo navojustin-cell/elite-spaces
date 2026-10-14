@@ -9,8 +9,11 @@ const { DatabaseSync } = require('node:sqlite');
 
 const SCHEMA_DIR = path.join(__dirname, '..', 'schema');
 
-function open(file) {
+// `now` is the app clock. SQL reads it as app_now(), so a schema trigger can
+// stamp a change with the same instant the app uses (tests and the dev bar move it).
+function open(file, now = Date.now) {
   const db = new DatabaseSync(file || ':memory:');
+  db.function('app_now', () => now());
   db.exec('PRAGMA foreign_keys = ON');
   if (file && file !== ':memory:') db.exec('PRAGMA journal_mode = WAL');
   // Schema files apply in name order: 000_core.sql first, then one per module.

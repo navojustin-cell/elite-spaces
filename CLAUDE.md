@@ -14,7 +14,8 @@ npm run seed      # demo data; every password is demo1234
 npm start         # http://localhost:3000 (PORT env to change); dev mode on by default
 ```
 Dev mode adds a purple bar for setting the clock and running scheduled jobs, plus one-tap
-demo sign-in on the sign-in screen.
+demo sign-in on the sign-in screen. The sign-in cookie is named per port (`sid_<PORT>`), so
+several local servers in one browser don't sign each other out.
 
 ## The benchmark (the gauntlet's pass condition)
 ```
@@ -26,13 +27,15 @@ Passing means all three of these:
 3. `npm run coverage` shows **gaps 0**. Every `gate: "test"` requirement in `docs/requirements.json` has at least one test and at least one mutation in each module it lists.
 
 You can scope any of them to a module: `node tests/run.js checkin`, `node tests/mutate.js checkin`,
-`node tests/coverage.js checkin`.
+`node tests/coverage.js checkin`. A scoped run loads only that module into the app.
+`tests/integration.test.js` (with `tests/mutations/integration.js`) runs flows across modules
+with every module loaded, including in `node tests/run.js integration`.
 
 ## Layout and file ownership
 
 | Path | Owner |
 |---|---|
-| `schema/000_core.sql`, `src/{app,auth,db,clock,time,notify,audit,errors}.js`, `src/modules/index.js`, `public/js/app.js`, `public/css/app.css`, `public/index.html`, `tests/{lib,run,mutate,coverage}.js`, `scripts/seed.js` | **foundation**: shared, change only when integrating |
+| `schema/000_core.sql`, `src/{app,auth,db,clock,time,notify,audit,errors}.js`, `src/modules/index.js`, `public/js/app.js`, `public/css/app.css`, `public/index.html`, `tests/{lib,run,mutate,coverage}.js`, `tests/integration.test.js`, `tests/mutations/{core,integration}.js`, `scripts/seed.js` | **foundation**: shared, change only when integrating |
 | `src/modules/<m>/` (routes, services, jobs, optional `seed.js`) | module `<m>` |
 | `schema/NNN_<m>.sql` (additive only: new tables, `ALTER TABLE ... ADD COLUMN`) | module `<m>` |
 | `public/js/views/<m>.js` | module `<m>` |
@@ -44,7 +47,10 @@ Schema file numbers are `010_accounts 020_checkin 030_sessions 040_enrollment 05
 Modules talk through the **core tables** (`schema/000_core.sql`), not by importing each other.
 A module may `require('../<other>/...')` only for read-only helpers that the other module exports
 on purpose. Notifications go through `src/notify.js`, staff edits through `src/audit.js`, and scope
-checks through `src/auth.js`.
+checks through `src/auth.js`. Sign-in sessions start with `auth.startSession(ctx, res, userId)`.
+The shared contracts between modules (membership audit rows, the enrollment status log, check-in
+notification kinds) are in `docs/decisions.md` D-26. Shell hooks for views: `App.boot()` redraws
+after a module signs someone in, `App.inboxLink(refType, route)` makes Inbox items open a view.
 
 ## Rules
 - **Every behavior arrives with a test that fails when the behavior is reverted**, plus a mutation

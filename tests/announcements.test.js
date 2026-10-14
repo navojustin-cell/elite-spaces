@@ -1,0 +1,698 @@
+'use strict';
+// Announcements and emergency alerts (PRD 5, AN-1..AN-6) and their scope rules (NF-1).
+const { test, makeApp, assert, load, at } = require('./lib');
+
+const LA = 'America/Los_Angeles';
+const TO = 'America/Toronto';
+const API = '/api/announcements';
+
+// Two locations in two zones, each with a director, staff and two families, plus HQ.
+async function world() {
+  const t = await makeApp();
+  const A = t.fx.location({ name: 'Irvine' });
+  const B = t.fx.location({ name: 'Toronto', timezone: TO, lat: 43.6532, lng: -79.3832 });
+  return {
+    t, A, B,
+    hq: t.fx.hq(),
+    dirA: t.fx.director(A), staffA: t.fx.staff(A),
+    dirB: t.fx.director(B), staffB: t.fx.staff(B),
+    famA: t.fx.family(A), famA2: t.fx.family(A),
+    famB: t.fx.family(B),
+  };
+}
+
+const post = (over = {}) => Object.assign({ category: 'event', title: 'Fall open house', body: 'Come see the new study rooms on Friday.', audience: 'families' }, over);
+const alert = (over = {}) => Object.assign({ title: 'Power outage', body: 'The building is closed for the rest of today. Please head home safely.' }, over);
+
+// User ids that got a notification for announcement `id`, sorted.
+const notified = (t, id) => t.db.prepare("SELECT user_id FROM notifications WHERE ref_type = 'announcement' AND ref_id = ? ORDER BY user_id")
+  .all(id).map(r => r.user_id);
+const sorted = (...users) => users.map(u => u.id).sort((x, y) => x - y);
+const countAnnouncements = t => t.db.prepare('SELECT COUNT(*) AS n FROM announcements').get().n;
+const feedIds = async (t, u) => (await t.as(u).get(API + '/feed')).body.posts.map(p => p.id);
+
+// ---------------------------------------------------------------- AN-1
+
+test(['AN-1'], 'a director posts to their own location with a category, and only families there are notified', async () => {
+  const w = await world();
+  const r = await w.t.as(w.dirA).post(API, post({ category: 'workshop' }));
+  assert.equal(r.status, 201);
+  const id = r.body.announcement.id;
+  const row = w.t.db.prepare('SELECT * FROM announcements WHERE id = ?').get(id);
+  assert.equal(row.type, 'announcement');
+  assert.equal(row.category, 'workshop');
+  assert.equal(row.status, 'published');
+  assert.equal(row.created_by, w.dirA.id);
+  assert.deepEqual(w.t.db.prepare('SELECT location_id FROM announcement_locations WHERE announcement_id = ?').all(id).map(x => x.location_id), [w.A.id]);
+  // All families at Irvine: both parents and both students. Not Toronto, not staff.
+  assert.deepEqual(notified(w.t, id), sorted(w.famA.parent, w.famA.student, w.famA2.parent, w.famA2.student));
+  assert.equal(r.body.recipients, 4);
+  assert.equal(r.body.notified, 4);
+  assert.equal(r.body.announcement.category_label, 'Workshop');
+});
+
+test(['AN-1'], 'every PRD category is accepted, and anything else is refused', async () => {
+  const w = await world();
+  for (const c of ['event', 'workshop', 'holiday', 'session_offering', 'news']) {
+    const r = await w.t.as(w.dirA).post(API, post({ category: c }));
+    assert.equal(r.status, 201, c);
+    assert.equal(r.body.announcement.category, c);
+  }
+  const before = countAnnouncements(w.t);
+  for (const c of ['party', undefined, '', 'toString']) {
+    const r = await w.t.as(w.dirA).post(API, post({ category: c }));
+    assert.equal(r.status, 400, String(c));
+    assert.equal(r.body.error, 'category');
+  }
+  assert.equal(countAnnouncements(w.t), before);
+});
+
+test(['AN-1'], 'a post needs a title and a message', async () => {
+  const w = await world();
+  const noTitle = await w.t.as(w.dirA).post(API, post({ title: '   ' }));
+  assert.equal(noTitle.status, 400);
+  assert.equal(noTitle.body.error, 'title');
+  const noBody = await w.t.as(w.dirA).post(API, post({ body: '' }));
+  assert.equal(noBody.status, 400);
+  assert.equal(noBody.body.error, 'body');
+  const tooLong = await w.t.as(w.dirA).post(API, post({ title: 'x'.repeat(121) }));
+  assert.equal(tooLong.status, 400);
+  assert.equal(countAnnouncements(w.t), 0);
+});
+
+test(['AN-1', 'NF-1'], 'staff, parents and students cannot post announcements', async () => {
+  const w = await world();
+  for (const u of [w.staffA, w.famA.parent, w.famA.student]) {
+    const r = await w.t.as(u).post(API, post());
+    assert.equal(r.status, 403, u.role);
+  }
+  assert.equal(countAnnouncements(w.t), 0);
+  assert.equal(w.t.db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, 0);
+});
+
+test(['AN-1', 'NF-1'], 'a director cannot post to another location, directly or through a session there', async () => {
+  const w = await world();
+  const sB = w.t.fx.session(w.B);
+  const direct = await w.t.as(w.dirA).post(API, post({ locations: [w.B.id] }));
+  assert.equal(direct.status, 403);
+  const both = await w.t.as(w.dirA).post(API, post({ locations: [w.A.id, w.B.id] }));
+  assert.equal(both.status, 403);
+  const viaSession = await w.t.as(w.dirA).post(API, post({ audience: 'session', session_id: sB.id }));
+  assert.equal(viaSession.status, 403);
+  assert.equal(countAnnouncements(w.t), 0);
+  // Naming their own location explicitly is fine.
+  const own = await w.t.as(w.dirA).post(API, post({ locations: [w.A.id] }));
+  assert.equal(own.status, 201);
+  assert.ok(!notified(w.t, own.body.announcement.id).includes(w.famB.parent.id));
+});
+
+test(['AN-1', 'AN-5'], 'a wrongly typed category, title or message is refused with a 400, never a server error', async () => {
+  const w = await world();
+  const cases = [
+    [API, post({ category: ['event'] }), 'category'],
+    [API, post({ category: { toString: 1 } }), 'category'],
+    [API, post({ title: { toString: 1 } }), 'title'],
+    [API, post({ title: ['Fall open house'] }), 'title'],
+    [API, post({ body: { toString: 1 } }), 'body'],
+    [API, post({ body: true }), 'body'],
+    [API + '/emergency', alert({ title: { toString: 1 } }), 'title'],
+    [API + '/emergency', alert({ body: ['Leave now'] }), 'body'],
+  ];
+  for (const [url, b, field] of cases) {
+    const r = await w.t.as(w.dirA).post(url, b);
+    assert.equal(r.status, 400, url + ' ' + JSON.stringify(b));
+    assert.equal(r.body.error, field, url + ' ' + JSON.stringify(b));
+  }
+  assert.equal(countAnnouncements(w.t), 0);
+  assert.equal(w.t.db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, 0);
+  // A number is still fine as text.
+  const n = await w.t.as(w.dirA).post(API, post({ title: 2026 }));
+  assert.equal(n.status, 201);
+  assert.equal(n.body.announcement.title, '2026');
+});
+
+test(['AN-1', 'AN-2', 'AN-4'], 'location and session ids must be numbers or text; anything else is refused, not coerced', async () => {
+  const w = await world();
+  const sA = w.t.fx.session(w.A);
+  const hqBad = [[{ toString: 1 }], [[w.A.id]], [true], [w.A.id, {}]];
+  for (const locations of hqBad) {
+    for (const url of [API, API + '/preview']) {
+      const r = await w.t.as(w.hq).post(url, post({ locations }));
+      assert.equal(r.status, 400, url + ' ' + JSON.stringify(locations));
+      assert.equal(r.body.error, 'locations');
+    }
+    const em = await w.t.as(w.hq).post(API + '/emergency', alert({ locations }));
+    assert.equal(em.status, 400, 'emergency ' + JSON.stringify(locations));
+  }
+  // A director's own location wrapped in an array or object is not their location.
+  for (const locations of [[{ toString: 1 }], [[w.A.id]], [{ toString: 1 }, w.A.id]]) {
+    for (const url of [API, API + '/preview']) {
+      assert.equal((await w.t.as(w.dirA).post(url, post({ locations }))).status, 403, url + ' ' + JSON.stringify(locations));
+    }
+    assert.equal((await w.t.as(w.dirA).post(API + '/emergency', alert({ locations }))).status, 403, JSON.stringify(locations));
+  }
+  for (const session_id of [{ toString: 1 }, [sA.id]]) {
+    for (const url of [API, API + '/preview']) {
+      const r = await w.t.as(w.dirA).post(url, post({ audience: 'session', session_id }));
+      assert.equal(r.status, 400, url + ' ' + JSON.stringify(session_id));
+      assert.equal(r.body.error, 'session');
+    }
+  }
+  assert.equal(countAnnouncements(w.t), 0);
+  // Ids sent as text still work.
+  const hq = await w.t.as(w.hq).post(API, post({ locations: [String(w.B.id)] }));
+  assert.equal(hq.status, 201);
+  assert.deepEqual(notified(w.t, hq.body.announcement.id), sorted(w.famB.parent, w.famB.student));
+  const viaSession = await w.t.as(w.dirA).post(API, post({ audience: 'session', session_id: String(sA.id) }));
+  assert.equal(viaSession.status, 201);
+  assert.equal(viaSession.body.announcement.session.id, sA.id);
+});
+
+test(['AN-1', 'AN-5'], 'a director naming their own location more than once still posts there, once', async () => {
+  const w = await world();
+  const r = await w.t.as(w.dirA).post(API, post({ locations: [w.A.id, w.A.id] }));
+  assert.equal(r.status, 201);
+  const id = r.body.announcement.id;
+  assert.deepEqual(w.t.db.prepare('SELECT location_id FROM announcement_locations WHERE announcement_id = ?').all(id).map(x => x.location_id), [w.A.id]);
+  assert.deepEqual(notified(w.t, id), sorted(w.famA.parent, w.famA.student, w.famA2.parent, w.famA2.student));
+  const em = await w.t.as(w.dirA).post(API + '/emergency', alert({ locations: [w.A.id, String(w.A.id)] }));
+  assert.equal(em.status, 201);
+  assert.equal(em.body.recipients, 6);
+  // Adding another location to the list is still refused, and so is an empty list.
+  assert.equal((await w.t.as(w.dirA).post(API, post({ locations: [w.A.id, w.A.id, w.B.id] }))).status, 403);
+  assert.equal((await w.t.as(w.dirA).post(API, post({ locations: [] }))).status, 403);
+  assert.equal(countAnnouncements(w.t), 2);
+});
+
+// ---------------------------------------------------------------- AN-2
+
+test(['AN-2'], 'HQ posts to every location at once', async () => {
+  const w = await world();
+  const r = await w.t.as(w.hq).post(API, post({ locations: 'all', category: 'news' }));
+  assert.equal(r.status, 201);
+  const id = r.body.announcement.id;
+  assert.deepEqual(w.t.db.prepare('SELECT location_id FROM announcement_locations WHERE announcement_id = ? ORDER BY location_id').all(id).map(x => x.location_id),
+    [w.A.id, w.B.id].sort((x, y) => x - y));
+  assert.deepEqual(notified(w.t, id), sorted(w.famA.parent, w.famA.student, w.famA2.parent, w.famA2.student, w.famB.parent, w.famB.student));
+  assert.deepEqual(r.body.announcement.locations.map(l => l.name).sort(), ['Irvine', 'Toronto']);
+});
+
+test(['AN-2'], 'HQ posts to a chosen set of locations only', async () => {
+  const w = await world();
+  const C = w.t.fx.location({ name: 'Arcadia' });
+  const famC = w.t.fx.family(C);
+  const r = await w.t.as(w.hq).post(API, post({ locations: [C.id, w.B.id] }));
+  assert.equal(r.status, 201);
+  const id = r.body.announcement.id;
+  assert.deepEqual(notified(w.t, id), sorted(w.famB.parent, w.famB.student, famC.parent, famC.student));
+  assert.deepEqual(await feedIds(w.t, w.famA.parent), []);
+  assert.deepEqual(await feedIds(w.t, famC.student), [id]);
+});
+
+test(['AN-2'], 'HQ has to pick at least one real location', async () => {
+  const w = await world();
+  for (const locations of [undefined, [], [987654], 'some']) {
+    const r = await w.t.as(w.hq).post(API, post({ locations }));
+    assert.equal(r.status, 400, JSON.stringify(locations));
+    assert.equal(r.body.error, 'locations');
+  }
+  assert.equal(countAnnouncements(w.t), 0);
+});
+
+// ---------------------------------------------------------------- AN-3
+
+test(['AN-3'], 'publishing sends one in-app notification per recipient and keeps the post in the News feed', async () => {
+  const w = await world();
+  const r = await w.t.as(w.dirA).post(API, post({ title: 'Pumpkin carving Friday' }));
+  const id = r.body.announcement.id;
+  const rows = w.t.fx.notifications(w.famA.parent);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, 'announcement');
+  assert.equal(rows[0].ref_type, 'announcement');
+  assert.equal(rows[0].ref_id, id);
+  assert.equal(rows[0].priority, 'normal');
+  assert.equal(rows[0].title, 'Pumpkin carving Friday');
+  assert.ok(rows[0].body.startsWith('From Irvine'));
+  assert.ok(rows[0].delivered_at);
+  // Reading the inbox does not remove the post from News.
+  await w.t.as(w.famA.parent).post('/api/notifications/read-all');
+  const feed = await w.t.as(w.famA.parent).get(API + '/feed');
+  assert.equal(feed.status, 200);
+  assert.deepEqual(feed.body.posts.map(p => p.id), [id]);
+  assert.equal(feed.body.posts[0].title, 'Pumpkin carving Friday');
+  assert.equal(feed.body.posts[0].unread, false);
+  assert.equal(feed.body.posts[0].tz, LA);
+});
+
+test(['AN-3'], 'a post scheduled for later is held until its time, then the job sends it exactly once', async () => {
+  const w = await world();
+  const r = await w.t.as(w.dirA).post(API, post({ publish_at: '2026-10-14T15:00' }));
+  assert.equal(r.status, 201);
+  const id = r.body.announcement.id;
+  const due = at(LA, '2026-10-14', '15:00');
+  let row = w.t.db.prepare('SELECT * FROM announcements WHERE id = ?').get(id);
+  assert.equal(row.status, 'scheduled');
+  assert.equal(row.publish_at, due);
+  assert.equal(r.body.recipients, null);
+  assert.deepEqual(notified(w.t, id), []);
+  assert.deepEqual(await feedIds(w.t, w.famA.parent), []);
+  // The sender sees it waiting, not as sent; staff at the location do not see it yet.
+  const mine = await w.t.as(w.dirA).get(API + '/feed');
+  assert.deepEqual(mine.body.scheduled.map(p => p.id), [id]);
+  assert.deepEqual(mine.body.posts, []);
+  assert.deepEqual(await feedIds(w.t, w.staffA), []);
+
+  w.t.clock.set(due - 60000);
+  w.t.jobs();
+  assert.deepEqual(notified(w.t, id), []);
+
+  w.t.clock.set(due);
+  w.t.jobs();
+  w.t.jobs();
+  w.t.clock.set(due + 3600000);
+  w.t.jobs();
+  assert.deepEqual(notified(w.t, id), sorted(w.famA.parent, w.famA.student, w.famA2.parent, w.famA2.student));
+  row = w.t.db.prepare('SELECT * FROM announcements WHERE id = ?').get(id);
+  assert.equal(row.status, 'published');
+  assert.equal(row.published_at, due);
+  assert.equal(w.t.fx.notifications(w.famA.parent)[0].created_at, due);
+  assert.deepEqual(await feedIds(w.t, w.famA.parent), [id]);
+  assert.deepEqual((await w.t.as(w.dirA).get(API + '/feed')).body.scheduled, []);
+});
+
+test(['AN-3'], 'a schedule time is read in the location\'s own time zone', async () => {
+  const w = await world();
+  const r = await w.t.as(w.dirB).post(API, post({ publish_at: '2026-10-14T18:30' }));
+  assert.equal(r.status, 201);
+  assert.equal(w.t.db.prepare('SELECT publish_at FROM announcements WHERE id = ?').get(r.body.announcement.id).publish_at, at(TO, '2026-10-14', '18:30'));
+  assert.equal(r.body.announcement.tz, TO);
+});
+
+test(['AN-3'], 'a schedule time that has already passed is refused instead of sent', async () => {
+  const w = await world();
+  const r = await w.t.as(w.dirA).post(API, post({ publish_at: '2026-10-14T08:00' }));
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, 'publish_at');
+  const junk = await w.t.as(w.dirA).post(API, post({ publish_at: 'tomorrow' }));
+  assert.equal(junk.status, 400);
+  assert.equal(countAnnouncements(w.t), 0);
+  assert.equal(w.t.db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, 0);
+});
+
+test(['AN-3'], 'a schedule time must be a real clock time within the next year', async () => {
+  const w = await world();
+  const now = w.t.clock.now();
+  const DAY = 24 * 3600000;
+  for (const publish_at of ['2026-10-14T25:00', '2026-10-14T24:00', '2026-10-14T23:60', '2026-10-14T19:99',
+    1e300, now + 366 * DAY, '2027-10-20T09:00', { toString: 1 }]) {
+    const r = await w.t.as(w.dirA).post(API, post({ publish_at }));
+    assert.equal(r.status, 400, JSON.stringify(publish_at));
+    assert.equal(r.body.error, 'publish_at', JSON.stringify(publish_at));
+  }
+  assert.equal(countAnnouncements(w.t), 0);
+  // The last minute of the day, and a date well inside the year, are fine.
+  const late = await w.t.as(w.dirA).post(API, post({ publish_at: '2026-10-14T23:59' }));
+  assert.equal(late.status, 201);
+  assert.equal(w.t.db.prepare('SELECT publish_at FROM announcements WHERE id = ?').get(late.body.announcement.id).publish_at, at(LA, '2026-10-14', '23:59'));
+  const nextFall = await w.t.as(w.dirA).post(API, post({ publish_at: '2027-10-01T09:00' }));
+  assert.equal(nextFall.status, 201);
+  assert.equal(w.t.db.prepare('SELECT publish_at FROM announcements WHERE id = ?').get(nextFall.body.announcement.id).publish_at, at(LA, '2027-10-01', '09:00'));
+  const ms = await w.t.as(w.dirA).post(API, post({ publish_at: now + 300 * DAY }));
+  assert.equal(ms.status, 201);
+  assert.equal(w.t.db.prepare("SELECT COUNT(*) AS n FROM announcements WHERE status = 'scheduled'").get().n, 3);
+});
+
+test(['AN-3'], 'publishing a post a second time sends nothing more', async () => {
+  const w = await world();
+  const mod = load('src/modules/announcements/index.js');
+  const r = await w.t.as(w.dirA).post(API, post({ publish_at: '2026-10-14T12:00' }));
+  const id = r.body.announcement.id;
+  w.t.clock.set(at(LA, '2026-10-14', '12:00'));
+  const first = mod.publish(w.t.ctx, id);
+  assert.equal(first.recipients, 4);
+  assert.equal(mod.publish(w.t.ctx, id), null);
+  assert.equal(notified(w.t, id).length, 4);
+});
+
+test(['AN-3'], 'the sender can cancel a scheduled post, and it never goes out', async () => {
+  const w = await world();
+  const r = await w.t.as(w.dirA).post(API, post({ publish_at: '2026-10-15T09:00' }));
+  const id = r.body.announcement.id;
+  const del = await w.t.as(w.dirA).del(API + '/' + id);
+  assert.equal(del.status, 200);
+  assert.equal(w.t.db.prepare('SELECT status FROM announcements WHERE id = ?').get(id).status, 'cancelled');
+  w.t.clock.set(at(LA, '2026-10-15', '10:00'));
+  w.t.jobs();
+  assert.deepEqual(notified(w.t, id), []);
+  assert.deepEqual(await feedIds(w.t, w.famA.parent), []);
+  const again = await w.t.as(w.dirA).del(API + '/' + id);
+  assert.equal(again.status, 409);
+});
+
+test(['AN-3'], 'a post that has already gone out cannot be cancelled', async () => {
+  const w = await world();
+  const r = await w.t.as(w.dirA).post(API, post());
+  const del = await w.t.as(w.dirA).del(API + '/' + r.body.announcement.id);
+  assert.equal(del.status, 409);
+  assert.equal(del.body.error, 'not_scheduled');
+  assert.equal(w.t.db.prepare('SELECT status FROM announcements WHERE id = ?').get(r.body.announcement.id).status, 'published');
+});
+
+// ---------------------------------------------------------------- AN-4
+
+test(['AN-4'], 'parents only reaches parents; students only reaches students', async () => {
+  const w = await world();
+  const p = await w.t.as(w.dirA).post(API, post({ audience: 'parents' }));
+  assert.equal(p.status, 201);
+  assert.deepEqual(notified(w.t, p.body.announcement.id), sorted(w.famA.parent, w.famA2.parent));
+  const s = await w.t.as(w.dirA).post(API, post({ audience: 'students' }));
+  assert.equal(s.status, 201);
+  assert.deepEqual(notified(w.t, s.body.announcement.id), sorted(w.famA.student, w.famA2.student));
+  const bad = await w.t.as(w.dirA).post(API, post({ audience: 'everyone' }));
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error, 'audience');
+});
+
+test(['AN-4'], 'a session audience reaches its actively enrolled students and their active parents only', async () => {
+  const w = await world();
+  const { t, A } = w;
+  const s = t.fx.session(A, { name: 'Afternoon Study' });
+  const other = t.fx.session(A, { name: 'Morning Focus', weekdays: '2,4', start: '09:30', end: '12:00' });
+  const guardian2 = t.fx.user('parent', { location: A });
+  t.fx.link(guardian2, w.famA.student);                         // second guardian: included
+  const pendingParent = t.fx.user('parent', { location: A });
+  t.fx.link(pendingParent, w.famA.student, 'pending');          // link not approved: excluded
+  t.fx.enroll(w.famA.student, s, 1);
+  t.fx.enroll(w.famA.student, s, 3);                            // two slots, one notification
+  t.fx.enroll(w.famA2.student, s, 5, { status: 'paused' });     // paused: excluded
+  const famA3 = t.fx.family(A);
+  t.fx.enroll(famA3.student, s, 1, { status: 'dropped' });      // dropped: excluded
+  const famA4 = t.fx.family(A);
+  t.fx.enroll(famA4.student, other, 2);                         // other session: excluded
+  const r = await t.as(w.dirA).post(API, post({ audience: 'session', session_id: s.id, category: 'session_offering' }));
+  assert.equal(r.status, 201);
+  const id = r.body.announcement.id;
+  assert.deepEqual(notified(t, id), sorted(w.famA.parent, guardian2, w.famA.student));
+  assert.equal(r.body.announcement.session.id, s.id);
+  assert.deepEqual(await feedIds(t, w.famA2.parent), []);
+  assert.deepEqual(await feedIds(t, famA4.student), []);
+  assert.deepEqual(await feedIds(t, guardian2), [id]);
+  const none = await t.as(w.dirA).post(API, post({ audience: 'session' }));
+  assert.equal(none.status, 400);
+  assert.equal(none.body.error, 'session');
+});
+
+test(['AN-4'], 'students whose parent has not approved them, and deactivated accounts, are left out', async () => {
+  const w = await world();
+  const pending = w.t.fx.family(w.A, { linked: false });
+  const gone = w.t.fx.family(w.A);
+  w.t.db.prepare('UPDATE users SET active = 0 WHERE id IN (?, ?)').run(gone.parent.id, gone.student.id);
+  const r = await w.t.as(w.dirA).post(API, post());
+  const ids = notified(w.t, r.body.announcement.id);
+  assert.ok(!ids.includes(pending.student.id));
+  assert.ok(!ids.includes(gone.parent.id));
+  assert.ok(!ids.includes(gone.student.id));
+  // The parent of the pending student is still a family at this location.
+  assert.ok(ids.includes(pending.parent.id));
+  assert.equal(ids.length, 5);
+});
+
+test(['AN-4'], 'preview says who a post would reach without sending anything', async () => {
+  const w = await world();
+  await w.t.as(w.famA2.parent).put(API + '/prefs', { muted: true });
+  const r = await w.t.as(w.dirA).post(API + '/preview', post());
+  assert.equal(r.status, 200);
+  assert.deepEqual(
+    { recipients: r.body.recipients, notified: r.body.notified, muted: r.body.muted, parents: r.body.parents, students: r.body.students, staff: r.body.staff, locations: r.body.locations },
+    { recipients: 4, notified: 3, muted: 1, parents: 2, students: 2, staff: 0, locations: ['Irvine'] });
+  const em = await w.t.as(w.dirA).post(API + '/preview', alert({ type: 'emergency' }));
+  assert.equal(em.body.recipients, 6);
+  assert.equal(em.body.staff, 2);
+  assert.equal(em.body.muted, 0);
+  assert.equal(countAnnouncements(w.t), 0);
+  assert.equal(w.t.db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, 0);
+});
+
+// ---------------------------------------------------------------- mute + AN-5
+
+test(['AN-3', 'AN-5'], 'muted users get no notification for announcements but still see them in News', async () => {
+  const w = await world();
+  const m = await w.t.as(w.famA.parent).put(API + '/prefs', { muted: true });
+  assert.equal(m.status, 200);
+  assert.equal((await w.t.as(w.famA.parent).get(API + '/feed')).body.muted, true);
+  const r = await w.t.as(w.dirA).post(API, post());
+  const id = r.body.announcement.id;
+  assert.deepEqual(notified(w.t, id), sorted(w.famA.student, w.famA2.parent, w.famA2.student));
+  assert.equal(r.body.recipients, 4);
+  assert.equal(r.body.notified, 3);
+  assert.deepEqual(await feedIds(w.t, w.famA.parent), [id]);
+  // Turning notifications back on applies to the next post.
+  await w.t.as(w.famA.parent).put(API + '/prefs', { muted: false });
+  const r2 = await w.t.as(w.dirA).post(API, post({ title: 'Second' }));
+  assert.ok(notified(w.t, r2.body.announcement.id).includes(w.famA.parent.id));
+  const bad = await w.t.as(w.famA.parent).put(API + '/prefs', { muted: 'yes' });
+  assert.equal(bad.status, 400);
+});
+
+test(['AN-5'], 'an emergency alert reaches everyone at the location, ignoring audience and mute', async () => {
+  const w = await world();
+  await w.t.as(w.famA.parent).put(API + '/prefs', { muted: true });
+  await w.t.as(w.staffA).put(API + '/prefs', { muted: true });
+  const r = await w.t.as(w.dirA).post(API + '/emergency', alert({ audience: 'parents' }));
+  assert.equal(r.status, 201);
+  const id = r.body.announcement.id;
+  assert.deepEqual(notified(w.t, id), sorted(w.famA.parent, w.famA.student, w.famA2.parent, w.famA2.student, w.staffA, w.dirA));
+  const n = w.t.fx.notifications(w.famA.parent, 'emergency_alert');
+  assert.equal(n.length, 1);
+  assert.equal(n[0].priority, 'emergency');
+  assert.ok(n[0].body.startsWith('Emergency alert from Irvine'));
+  const row = w.t.db.prepare('SELECT * FROM announcements WHERE id = ?').get(id);
+  assert.equal(row.type, 'emergency');
+  assert.equal(row.audience, 'everyone');
+  assert.equal(row.category, null);
+  assert.equal(row.status, 'published');
+  assert.equal(r.body.recipients, 6);
+  assert.equal(r.body.notified, 6);
+});
+
+test(['AN-5'], 'an emergency alert goes out now, even if a schedule time is sent, and stays short', async () => {
+  const w = await world();
+  const r = await w.t.as(w.dirA).post(API + '/emergency', alert({ publish_at: '2026-10-14T18:00' }));
+  assert.equal(r.status, 201);
+  assert.equal(r.body.announcement.status, 'published');
+  assert.equal(notified(w.t, r.body.announcement.id).length, 6);
+  const long = await w.t.as(w.dirA).post(API + '/emergency', alert({ body: 'x'.repeat(301) }));
+  assert.equal(long.status, 400);
+  assert.equal(long.body.error, 'body');
+  const ok = await w.t.as(w.dirA).post(API + '/emergency', alert({ body: 'x'.repeat(300) }));
+  assert.equal(ok.status, 201);
+});
+
+test(['AN-5', 'NF-1'], 'staff and families cannot send emergency alerts, and a director only for their own location', async () => {
+  const w = await world();
+  for (const u of [w.staffA, w.famA.parent, w.famA.student]) {
+    const r = await w.t.as(u).post(API + '/emergency', alert());
+    assert.equal(r.status, 403, u.role);
+  }
+  const other = await w.t.as(w.dirA).post(API + '/emergency', alert({ locations: [w.B.id] }));
+  assert.equal(other.status, 403);
+  assert.equal(countAnnouncements(w.t), 0);
+  assert.equal(w.t.db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, 0);
+});
+
+test(['AN-5', 'AN-2'], 'HQ sends an emergency alert to any location it picks', async () => {
+  const w = await world();
+  const r = await w.t.as(w.hq).post(API + '/emergency', alert({ locations: [w.B.id] }));
+  assert.equal(r.status, 201);
+  assert.deepEqual(notified(w.t, r.body.announcement.id), sorted(w.famB.parent, w.famB.student, w.staffB, w.dirB));
+  assert.ok(w.t.fx.notifications(w.famB.parent)[0].body.startsWith('Emergency alert from ELITE HQ'));
+  const all = await w.t.as(w.hq).post(API + '/emergency', alert({ locations: 'all' }));
+  assert.equal(notified(w.t, all.body.announcement.id).length, 10);
+});
+
+test(['AN-5'], 'an emergency alert is pinned for everyone at the location for a day, then drops off', async () => {
+  const w = await world();
+  const r = await w.t.as(w.dirA).post(API + '/emergency', alert());
+  const id = r.body.announcement.id;
+  await w.t.as(w.dirA).post(API, post());
+  w.t.clock.advance(3600000);
+  for (const u of [w.famA.parent, w.famA.student, w.staffA, w.hq]) {
+    const f = await w.t.as(u).get(API + '/feed');
+    assert.deepEqual(f.body.active_emergencies.map(p => p.id), [id], u.role);
+    assert.equal(f.body.active_emergencies[0].type, 'emergency');
+  }
+  const elsewhere = await w.t.as(w.famB.parent).get(API + '/feed');
+  assert.deepEqual(elsewhere.body.active_emergencies, []);
+  w.t.clock.advance(24 * 3600000);
+  const later = await w.t.as(w.famA.parent).get(API + '/feed');
+  assert.deepEqual(later.body.active_emergencies, []);
+  assert.ok(later.body.posts.some(p => p.id === id), 'the alert stays in the feed history');
+});
+
+// ---------------------------------------------------------------- AN-6
+
+test(['AN-6'], 'the sender and HQ see delivered and read counts taken from the notifications', async () => {
+  const w = await world();
+  await w.t.as(w.famA2.student).put(API + '/prefs', { muted: true });
+  const r = await w.t.as(w.dirA).post(API, post());
+  const id = r.body.announcement.id;
+  let s = await w.t.as(w.dirA).get(API + '/' + id + '/stats');
+  assert.equal(s.status, 200);
+  assert.deepEqual(s.body, { recipients: 4, delivered: 3, read: 0, muted: 1 });
+  // Read in News, and read from the inbox: both count.
+  assert.equal((await w.t.as(w.famA.parent).post(API + '/' + id + '/read')).status, 200);
+  const inbox = await w.t.as(w.famA.student).get('/api/notifications');
+  await w.t.as(w.famA.student).post('/api/notifications/' + inbox.body.notifications[0].id + '/read');
+  await w.t.as(w.famA.parent).post(API + '/' + id + '/read'); // reading twice counts once
+  s = await w.t.as(w.hq).get(API + '/' + id + '/stats');
+  assert.deepEqual(s.body, { recipients: 4, delivered: 3, read: 2, muted: 1 });
+  // The same numbers ride along on the sender's feed, and nobody else's.
+  const mine = (await w.t.as(w.dirA).get(API + '/feed')).body.posts[0];
+  assert.deepEqual(mine.stats, { recipients: 4, delivered: 3, read: 2, muted: 1 });
+  const parentView = (await w.t.as(w.famA.parent).get(API + '/feed')).body.posts[0];
+  assert.equal(parentView.stats, null);
+  assert.equal((await w.t.as(w.staffA).get(API + '/feed')).body.posts[0].stats, null);
+});
+
+test(['AN-6', 'NF-1'], 'only the sender or HQ can see delivery numbers', async () => {
+  const w = await world();
+  const dirA2 = w.t.fx.director(w.A);
+  const r = await w.t.as(w.dirA).post(API, post());
+  const id = r.body.announcement.id;
+  for (const u of [w.dirB, dirA2, w.staffA, w.famA.parent, w.famA.student]) {
+    const s = await w.t.as(u).get(API + '/' + id + '/stats');
+    assert.equal(s.status, 403, u.role);
+  }
+  assert.equal((await w.t.as(w.hq).get(API + '/' + id + '/stats')).status, 200);
+  assert.equal((await w.t.as(w.dirA).get(API + '/987654/stats')).status, 404);
+});
+
+// ---------------------------------------------------------------- NF-1
+
+test(['NF-1'], 'a family member\'s feed holds only the posts sent to them', async () => {
+  const w = await world();
+  const { t, A } = w;
+  const s = t.fx.session(A);
+  t.fx.enroll(w.famA.student, s, 1);
+  const toParents = (await t.as(w.dirA).post(API, post({ audience: 'parents' }))).body.announcement.id;
+  const toSession = (await t.as(w.dirA).post(API, post({ audience: 'session', session_id: s.id }))).body.announcement.id;
+  const atB = (await t.as(w.dirB).post(API, post())).body.announcement.id;
+  assert.deepEqual((await feedIds(t, w.famA.parent)).sort(), [toParents, toSession].sort());
+  assert.deepEqual(await feedIds(t, w.famA.student), [toSession]);
+  assert.deepEqual(await feedIds(t, w.famA2.parent), [toParents]);
+  assert.deepEqual(await feedIds(t, w.famA2.student), []);
+  assert.deepEqual(await feedIds(t, w.famB.parent), [atB]);
+  // Signed out: nothing at all.
+  assert.equal((await t.anon.get(API + '/feed')).status, 401);
+});
+
+test(['NF-1'], 'staff and directors see their own location\'s posts, never another location\'s; HQ sees all', async () => {
+  const w = await world();
+  const a = (await w.t.as(w.dirA).post(API, post({ audience: 'parents' }))).body.announcement.id;
+  const b = (await w.t.as(w.dirB).post(API, post())).body.announcement.id;
+  assert.deepEqual(await feedIds(w.t, w.staffA), [a]);
+  assert.deepEqual(await feedIds(w.t, w.dirA), [a]);
+  assert.deepEqual(await feedIds(w.t, w.staffB), [b]);
+  assert.deepEqual((await feedIds(w.t, w.hq)).sort(), [a, b].sort());
+});
+
+test(['NF-1'], 'a network post shows a location only its own name', async () => {
+  const w = await world();
+  const id = (await w.t.as(w.hq).post(API, post({ locations: 'all' }))).body.announcement.id;
+  const fa = (await w.t.as(w.famA.parent).get(API + '/feed')).body.posts.find(p => p.id === id);
+  assert.deepEqual(fa.locations.map(l => l.name), ['Irvine']);
+  const sb = (await w.t.as(w.staffB).get(API + '/feed')).body.posts.find(p => p.id === id);
+  assert.deepEqual(sb.locations.map(l => l.name), ['Toronto']);
+  assert.equal(sb.tz, TO);
+  const h = (await w.t.as(w.hq).get(API + '/feed')).body.posts.find(p => p.id === id);
+  assert.equal(h.locations.length, 2);
+});
+
+test(['NF-1'], 'a director sees only their own scheduled posts; HQ sees every one', async () => {
+  const w = await world();
+  const a = (await w.t.as(w.dirA).post(API, post({ publish_at: '2026-10-15T09:00' }))).body.announcement.id;
+  const b = (await w.t.as(w.dirB).post(API, post({ publish_at: '2026-10-15T09:00' }))).body.announcement.id;
+  assert.deepEqual((await w.t.as(w.dirA).get(API + '/feed')).body.scheduled.map(p => p.id), [a]);
+  assert.deepEqual((await w.t.as(w.dirB).get(API + '/feed')).body.scheduled.map(p => p.id), [b]);
+  assert.deepEqual((await w.t.as(w.staffA).get(API + '/feed')).body.scheduled, []);
+  assert.deepEqual((await w.t.as(w.famA.parent).get(API + '/feed')).body.scheduled, []);
+  assert.equal((await w.t.as(w.hq).get(API + '/feed')).body.scheduled.length, 2);
+});
+
+test(['NF-1'], 'only the sender or HQ can cancel a scheduled post', async () => {
+  const w = await world();
+  const dirA2 = w.t.fx.director(w.A);
+  const id = (await w.t.as(w.dirA).post(API, post({ publish_at: '2026-10-15T09:00' }))).body.announcement.id;
+  for (const u of [w.dirB, dirA2, w.staffA, w.famA.parent]) {
+    const r = await w.t.as(u).del(API + '/' + id);
+    assert.equal(r.status, 403, u.role);
+  }
+  assert.equal(w.t.db.prepare('SELECT status FROM announcements WHERE id = ?').get(id).status, 'scheduled');
+  assert.equal((await w.t.as(w.hq).del(API + '/' + id)).status, 200);
+  assert.equal(w.t.db.prepare('SELECT status FROM announcements WHERE id = ?').get(id).status, 'cancelled');
+});
+
+test(['NF-1'], 'compose options list only the director\'s own sessions; staff and families are refused', async () => {
+  const w = await world();
+  const sA = w.t.fx.session(w.A, { name: 'Afternoon Study' });
+  const sB = w.t.fx.session(w.B, { name: 'Morning Focus' });
+  w.t.fx.enroll(w.famA.student, sA, 1);
+  w.t.fx.enroll(w.famA.student, sA, 3);
+  w.t.fx.enroll(w.famA2.student, sA, 5);
+  const a = await w.t.as(w.dirA).get(API + '/options');
+  assert.equal(a.status, 200);
+  assert.deepEqual(a.body.sessions.map(s => s.id), [sA.id]);
+  assert.equal(a.body.sessions[0].enrolled, 2);
+  assert.deepEqual(Object.keys(a.body.categories), ['event', 'workshop', 'holiday', 'session_offering', 'news']);
+  const h = await w.t.as(w.hq).get(API + '/options');
+  assert.deepEqual(h.body.sessions.map(s => s.id).sort(), [sA.id, sB.id].sort());
+  for (const u of [w.staffA, w.famA.parent, w.famA.student]) {
+    assert.equal((await w.t.as(u).get(API + '/options')).status, 403, u.role);
+  }
+});
+
+test(['NF-1'], 'preview is refused for staff and families, and for another location\'s audience', async () => {
+  const w = await world();
+  const sB = w.t.fx.session(w.B);
+  for (const u of [w.staffA, w.famA.parent, w.famA.student]) {
+    assert.equal((await w.t.as(u).post(API + '/preview', post())).status, 403, u.role);
+  }
+  assert.equal((await w.t.as(w.dirA).post(API + '/preview', post({ locations: [w.B.id] }))).status, 403);
+  assert.equal((await w.t.as(w.dirA).post(API + '/preview', post({ audience: 'session', session_id: sB.id }))).status, 403);
+  assert.equal((await w.t.as(w.dirA).post(API + '/preview', alert({ type: 'emergency', locations: [w.B.id] }))).status, 403);
+  const hq = await w.t.as(w.hq).post(API + '/preview', post({ audience: 'session', session_id: sB.id }));
+  assert.equal(hq.status, 200);
+  assert.deepEqual(hq.body.locations, ['Toronto']);
+});
+
+test(['NF-1'], 'marking a post read works only for posts you were sent', async () => {
+  const w = await world();
+  const id = (await w.t.as(w.dirA).post(API, post({ audience: 'parents' }))).body.announcement.id;
+  for (const u of [w.famB.parent, w.famA.student, w.staffB]) {
+    const r = await w.t.as(u).post(API + '/' + id + '/read');
+    assert.equal(r.status, 404, u.role);
+  }
+  assert.equal(w.t.db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE ref_id = ? AND read_at IS NOT NULL").get(id).n, 0);
+  const ok = await w.t.as(w.famA.parent).post(API + '/' + id + '/read');
+  assert.equal(ok.status, 200);
+  assert.ok(w.t.fx.notifications(w.famA.parent)[0].read_at);
+  assert.equal(w.t.fx.notifications(w.famA2.parent)[0].read_at, null);
+});
+
+test(['NF-1'], 'the mute setting is per person and needs a signed-in user', async () => {
+  const w = await world();
+  assert.equal((await w.t.anon.put(API + '/prefs', { muted: true })).status, 401);
+  await w.t.as(w.famA.parent).put(API + '/prefs', { muted: true });
+  assert.deepEqual(w.t.db.prepare('SELECT user_id, muted FROM announcement_prefs').all().map(r => [r.user_id, r.muted]), [[w.famA.parent.id, 1]]);
+  assert.equal((await w.t.as(w.famA2.parent).get(API + '/feed')).body.muted, false);
+});
+
+test(['NF-1'], 'every route refuses a signed-out caller', async () => {
+  const w = await world();
+  const routes = [['get', '/feed'], ['get', '/options'], ['post', '/preview'], ['post', ''], ['post', '/emergency'],
+    ['del', '/1'], ['get', '/1/stats'], ['post', '/1/read'], ['put', '/prefs']];
+  for (const [m, p] of routes) {
+    const r = await w.t.anon[m](API + p, ...(m === 'get' || m === 'del' ? [] : [{}]));
+    assert.equal(r.status, 401, m + ' ' + p);
+  }
+});

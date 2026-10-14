@@ -1,0 +1,319 @@
+'use strict';
+// Attendance and hours (PRD 7): visit history, computed absences (D-15),
+// totals, and the week / month / term ranges the parent Hours view pages
+// through. Read-only over the core tables.
+
+const { DateTime } = require('luxon');
+const time = require('../../time');
+const { bad, notFound } = require('../../errors');
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const isIsoDate = s => ISO_DATE.test(String(s || '')) && DateTime.fromISO(s).isValid;
+
+// A from/to pair: both real dates, in order, at most a year apart.
+function checkRange(from, to) {
+  if (!isIsoDate(from) || !isIsoDate(to)) throw bad('bad_date', 'Choose a start date and an end date.');
+  if (from > to) throw bad('bad_range', 'The start date needs to be on or before the end date.');
+  if (DateTime.fromISO(to).diff(DateTime.fromISO(from), 'days').days > 366) throw bad('range_too_long', 'Choose a range of one year or less.');
+  return { from, to };
+}
+
+// "Oct 1 – Oct 31, 2026", or "Dec 28, 2026 – Jan 3, 2027" across a year end.
+function rangeLabel(from, to) {
+  const a = DateTime.fromISO(from), b = DateTime.fromISO(to);
+  if (from === to) return b.toFormat('LLL d, yyyy');
+  return (a.year === b.year ? a.toFormat('LLL d') : a.toFormat('LLL d, yyyy')) + ' – ' + b.toFormat('LLL d, yyyy');
+}
+
+// A student with their home location and today's date there.
+function student(ctx, id) {
+  const s = ctx.db.prepare(`SELECT u.id, u.name, l.id AS lid, l.name AS lname, l.timezone, l.address
+    FROM users u JOIN locations l ON l.id = u.location_id WHERE u.id = ? AND u.role = 'student'`).get(id);
+  if (!s) return null;
+  const location = { id: s.lid, name: s.lname, timezone: s.timezone, address: s.address };
+  return { id: s.id, name: s.name, location, today: time.localDate(location, ctx.clock.now()) };
+}
+
+const termsAt = (ctx, locationId) =>
+  ctx.db.prepare('SELECT id, name, start_date, end_date FROM terms WHERE location_id = ? ORDER BY start_date, id').all(locationId);
+
+// The term holding `date`; failing that the latest one already started; failing that the first.
+function termIndex(terms, date) {
+  const i = terms.findIndex(t => t.start_date <= date && date <= t.end_date);
+  if (i >= 0) return i;
+  const started = terms.filter(t => t.start_date <= date).length;
+  return started ? started - 1 : 0;
+}
+
+// The week (Mon-Sun), calendar month or term around `date`, with anchors for
+// the previous and next one. `next` is null once it would start after today.
+function period(ctx, loc, kind, date, today) {
+  if (!isIsoDate(date)) throw bad('bad_date', 'Choose a date.');
+  let from, to, prev, next, label;
+  if (kind === 'week') {
+    from = time.weekStart(date);
+    to = time.addDays(from, 6);
+    prev = time.addDays(from, -7);
+    next = time.addDays(from, 7);
+    label = rangeLabel(from, to);
+  } else if (kind === 'month') {
+    const m = DateTime.fromISO(date).startOf('month');
+    from = m.toISODate();
+    to = m.endOf('month').toISODate();
+    prev = m.minus({ months: 1 }).toISODate();
+    next = m.plus({ months: 1 }).toISODate();
+    label = m.toFormat('LLLL yyyy');
+  } else if (kind === 'term') {
+    const terms = termsAt(ctx, loc.id);
+    if (!terms.length) throw notFound(`${loc.name} hasn't set up a term yet.`);
+    const i = termIndex(terms, date);
+    ({ start_date: from, end_date: to, name: label } = terms[i]);
+    prev = terms[i - 1] ? terms[i - 1].start_date : null;
+    next = terms[i + 1] ? terms[i + 1].start_date : null;
+  } else {
+    throw bad('bad_period', 'Choose week, month or term.');
+  }
+  if (next && next > today) next = null;
+  return { kind, from, to, label, dates: rangeLabel(from, to), prev, next };
+}
+
+// Range shortcuts for exports and reports: this week, this month, last month, and the current term.
+function presets(ctx, loc, today) {
+  const week = period(ctx, loc, 'week', today, today);
+  const month = period(ctx, loc, 'month', today, today);
+  const last = period(ctx, loc, 'month', month.prev, today);
+  const out = [
+    { id: 'this_week', label: 'This week', from: week.from, to: week.to },
+    { id: 'this_month', label: 'This month', from: month.from, to: month.to },
+    { id: 'last_month', label: 'Last month', from: last.from, to: last.to },
+  ];
+  const terms = termsAt(ctx, loc.id);
+  if (terms.length) {
+    const t = terms[termIndex(terms, today)];
+    out.push({ id: 'this_term', label: t.name, from: t.start_date, to: t.end_date });
+  }
+  return out;
+}
+
+// AT-1: one visit as every screen and file shows it, with local times in the
+// zone of the location where it happened.
+function shapeVisit(v) {
+  const zone = { timezone: v.timezone };
+  return {
+    id: v.id,
+    date: v.local_date,
+    student_id: v.student_id,
+    student_name: v.student_name,
+    location_id: v.location_id,
+    location_name: v.location_name,
+    timezone: v.timezone,
+    session_id: v.session_id,
+    session_name: v.session_name,
+    check_in_at: v.check_in_at,
+    check_out_at: v.check_out_at,
+    check_in_local: time.localTime(zone, v.check_in_at),
+    check_out_local: v.check_out_at == null ? null : time.localTime(zone, v.check_out_at),
+    minutes: v.check_out_at == null ? null : Math.round((v.check_out_at - v.check_in_at) / 60000),
+    checkin_method: v.checkin_method,
+    checkout_method: v.checkout_method,
+    needs_review: !!v.flagged && v.reviewed_by == null,
+    flag_reason: v.flag_reason,
+    checked_in_by_name: v.checked_in_by_name,
+    checked_out_by_name: v.checked_out_by_name,
+  };
+}
+
+// A visit overlaps a session's hours [start, end) when it began before the end
+// and, unless it is still open, ended after the start.
+const overlaps = (v, start, end) => v.check_in_at < end && (v.check_out_at == null || v.check_out_at > start);
+
+// Does a visit with no session (a staff override check-in) at the session's
+// location cover one of its occurrences? The rule absences() uses for attended
+// (EN-7): a date inside its term, on one of its weekdays, not a closure, and
+// overlapping its hours.
+function coversSession(ctx, sess) {
+  const zone = { timezone: sess.timezone };
+  const days = sess.weekdays.split(',').map(Number);
+  const closed = new Set(ctx.db.prepare('SELECT date FROM closures WHERE location_id = ?').all(sess.location_id).map(c => c.date));
+  return v => {
+    const d = v.local_date;
+    if (d < sess.term_start || d > sess.term_end) return false; // outside its term
+    if (!days.includes(time.weekdayOfDate(d))) return false; // not one of its days
+    if (closed.has(d)) return false; // a closure cancels the day (SC-3)
+    const start = time.toMs(zone, d, sess.start_time), end = time.toMs(zone, d, sess.end_time);
+    return overlaps(v, start, end);
+  };
+}
+
+// Visits matching the filters, oldest first. Filtered to one session, that is
+// the session's own visits plus the session-less ones that cover it (AT-4).
+function visits(ctx, { studentId = null, locationId = null, sessionId = null, from, to }) {
+  const where = ['v.local_date BETWEEN ? AND ?'], args = [from, to];
+  if (studentId != null) { where.push('v.student_id = ?'); args.push(studentId); }
+  if (locationId != null) { where.push('v.location_id = ?'); args.push(locationId); }
+  let covers = null;
+  if (sessionId != null) {
+    const sess = ctx.db.prepare(`SELECT s.*, t.start_date AS term_start, t.end_date AS term_end, l.timezone
+      FROM sessions s JOIN terms t ON t.id = s.term_id JOIN locations l ON l.id = s.location_id WHERE s.id = ?`).get(sessionId);
+    where.push('(v.session_id = ? OR (v.session_id IS NULL AND v.location_id = ?))'); args.push(sess.id, sess.location_id);
+    covers = coversSession(ctx, sess);
+  }
+  return ctx.db.prepare(`SELECT v.*, s.name AS session_name, u.name AS student_name, l.name AS location_name, l.timezone,
+      cin.name AS checked_in_by_name, cout.name AS checked_out_by_name
+    FROM visits v JOIN users u ON u.id = v.student_id JOIN locations l ON l.id = v.location_id
+    LEFT JOIN sessions s ON s.id = v.session_id
+    LEFT JOIN users cin ON cin.id = v.checked_in_by LEFT JOIN users cout ON cout.id = v.checked_out_by
+    WHERE ${where.join(' AND ')} ORDER BY v.local_date, v.check_in_at, v.id`).all(...args)
+    .filter(v => !covers || v.session_id != null || covers(v)).map(shapeVisit);
+}
+
+// D-16 / MB-5: while a membership isn't valid its slots are paused, and a paused
+// week is never an absence. Returns the stretches of time [from, to) when the
+// student's membership wasn't valid, oldest first, rebuilt from the core tables:
+// the current record and, before it, each staff change, which the audit log keeps
+// with the record before and after (MB-2, NF-2). Valid means status active and
+// the date not past expires_on (the last valid day, inclusive), so an expiry
+// starts at midnight after expires_on and needs no log entry. `zone` is the
+// student's home location (D-1). No membership on file: nothing to go on.
+function pausedStretches(ctx, studentId, zone) {
+  const m = ctx.db.prepare('SELECT id, status, expires_on FROM memberships WHERE student_id = ?').get(studentId);
+  if (!m) return [];
+  const changes = ctx.db.prepare("SELECT at, detail FROM audit_log WHERE target_type = 'membership' AND target_id = ? ORDER BY at, id")
+    .all(m.id).map(r => Object.assign({ at: r.at }, JSON.parse(r.detail || '{}'))).filter(c => 'before' in c);
+  const records = []; // [from, to, the record in force]
+  let start = -Infinity;
+  for (const c of changes) { records.push([start, c.at, c.before]); start = c.at; }
+  records.push([start, Infinity, m]);
+  const out = [];
+  for (const [a, b, rec] of records) {
+    const off = rec && rec.status === 'active' ? Math.max(a, time.toMs(zone, time.addDays(rec.expires_on, 1), '00:00')) : a;
+    if (off < b) out.push([off, b]);
+  }
+  return out;
+}
+
+// A slot that is still paused was paused when the membership last stopped being valid.
+const pausedSince = (stretches, now) => stretches.reduce((since, [a]) => (a <= now ? a : since), null);
+
+// D-26: every change to an enrollment's status is in enrollment_status_log
+// (oldest first). Was the slot on hold at instant t? Before its first logged
+// change it had that change's old status. With nothing logged there is nothing
+// to go on, and the membership stretches above decide alone. This catches a
+// slot kept paused at renewal because it would go over the weekly limit
+// (D-16a): the membership is valid again, but that slot's weeks are not missed.
+function pausedAt(log, t) {
+  if (!log || !log.length) return false;
+  let s = log[0].from_status;
+  for (const c of log) if (c.at <= t) s = c.to_status;
+  return s === 'paused';
+}
+
+// D-15: a past occurrence of an enrollment is absent when the student has no
+// visit for it, its date is inside the session's term, and the location wasn't
+// closed. Computed on every read, never stored, and carries no penalty (EN-7).
+// An enrollment has occurrences only while it was live: from when it was made
+// until now (still active), until it ended (dropped), or until it was paused,
+// and never while the membership wasn't valid (a paused stretch it came back
+// from). One whose session was cancelled with no end time recorded adds none.
+function absences(ctx, { studentId = null, locationId = null, sessionId = null, from, to }) {
+  const where = ['t.end_date >= ? AND t.start_date <= ?'], args = [from, to];
+  if (studentId != null) { where.push('e.student_id = ?'); args.push(studentId); }
+  if (locationId != null) { where.push('s.location_id = ?'); args.push(locationId); }
+  if (sessionId != null) { where.push('e.session_id = ?'); args.push(sessionId); }
+  const rows = ctx.db.prepare(`SELECT e.id, e.student_id, e.session_id, e.weekday, e.status, e.created_at, e.ended_at,
+      s.name AS session_name, s.start_time, s.end_time, s.status AS session_status, s.location_id,
+      t.start_date AS term_start, t.end_date AS term_end, u.name AS student_name, l.name AS location_name, l.timezone
+    FROM enrollments e JOIN sessions s ON s.id = e.session_id JOIN terms t ON t.id = s.term_id
+    JOIN users u ON u.id = e.student_id JOIN locations l ON l.id = s.location_id
+    WHERE ${where.join(' AND ')}`).all(...args);
+  if (!rows.length) return [];
+  const statusLog = new Map(); // enrollment id -> its status changes, oldest first (D-26)
+  for (const c of ctx.db.prepare(`SELECT l.enrollment_id, l.from_status, l.to_status, l.at FROM enrollment_status_log l
+    JOIN enrollments e ON e.id = l.enrollment_id JOIN sessions s ON s.id = e.session_id JOIN terms t ON t.id = s.term_id
+    WHERE ${where.join(' AND ')} ORDER BY l.at, l.id`).all(...args)) {
+    if (!statusLog.has(c.enrollment_id)) statusLog.set(c.enrollment_id, []);
+    statusLog.get(c.enrollment_id).push(c);
+  }
+
+  const closed = new Set(ctx.db.prepare('SELECT location_id, date FROM closures WHERE date BETWEEN ? AND ?')
+    .all(from, to).map(c => c.location_id + '|' + c.date));
+  const dayVisits = new Map(); // student id|date -> that day's visits
+  for (const v of ctx.db.prepare(`SELECT student_id, location_id, session_id, local_date, check_in_at, check_out_at FROM visits
+    WHERE local_date BETWEEN ? AND ? AND (? IS NULL OR student_id = ?)`).all(from, to, studentId, studentId)) {
+    const k = v.student_id + '|' + v.local_date;
+    if (!dayVisits.has(k)) dayVisits.set(k, []);
+    dayVisits.get(k).push(v);
+  }
+  // Attended, as the enrollment schedule counts it (EN-7): a visit that day at that
+  // location for this session, or one with no session (a staff override check-in)
+  // whose time overlaps the session's.
+  const attended = (e, d, start, end) => (dayVisits.get(e.student_id + '|' + d) || []).some(v => v.location_id === e.location_id
+    && (v.session_id === e.session_id || (v.session_id == null && overlaps(v, start, end))));
+
+  const now = ctx.clock.now();
+  const stretches = new Map(); // student id -> when their membership wasn't valid
+  const out = [];
+  for (const e of rows) {
+    const zone = { timezone: e.timezone };
+    if (!stretches.has(e.student_id)) stretches.set(e.student_id, pausedStretches(ctx, e.student_id, zone));
+    const off = stretches.get(e.student_id);
+    const live = e.status === 'active' && e.session_status === 'active';
+    const until = live ? now : e.status === 'paused' && e.session_status === 'active' ? pausedSince(off, now)
+      : e.ended_at == null ? null : Math.min(e.ended_at, now);
+    if (until == null) continue;
+    const lo = from > e.term_start ? from : e.term_start;
+    const hi = to < e.term_end ? to : e.term_end;
+    let d = lo;
+    while (d <= hi && time.weekdayOfDate(d) !== e.weekday) d = time.addDays(d, 1);
+    for (; d <= hi; d = time.addDays(d, 7)) {
+      if (closed.has(e.location_id + '|' + d)) continue; // closure (SC-3)
+      const start = time.toMs(zone, d, e.start_time), end = time.toMs(zone, d, e.end_time);
+      if (start < e.created_at) continue; // before they enrolled
+      if (end > until) continue; // not over yet, or after the slot ended or was paused
+      if (off.some(([a, b]) => a < end && b > start)) continue; // paused: the membership wasn't valid then
+      if (pausedAt(statusLog.get(e.id), start)) continue; // paused: the slot itself was on hold that week
+      if (attended(e, d, start, end)) continue;
+      out.push({
+        date: d, student_id: e.student_id, student_name: e.student_name, session_id: e.session_id,
+        session_name: e.session_name, start_time: e.start_time, end_time: e.end_time,
+        location_id: e.location_id, location_name: e.location_name, timezone: e.timezone,
+      });
+    }
+  }
+  return out.sort((a, b) => a.date.localeCompare(b.date) || a.start_time.localeCompare(b.start_time)
+    || a.student_name.localeCompare(b.student_name));
+}
+
+function totals(vs, abs) {
+  const minutes = vs.reduce((sum, v) => sum + (v.minutes || 0), 0);
+  return {
+    visits: vs.length,
+    minutes,
+    hours: Math.round((minutes / 60) * 100) / 100,
+    absences: abs.length,
+    // Everyone the log covers, as by_student lists them: absences only counts too.
+    students: new Set([...vs, ...abs].map(r => r.student_id)).size,
+    needs_review: vs.filter(v => v.needs_review).length,
+  };
+}
+
+// Visits, absences and totals for one filter set.
+function log(ctx, filter) {
+  const vs = visits(ctx, filter), abs = absences(ctx, filter);
+  return { visits: vs, absences: abs, totals: totals(vs, abs) };
+}
+
+// Per-student totals for the director/HQ report, by name.
+function byStudent(vs, abs) {
+  const rows = new Map();
+  const row = (id, name) => {
+    if (!rows.has(id)) rows.set(id, { student_id: id, student_name: name, visits: 0, minutes: 0, absences: 0 });
+    return rows.get(id);
+  };
+  for (const v of vs) { const r = row(v.student_id, v.student_name); r.visits++; r.minutes += v.minutes || 0; }
+  for (const a of abs) row(a.student_id, a.student_name).absences++;
+  return [...rows.values()].map(r => Object.assign(r, { hours: Math.round((r.minutes / 60) * 100) / 100 }))
+    .sort((a, b) => a.student_name.localeCompare(b.student_name) || a.student_id - b.student_id);
+}
+
+module.exports = { checkRange, rangeLabel, student, termsAt, period, presets, visits, absences, totals, log, byStudent };

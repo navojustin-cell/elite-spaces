@@ -73,9 +73,17 @@ function login(ctx, email, password) {
   if (row.role === 'student' && !studentLinked(ctx, row.id)) {
     throw new AppError(403, 'link_pending', 'A parent needs to approve your account before you can sign in.');
   }
+  return { user: getUser(ctx, row.id) };
+}
+
+// Signs `userId` in on this response: a new session token in the sign-in
+// cookie (ctx.cookieName). Login, demo sign-in, family sign-up and invite
+// acceptance all use this one helper.
+function startSession(ctx, res, userId) {
   const token = crypto.randomBytes(24).toString('hex');
-  ctx.sessions.set(token, row.id);
-  return { token, user: getUser(ctx, row.id) };
+  ctx.sessions.set(token, userId);
+  res.cookie(ctx.cookieName || 'sid', token, { httpOnly: true, sameSite: 'lax' });
+  return token;
 }
 
 function parseCookies(h) {
@@ -87,10 +95,14 @@ function parseCookies(h) {
   return out;
 }
 
+// The caller's session token: the sign-in cookie, or an Authorization: Bearer header.
+const sessionToken = (ctx, req) =>
+  parseCookies(req.headers.cookie)[ctx.cookieName || 'sid'] || (req.headers.authorization || '').replace(/^Bearer /, '');
+
 // Express middleware: sets req.user (or leaves it undefined).
 function attachUser(ctx) {
   return (req, _res, next) => {
-    const token = parseCookies(req.headers.cookie).sid || (req.headers.authorization || '').replace(/^Bearer /, '');
+    const token = sessionToken(ctx, req);
     const id = token && ctx.sessions.get(token);
     const u = id && getUser(ctx, id);
     if (u && u.active && (u.role !== 'student' || studentLinked(ctx, u.id))) req.user = u;
@@ -111,5 +123,6 @@ function requireRole(...roles) {
 
 module.exports = {
   OPS_RANK, hashPassword, verifyPassword, atLeast, getUser, studentLinked, linkedStudentIds,
-  canManageLocation, canSeeStudent, assertSeeStudent, assertManageLocation, login, attachUser, requireRole,
+  canManageLocation, canSeeStudent, assertSeeStudent, assertManageLocation, login, startSession, sessionToken,
+  attachUser, requireRole,
 };

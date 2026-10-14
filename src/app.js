@@ -4,7 +4,6 @@
 // same wiring that ships.
 
 const path = require('path');
-const crypto = require('crypto');
 const express = require('express');
 const db = require('./db');
 const { createClock } = require('./clock');
@@ -13,33 +12,31 @@ const notify = require('./notify');
 const { AppError, forbidden } = require('./errors');
 const MODULES = require('./modules');
 
-function createApp({ dbFile = ':memory:', now = null, dev = false } = {}) {
-  const ctx = { db: db.open(dbFile), clock: createClock(now), sessions: new Map(), dev };
+// cookieName: the sign-in cookie. Browsers share cookies across ports on one
+// host, so server.js names it per port; two local servers then never sign each
+// other out. Tests keep the default.
+function createApp({ dbFile = ':memory:', now = null, dev = false, cookieName = 'sid' } = {}) {
+  const clock = createClock(now);
+  const ctx = { db: db.open(dbFile, () => clock.now()), clock, sessions: new Map(), dev, cookieName };
   const app = express();
   app.use(express.json({ limit: '256kb' }));
   app.use(auth.attachUser(ctx));
 
-  const startSession = (res, user) => {
-    const token = crypto.randomBytes(24).toString('hex');
-    ctx.sessions.set(token, user.id);
-    res.cookie('sid', token, { httpOnly: true, sameSite: 'lax' });
-    return token;
-  };
-
   // ---- auth ----
   app.post('/api/auth/login', (req, res) => {
     const { user } = auth.login(ctx, req.body.email, req.body.password);
-    const token = startSession(res, user);
+    const token = auth.startSession(ctx, res, user.id);
     res.json({ user, token });
   });
   app.post('/api/auth/logout', (req, res) => {
-    const sid = (req.headers.cookie || '').match(/sid=([^;]+)/);
-    if (sid) ctx.sessions.delete(sid[1]);
-    res.clearCookie('sid').json({ ok: true });
+    const token = auth.sessionToken(ctx, req);
+    if (token) ctx.sessions.delete(token);
+    res.clearCookie(ctx.cookieName).json({ ok: true });
   });
+  // clock_fixed: the dev clock is pinned, so the app should use `now` rather than its own clock.
   app.get('/api/auth/me', auth.requireRole(), (req, res) => {
     const loc = req.user.location_id && ctx.db.prepare('SELECT id, name, timezone FROM locations WHERE id = ?').get(req.user.location_id);
-    res.json({ user: req.user, location: loc || null, dev: ctx.dev, now: ctx.clock.now() });
+    res.json({ user: req.user, location: loc || null, dev: ctx.dev, now: ctx.clock.now(), clock_fixed: ctx.clock.isFixed() });
   });
 
   // ---- notifications inbox (shared by every module) ----
@@ -83,7 +80,7 @@ function createApp({ dbFile = ':memory:', now = null, dev = false } = {}) {
       const u = auth.getUser(ctx, Number(req.body.userId));
       if (!u) throw new AppError(404, 'not_found', 'No such user.');
       if (u.role === 'student' && !auth.studentLinked(ctx, u.id)) throw forbidden('This student has not been approved by a parent yet.');
-      startSession(res, u);
+      auth.startSession(ctx, res, u.id);
       res.json({ user: u });
     });
     app.get('/api/dev/clock', (_req, res) => res.json({ now: ctx.clock.now(), fixed: ctx.clock.isFixed() }));

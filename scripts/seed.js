@@ -102,7 +102,10 @@ link(chen, chenKid, 'pending');
 membership(chenKid, 3, 'active', '2027-06-30', staffIrvine);
 const tor = family('Sophie Roy', 'roy@family.test', [['Noah Roy', 3, 'active', '2027-06-30']], toronto);
 
-const enroll = (s, sess, wd) => ins("INSERT INTO enrollments (student_id, session_id, weekday, status, source, created_at) VALUES (?,?,?,'active','parent',?)", s.id, sess.id, wd, NOW);
+// The demo enrollments date from before the three weeks of visit history below,
+// so a week a student missed shows as absent (D-15) in Schedule and Hours.
+const ENROLLED_AT = NOW - 22 * 864e5;
+const enroll = (s, sess, wd) => ins("INSERT INTO enrollments (student_id, session_id, weekday, status, source, created_at) VALUES (?,?,?,'active','parent',?)", s.id, sess.id, wd, ENROLLED_AT);
 const plan = [
   [garcia.students[0], [[pmMWF, 1], [pmMWF, 3], [pmMWF, 5], [small, 2]]],
   [garcia.students[1], [[morning, 2], [morning, 4], [small, 4]]],
@@ -113,7 +116,7 @@ const plan = [
 ];
 for (const [s, slots] of plan) for (const [sess, wd] of slots) enroll(s, sess, wd);
 // Daniel Kim's membership lapsed: his enrollment is paused, not deleted (MB-5).
-ins("INSERT INTO enrollments (student_id, session_id, weekday, status, source, created_at) VALUES (?,?,?,'paused','parent',?)", kim.students[0].id, pmMWF.id, 1, NOW);
+ins("INSERT INTO enrollments (student_id, session_id, weekday, status, source, created_at) VALUES (?,?,?,'paused','parent',?)", kim.students[0].id, pmMWF.id, 1, ENROLLED_AT);
 
 // Three weeks of past visits. Most check out by scan; some forget (auto); a few miss.
 let seed = 7;

@@ -17,4 +17,12 @@ module.exports = [
     find: "const local = (loc, ms) => DateTime.fromMillis(ms, { zone: loc.timezone });", repl: "const local = (loc, ms) => DateTime.fromMillis(ms, { zone: 'UTC' });" },
   { name: 'let inactive accounts sign in', covers: ['CORE'], file: 'src/auth.js',
     find: "if (!row.active) throw", repl: "if (false) throw" },
+  { name: 'read the session from a fixed cookie name', covers: ['CORE'], file: 'src/auth.js',
+    find: "parseCookies(req.headers.cookie)[ctx.cookieName || 'sid']", repl: 'parseCookies(req.headers.cookie).sid' },
+  { name: 'set the sign-in cookie under a fixed name', covers: ['CORE'], file: 'src/auth.js',
+    find: "res.cookie(ctx.cookieName || 'sid', token,", repl: "res.cookie('sid', token," },
+  { name: 'signing out leaves the session alive', covers: ['CORE'], file: 'src/app.js',
+    find: 'if (token) ctx.sessions.delete(token);', repl: '' },
+  { name: 'always report the clock as pinned', covers: ['CORE'], file: 'src/app.js',
+    find: 'clock_fixed: ctx.clock.isFixed()', repl: 'clock_fixed: true' },
 ];

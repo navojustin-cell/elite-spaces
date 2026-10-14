@@ -5,6 +5,12 @@
 //   node tests/run.js --list       print { file, ids, name } for every test as JSON (used by coverage.js)
 // Exits 1 if any test fails.
 
+// Run as if the server sat in UTC+14, where the server's date is never the
+// test location's date, so code that uses the server's zone instead of the
+// location's fails here even on a machine set to Pacific time.
+// Set TZ yourself to try another zone.
+process.env.TZ = process.env.TZ || 'Pacific/Kiritimati';
+
 const fs = require('fs');
 const path = require('path');
 const lib = require('./lib');
@@ -17,8 +23,9 @@ const files = fs.readdirSync(__dirname).filter(f => f.endsWith('.test.js'))
   .filter(f => !only.length || only.includes(f.replace(/\.test\.js$/, ''))).sort();
 
 // Scoped runs load only the named modules into the app, so one module's
-// half-finished code cannot break another module's tests. A full run loads all.
-if (only.length) process.env.ELITE_MODULES = only.filter(n => n !== 'core').join(',');
+// half-finished code cannot break another module's tests. A full run loads all,
+// and so does any run that includes integration.test.js, whose tests cross modules.
+if (only.length && !only.includes('integration')) process.env.ELITE_MODULES = only.filter(n => n !== 'core').join(',');
 
 for (const f of files) { lib.setFile(f); require(path.join(__dirname, f)); }
 
