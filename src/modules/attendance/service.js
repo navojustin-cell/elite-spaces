@@ -214,7 +214,9 @@ function pausedAt(log, t) {
 // An enrollment has occurrences only while it was live: from when it was made
 // until now (still active), until it ended (dropped), or until it was paused,
 // and never while the membership wasn't valid (a paused stretch it came back
-// from). One whose session was cancelled with no end time recorded adds none.
+// from). A pause is judged at each occurrence's start, so one already under way
+// when the slot was paused is still owed. One whose session was cancelled with
+// no end time recorded adds none.
 function absences(ctx, { studentId = null, locationId = null, sessionId = null, from, to }) {
   const where = ['t.end_date >= ? AND t.start_date <= ?'], args = [from, to];
   if (studentId != null) { where.push('e.student_id = ?'); args.push(studentId); }
@@ -258,7 +260,8 @@ function absences(ctx, { studentId = null, locationId = null, sessionId = null, 
     if (!stretches.has(e.student_id)) stretches.set(e.student_id, pausedStretches(ctx, e.student_id, zone));
     const off = stretches.get(e.student_id);
     const live = e.status === 'active' && e.session_status === 'active';
-    const until = live ? now : e.status === 'paused' && e.session_status === 'active' ? pausedSince(off, now)
+    const paused = e.status === 'paused' && e.session_status === 'active';
+    const until = live ? now : paused ? pausedSince(off, now)
       : e.ended_at == null ? null : Math.min(e.ended_at, now);
     if (until == null) continue;
     const lo = from > e.term_start ? from : e.term_start;
@@ -269,8 +272,12 @@ function absences(ctx, { studentId = null, locationId = null, sessionId = null, 
       if (closed.has(e.location_id + '|' + d)) continue; // closure (SC-3)
       const start = time.toMs(zone, d, e.start_time), end = time.toMs(zone, d, e.end_time);
       if (start < e.created_at) continue; // before they enrolled
-      if (end > until) continue; // not over yet, or after the slot ended or was paused
-      if (off.some(([a, b]) => a < end && b > start)) continue; // paused: the membership wasn't valid then
+      if (end > now) continue; // not over yet
+      // Each week is judged by the slot's state when it began, as the enrollment
+      // schedule judges it (D-26): one that began before a pause is owed even if
+      // the pause came partway through, while a drop takes the week it ends in.
+      if (paused ? start >= until : end > until) continue; // began once paused, or not over before the slot ended
+      if (off.some(([a, b]) => a <= start && start < b)) continue; // paused: the membership wasn't valid when it began
       if (pausedAt(statusLog.get(e.id), start)) continue; // paused: the slot itself was on hold that week
       if (attended(e, d, start, end)) continue;
       out.push({
