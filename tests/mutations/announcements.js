@@ -1,6 +1,8 @@
 'use strict';
 // Announcements mutations: each breaks one real rule; announcements.test.js must catch it.
 const F = 'src/modules/announcements/index.js';
+const V = 'public/js/views/announcements.js';
+const SHELL = 'public/js/app.js'; // only its emergency pop-up and bell refresh hook
 
 module.exports = [
   // ---- AN-1: who may post, and what a post needs
@@ -150,6 +152,29 @@ module.exports = [
     find: "if (!senderOrHq(req.user, a)) throw forbidden('Only the sender, or HQ, can see delivery numbers.');", repl: '' },
   { name: 'show delivery numbers on everyone\'s feed', covers: ['AN-6', 'NF-1'], file: F,
     find: 'stats: senderOrHq(user, a) ? stats(ctx, a.id) : null,', repl: 'stats: stats(ctx, a.id),' },
+
+  // ---- the emergency pop-up and the bell, in a browser tab (AN-5, AN-6)
+  { name: '"I have read this" finds the alert by title, so a newer alert with the same title is marked read instead', covers: ['AN-5', 'AN-6'], file: V,
+    find: "const id = Number(popup.getAttribute('data-notification-id'));",
+    repl: "const title = (popup.querySelector('h3') || {}).textContent; const id = ((await App.api.get('/api/notifications')).notifications.find(x => x.priority === 'emergency' && x.title === title && !x.read_at) || {}).id;" },
+  { name: 'the pop-up does not carry its notification id, so "I have read this" marks nothing read', covers: ['AN-5', 'AN-6'], file: SHELL,
+    find: "'data-notification-id': n.id, ", repl: '' },
+  { name: 'the bell keeps its old count after "I have read this"', covers: ['AN-6'], file: V,
+    find: '.then(() => { App.refreshBell(); return redrawLive(); })', repl: '.then(redrawLive)' },
+  { name: 'the bell keeps its old count after News marks posts read', covers: ['AN-6'], file: V,
+    find: 'if (reads.length) Promise.all(reads).then(() => App.refreshBell());', repl: '' },
+  { name: 'the shell\'s bell refresh hook does nothing', covers: ['AN-6'], file: SHELL,
+    find: 'App.refreshBell = updateBell;', repl: 'App.refreshBell = () => {};' },
+  { name: 'closing the pop-up does not give focus back to what had it', covers: ['AN-5', 'NF-7'], file: SHELL,
+    find: 'if (before && before.isConnected) return before.focus();', repl: '' },
+  { name: 'closing the pop-up drops focus to the top of the page when what had it is gone', covers: ['AN-5', 'NF-7'], file: SHELL,
+    find: "if (head) { head.setAttribute('tabindex', '-1'); head.focus(); }", repl: '' },
+  { name: 'the pop-up moves focus to a heading that cannot take it', covers: ['AN-5', 'NF-7'], file: SHELL,
+    find: "head.setAttribute('tabindex', '-1'); head.focus();", repl: 'head.focus();' },
+  { name: 'a live redraw drops focus to the top of the page', covers: ['AN-5', 'NF-7'], file: V,
+    find: 'if (hadFocus) focusHeading();', repl: '' },
+  { name: 'a live redraw moves focus to a heading that cannot take it', covers: ['AN-5', 'NF-7'], file: V,
+    find: "head.setAttribute('tabindex', '-1'); head.focus();", repl: 'head.focus();' },
 
   // ---- NF-1: scope on every route
   { name: 'families see posts they were not sent', covers: ['NF-1'], file: F,

@@ -189,8 +189,8 @@ const visitRow = (v, withStudent, withLocation) => [
   v.minutes == null ? '' : duration(v.minutes),
   v.checkout_method ? METHOD[v.checkout_method] : '',
 ];
-const absenceRow = (a, withStudent) => [longDate(a.date), ...(withStudent ? [a.student_name] : []), a.session_name,
-  hhmm(a.start_time) + ' – ' + hhmm(a.end_time)];
+const absenceRow = (a, withStudent, withLocation) => [longDate(a.date), ...(withStudent ? [a.student_name] : []),
+  ...(withLocation ? [a.location_name] : []), a.session_name, hhmm(a.start_time) + ' – ' + hhmm(a.end_time)];
 // The hours box: decimal hours large, hours and minutes in the label.
 const hoursBox = t => ['Total hours · ' + duration(t.minutes), decimalHours(t.minutes)];
 // "Oct 14, 2026, 10:30 PM PDT": a local time always names its zone.
@@ -232,6 +232,7 @@ function familyPdf({ student, from, to, label, log, now }) {
 }
 
 // AT-4: a director/HQ report for a location (or all), a session (or all) and a date range.
+// Across all locations, the By student, Visits and Absences tables each have a Location column.
 // `locations`: for an all-locations report, every location it covers, by name.
 function reportPdf({ filters, label, log, byStudent, now, locations = [] }) {
   const all = !filters.location;
@@ -247,9 +248,9 @@ function reportPdf({ filters, label, log, byStudent, now, locations = [] }) {
       ['Absences', String(log.totals.absences)], ['Needs review', String(log.totals.needs_review)]],
     sections: [
       { heading: 'By student', empty: 'No students in this report.',
-        columns: [{ label: 'Student', w: 0.46 }, { label: 'Visits', w: 0.18, align: 'right' }, { label: 'Hours', w: 0.18, align: 'right' },
-          { label: 'Absences', w: 0.18, align: 'right' }],
-        rows: byStudent.map(s => [s.student_name, s.visits, decimalHours(s.minutes), s.absences]) },
+        columns: [{ label: 'Student', w: all ? 0.26 : 0.46 }, ...(all ? [{ label: 'Location', w: 0.2 }] : []),
+          { label: 'Visits', w: 0.18, align: 'right' }, { label: 'Hours', w: 0.18, align: 'right' }, { label: 'Absences', w: 0.18, align: 'right' }],
+        rows: byStudent.map(s => [s.student_name, ...(all ? [s.location_name] : []), s.visits, decimalHours(s.minutes), s.absences]) },
       { heading: 'Visits', empty: `No visits ${between(filters.from, filters.to)}.`,
         columns: [{ label: 'Date', w: 0.15 }, { label: 'Student', w: 0.15 }, ...(all ? [{ label: 'Location', w: 0.1 }] : []),
           { label: 'Session', w: all ? 0.14 : 0.17 }, { label: 'In', w: 0.09 }, { label: 'Out', w: 0.09 }, { label: 'Total', w: 0.08 },
@@ -261,8 +262,9 @@ function reportPdf({ filters, label, log, byStudent, now, locations = [] }) {
           return row;
         }) },
       { heading: 'Absences', empty: 'No absences in this range.',
-        columns: [{ label: 'Date', w: 0.25 }, { label: 'Student', w: 0.25 }, { label: 'Session', w: 0.25 }, { label: 'Scheduled', w: 0.25 }],
-        rows: log.absences.map(a => absenceRow(a, true)) },
+        columns: [{ label: 'Date', w: all ? 0.2 : 0.25 }, { label: 'Student', w: all ? 0.2 : 0.25 }, ...(all ? [{ label: 'Location', w: 0.2 }] : []),
+          { label: 'Session', w: all ? 0.2 : 0.25 }, { label: 'Scheduled', w: all ? 0.2 : 0.25 }],
+        rows: log.absences.map(a => absenceRow(a, true, all)) },
     ],
     note: (all ? 'Times are local time at each location. ' : `Times are local time at ${filters.location.name} (${filters.location.timezone}). `) +
       'An absence is a scheduled session with no check-in; closure days and dates outside the term are not counted.',

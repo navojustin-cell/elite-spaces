@@ -990,6 +990,45 @@ test(['AT-4'], 'report PDF: filters, totals including needs review, per-student 
   assert.ok(all.includes('Mon, Oct 5, 2026 Zoe Park Arcadia Arcadia Study 1:00 PM 3:00 PM 2h 0m Scanned out'), all);
 });
 
+// Across all locations, the PDF says where each absence and each student is, as its
+// Visits table, the screen's Absences tab and every CSV row do.
+test(['AT-4'], 'an all-locations report PDF names the location of every absence and of every student', async () => {
+  const w = await reportWorld();
+  // Maya also came to Arcadia once (Thu Oct 8, no session), so her row names both locations.
+  w.visit('2026-10-08', '10:00', '11:00', { location: w.arcadia, session: null });
+  const q = 'location=all&from=2026-10-05&to=2026-10-09';
+  const text = pdfText((await w.t.as(w.hq).get(`${A}/report.pdf?${q}`)).body);
+  for (const want of [
+    'By student Student Location Visits Hours Absences Ben Cole Irvine 1 2.50 0 Maya Johnson Arcadia, Irvine 3 7.00 1 Zoe Park Arcadia 1 2.00 1',
+    'Absences Date Student Location Session Scheduled Wed, Oct 7, 2026 Zoe Park Arcadia Arcadia Study 1:00 PM – 4:00 PM ' +
+      'Fri, Oct 9, 2026 Maya Johnson Irvine Afternoon Study 1:00 PM – 4:00 PM',
+  ]) assert.ok(text.includes(want), `missing "${want}" in: ${text}`);
+  const csv = parseCsv((await w.t.as(w.hq).get(`${A}/report.csv?${q}`)).body);
+  assert.deepEqual(csv.filter(x => x[0] === 'absent').map(x => [x[1], x[2], x[3]]),
+    [['2026-10-07', 'Zoe Park', 'Arcadia'], ['2026-10-09', 'Maya Johnson', 'Irvine']]);
+});
+
+// A session is at one location, so a session chosen with all locations makes the report that location's.
+test(['AT-4'], 'HQ choosing one session with all locations gets a report that names the session\'s location: PDF, CSV and file names', async () => {
+  const w = await reportWorld();
+  const hq = w.t.as(w.hq);
+  const q = `location=all&session=${w.pm.id}&from=2026-10-05&to=2026-10-09`;
+  const label = 'Afternoon Study · Mon/Wed/Fri 1:00 PM–4:00 PM';
+  const r = await hq.get(`${A}/report?${q}`);
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.body.filters.location.name, r.body.filters.session.label], ['Irvine', label]);
+
+  const pdf = await hq.get(`${A}/report.pdf?${q}`);
+  assert.equal(pdf.headers.get('content-disposition'), 'attachment; filename="attendance-report-irvine-afternoon-study-2026-10-05-to-2026-10-09.pdf"');
+  const text = pdfText(pdf.body);
+  assert.ok(text.includes(`Location: Irvine Session: ${label} Dates: Oct 5 – Oct 9, 2026`), text);
+  assert.ok(!text.includes('All locations'), text);
+
+  const csv = await hq.get(`${A}/report.csv?${q}`);
+  assert.equal(csv.headers.get('content-disposition'), 'attachment; filename="attendance-report-irvine-afternoon-study-2026-10-05-to-2026-10-09.csv"');
+  assert.deepEqual(parseCsv(csv.body).pop().slice(0, 5), ['total', '2026-10-05 to 2026-10-09', '', 'Irvine', label]);
+});
+
 // 10:30pm Wednesday in California is already Thursday in Toronto, and 5:30am Thursday in UTC.
 test(['AT-3', 'AT-4'], 'every PDF says when it was made in a named local zone: across all locations, each zone\'s own time with its locations, never UTC', async () => {
   const w = await reportWorld();
@@ -1295,8 +1334,10 @@ test(['AT-4'], 'Reports: HQ signing in after a director starts over on all locat
   assert.deepEqual(tab.requests.slice(-2), [{ url: `${R}/options`, status: 200 }, { url: `${R}?location=all&from=2026-10-01&to=2026-10-31`, status: 200 }]);
   assert.deepEqual(filters(view), ['all', '', '2026-10-01', '2026-10-31']);
   assert.equal(byId(view, 'rep-tab-students').getAttribute('aria-selected'), 'true');
-  // Across all locations, the review notice opens In the building, where HQ picks one.
-  assert.equal(reportBox(view).find(n => n.tag === 'a').getAttribute('href'), '#/building');
+  // Across all locations, the review notice opens In the building at Irvine, where the visit
+  // to review is, not at the first location (Arcadia).
+  const link = reportBox(view).find(n => n.tag === 'a');
+  assert.deepEqual([link.textContent, link.getAttribute('href')], ['Irvine', `#/building/${w.loc.id}`]);
 
   // With all locations, every session says where it is; with one location chosen, it needn't.
   const sessions = () => byId(view, 'rep-session').all().filter(n => n.tag === 'option').map(o => o.textContent);
@@ -1319,6 +1360,41 @@ test(['AT-4'], 'Reports: HQ signing in after a director starts over on all locat
   const opened = await tab.open('reports');
   assert.deepEqual(tab.requests.at(-1), { url: `${R}?location=all&from=2026-10-12&to=2026-10-18`, status: 200 });
   assert.deepEqual(filters(opened), ['all', '', '2026-10-12', '2026-10-18']);
+});
+
+test(['AT-4'], 'Reports across all locations: the review notice links to In the building at each location with visits to review, with its count; one session chosen names its location in the heading and files', async () => {
+  const w = await reportWorld();
+  // Besides Maya's on Wed Oct 7 at Irvine: Zoe's at Arcadia that day and Ben's at Irvine on Tue Oct 13.
+  const auto = { checkout_method: 'auto', flagged: 1, flag_reason: 'Did not scan out' };
+  w.visit('2026-10-07', '13:00', '16:00', { student: w.zoe, location: w.arcadia, session: w.arcSession, extra: auto });
+  w.visit('2026-10-13', '09:30', '12:00', { student: w.ben, session: w.am, extra: auto });
+  const tab = browserTab(w.t);
+  const R = `${A}/report`;
+  tab.signIn(w.hq);
+  const view = await tab.open('reports');
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}?location=all&from=2026-10-01&to=2026-10-31`, status: 200 });
+  const notice = () => reportBox(view).find(n => n.getAttribute('class') === 'notice notice-warn');
+  const links = () => notice().all().filter(n => n.tag === 'a').map(a => [a.textContent, a.getAttribute('href')]);
+  assert.equal(notice().textContent, '3 visits need review. These students didn\'t scan out and were checked out automatically. ' +
+    'Confirm or fix the times from In the building at Arcadia (1), Irvine (2).');
+  assert.deepEqual(links(), [['Arcadia', `#/building/${w.arcadia.id}`], ['Irvine', `#/building/${w.loc.id}`]]);
+
+  // One session, location still "All locations": the report is Irvine's, and so are its links and files.
+  choose(view, { Session: String(w.pm.id), From: '2026-10-05', To: '2026-10-09' });
+  submit(view);
+  await tab.settle();
+  const q = `location=all&session=${w.pm.id}&from=2026-10-05&to=2026-10-09`;
+  assert.deepEqual(tab.requests.at(-1), { url: `${R}?${q}`, status: 200 });
+  assert.match(words(reportBox(view)), /^Oct 5 – Oct 9, 2026 Irvine · Afternoon Study · Mon\/Wed\/Fri 1:00 PM–4:00 PM Download CSV Download PDF /);
+  assert.deepEqual(links(), [['In the building', `#/building/${w.loc.id}`]]);
+  for (const [label, url] of [['Download CSV', `${R}.csv?${q}`], ['Download PDF', `${R}.pdf?${q}`]]) {
+    button(reportBox(view), label).click();
+    await tab.settle();
+    assert.deepEqual(tab.requests.at(-1), { url, status: 200 }, label);
+  }
+  assert.deepEqual(tab.toasts().childNodes.map(n => n.textContent), [
+    'Downloaded attendance-report-irvine-afternoon-study-2026-10-05-to-2026-10-09.csv',
+    'Downloaded attendance-report-irvine-afternoon-study-2026-10-05-to-2026-10-09.pdf']);
 });
 
 test(['AT-4'], 'Reports: a director moved to another location while signed in starts over there, not on the old location\'s filters', async () => {

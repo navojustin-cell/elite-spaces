@@ -310,16 +310,20 @@ function log(ctx, filter) {
   return { visits: vs, absences: abs, totals: totals(vs, abs) };
 }
 
-// Per-student totals for the director/HQ report, by name.
+// Per-student totals for the director/HQ report, by name. `location_name`: where
+// those visits and absences were, every location by name ("Arcadia, Irvine").
 function byStudent(vs, abs) {
   const rows = new Map();
-  const row = (id, name) => {
-    if (!rows.has(id)) rows.set(id, { student_id: id, student_name: name, visits: 0, minutes: 0, absences: 0 });
-    return rows.get(id);
+  const row = (id, name, location) => {
+    if (!rows.has(id)) rows.set(id, { student_id: id, student_name: name, locations: new Set(), visits: 0, minutes: 0, absences: 0 });
+    const r = rows.get(id);
+    r.locations.add(location);
+    return r;
   };
-  for (const v of vs) { const r = row(v.student_id, v.student_name); r.visits++; r.minutes += v.minutes || 0; }
-  for (const a of abs) row(a.student_id, a.student_name).absences++;
-  return [...rows.values()].map(r => Object.assign(r, { hours: Math.round((r.minutes / 60) * 100) / 100 }))
+  for (const v of vs) { const r = row(v.student_id, v.student_name, v.location_name); r.visits++; r.minutes += v.minutes || 0; }
+  for (const a of abs) row(a.student_id, a.student_name, a.location_name).absences++;
+  return [...rows.values()].map(({ locations, ...r }) => Object.assign(r, {
+    location_name: [...locations].sort((a, b) => a.localeCompare(b)).join(', '), hours: Math.round((r.minutes / 60) * 100) / 100 }))
     .sort((a, b) => a.student_name.localeCompare(b.student_name) || a.student_id - b.student_id);
 }
 

@@ -344,8 +344,21 @@
           onclick: e => App.run(e.currentTarget, () => download(file(ext))).then(markStale) }, label);
         shown = qs(filter);
         downloads = [dl('Download CSV', 'csv'), dl('Download PDF', 'pdf')];
-        // Staff and directors confirm automatic check-outs on In the building, at the report's location.
-        const building = h('a', { href: '#/building' + (all ? '' : '/' + rep.filters.location.id) }, 'In the building');
+        // Staff and directors confirm automatic check-outs on In the building, at the location of
+        // the visits. Across all locations: a link to each location that has some, with its count.
+        const toBuilding = (id, label) => h('a', { href: '#/building/' + id }, label);
+        let reviewAt;
+        if (all) {
+          const at = new Map(); // location id -> { name, n }
+          for (const v of rep.visits.filter(x => x.needs_review)) {
+            if (!at.has(v.location_id)) at.set(v.location_id, { name: v.location_name, n: 0 });
+            at.get(v.location_id).n++;
+          }
+          const links = [...at].sort(([, a], [, b]) => a.name.localeCompare(b.name)).map(([id, l]) => [toBuilding(id, l.name), ` (${l.n})`]);
+          reviewAt = ['In the building at ', links.map((l, i) => (i ? [', ', l] : l)), '.'];
+        } else {
+          reviewAt = ['the ', toBuilding(rep.filters.location.id, 'In the building'), ' list.'];
+        }
         const panel = h('div', { id: 'rep-panel', role: 'tabpanel' });
         const TABS = [['students', 'By student'], ['visits', 'Visits'], ['absences', 'Absences']];
         const tabs = TABS.map(([k, label]) => h('button', { type: 'button', role: 'tab', id: 'rep-tab-' + k, 'aria-controls': 'rep-panel',
@@ -383,7 +396,7 @@
             stat(t.students, t.students === 1 ? 'student' : 'students'), stat(t.absences, t.absences === 1 ? 'absence' : 'absences')),
           // A ternary, not &&: replaceChildren would print a bare false as the word "false".
           t.needs_review > 0 ? h('div', { class: 'notice notice-warn' }, h('strong', null, count(t.needs_review, 'visit needs', 'visits need') + ' review. '),
-            'These students didn\'t scan out and were checked out automatically. Confirm or fix the times from the ', building, ' list.') : '',
+            'These students didn\'t scan out and were checked out automatically. Confirm or fix the times from ', reviewAt) : '',
           h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Report detail' }, tabs),
           panel);
         showTab();

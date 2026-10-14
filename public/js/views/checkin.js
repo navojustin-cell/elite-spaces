@@ -468,8 +468,10 @@
             const fix = h('form', { class: 'row ci-hideable', hidden: true, style: 'margin-top:.5rem', onsubmit: async ev => {
               ev.preventDefault();
               await App.run(ev.submitter, async () => {
-                await App.api.post(`${API}/visits/${v.visit_id}/review`, { out_time: time.value });
-                App.toast(`Saved ${first(v.name)}'s time out.`);
+                const r = await App.api.post(`${API}/visits/${v.visit_id}/review`, { out_time: time.value });
+                // An unchanged time is confirmed as it was (still automatic), the same as "Time is right".
+                App.toast(r.visit.checkout_method === v.checkout_method && r.visit.check_out_at === v.check_out_at
+                  ? `Marked ${first(v.name)}'s visit reviewed.` : `Saved ${first(v.name)}'s time out.`);
                 reload();
               });
             } },

@@ -689,6 +689,41 @@ test(['CI-7', 'NF-2'], 'flagged visits wait for review; staff confirm them or fi
   assert.equal(t.fx.audit('checkin.review').length, 2);
 });
 
+test(['CI-7', 'NF-2'], '"Fix time out" saved with the automatic time unchanged confirms it, exactly like "Time is right"', async () => {
+  const t = await setup();
+  await t.scan();
+  setClock(t, '16:30');
+  t.jobs(); // Maya is checked out automatically at 16:00 and flagged
+  const [maya] = visitsOf(t, t.fam.student);
+  // The fix form opens at 16:00; staff press "Save time out" without changing it.
+  const r = await t.as(t.staff).post(`/api/checkin/visits/${maya.id}/review`, { out_time: '16:00' });
+  assert.equal(r.status, 200);
+  const m = visitsOf(t, t.fam.student)[0];
+  assert.deepEqual([m.reviewed_by, m.check_out_at, m.checkout_method, m.checked_out_by], [t.staff.id, at(LA, '2026-10-14', '16:00'), 'auto', null]);
+  const b = (await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`)).body;
+  assert.deepEqual(b.needs_review, []);
+  assert.deepEqual(b.left.map(v => [v.visit_id, v.checkout_method, v.checked_out_by_name]), [[maya.id, 'auto', null]]);
+  const logs = t.fx.audit('checkin.review');
+  assert.deepEqual(logs.map(l => [l.actor_id, l.target_id]), [[t.staff.id, maya.id]]);
+  assert.deepEqual(JSON.parse(logs[0].detail), {
+    student_id: t.fam.student.id, student: 'Maya Johnson', staff: 'Chris Ortiz',
+    before: { check_out_at: at(LA, '2026-10-14', '16:00'), checkout_method: 'auto' },
+    after: { check_out_at: at(LA, '2026-10-14', '16:00'), checkout_method: 'auto' },
+  });
+
+  // An automatic time out with seconds (checked in after closing, so it is the check-in time) shows as 18:05
+  // in the form; saving that unchanged also just confirms it, keeping the exact time.
+  const leo = kid(t, t.loc, 'Leo Garcia');
+  const late = at(LA, '2026-10-13', '18:05') + 23000;
+  const v = t.fx.visit(leo, t.loc, { local_date: '2026-10-13', check_in_at: late, checkin_method: 'staff', checked_in_by: t.staff.id,
+    check_out_at: late, checkout_method: 'auto', flagged: 1, flag_reason: 'Did not scan out' });
+  const same = await t.as(t.staff).post(`/api/checkin/visits/${v.id}/review`, { out_time: '18:05' });
+  assert.equal(same.status, 200);
+  const l = visitsOf(t, leo)[0];
+  assert.deepEqual([l.reviewed_by, l.check_out_at, l.checkout_method, l.checked_out_by], [t.staff.id, late, 'auto', null]);
+  assert.equal(t.fx.audit('checkin.review').length, 2);
+});
+
 test(['CI-7', 'NF-2'], 'In the building names who checked a visit in or out by hand and why, in Here, Left today and Needs review', async () => {
   const t = await setup();
   const dir = t.fx.director(t.loc, { name: 'Dana Park' });

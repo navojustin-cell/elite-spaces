@@ -180,8 +180,9 @@
     const target = focusId && el.querySelector('[data-target]');
     if (target) setTimeout(() => { if (target.isConnected) { target.scrollIntoView({ block: 'center' }); target.focus({ preventScroll: true }); } }, 0);
 
-    // Seeing a post in News counts as reading it (AN-6).
-    for (const p of [...f.active_emergencies, ...f.posts]) if (p.unread) App.api.post(API + '/' + p.id + '/read').catch(() => {});
+    // Seeing a post in News counts as reading it (AN-6), and the bell drops to match.
+    const reads = [...f.active_emergencies, ...f.posts].filter(p => p.unread).map(p => App.api.post(API + '/' + p.id + '/read').catch(() => {}));
+    if (reads.length) Promise.all(reads).then(() => App.refreshBell());
 
     if (isFamily()) {
       const cb = h('input', { type: 'checkbox', id: 'ann-notify', checked: !f.muted });
@@ -454,7 +455,7 @@
   // app.js, a .emergency alertdialog on <body>) and removes it when the person
   // taps "I have read this". Watching for that pop-up keeps the pinned alerts on
   // Home and News current without a reload, and the tap counts as reading the
-  // alert, so the sender's read count includes it.
+  // alert, so the sender's read count includes it and the bell drops.
   let redraws = 0;
   async function redrawLive() {
     const seq = ++redraws;
@@ -462,25 +463,30 @@
       if (!box || !box.isConnected) continue;
       const fresh = h('div');
       try { await draw(fresh); } catch (_) { continue; } // keep what is on screen
-      if (seq === redraws && box.isConnected) box.replaceChildren(...fresh.childNodes);
+      if (seq !== redraws || !box.isConnected) continue;
+      // Focus inside the old content would drop to the top of the page; it goes to the page heading.
+      const hadFocus = box.contains(document.activeElement);
+      box.replaceChildren(...fresh.childNodes);
+      if (hadFocus) focusHeading();
     }
   }
-  // The pop-up shows the alert's title; the person's newest unread alert with
-  // that title is the one they just acknowledged.
+  function focusHeading() {
+    const head = document.querySelector('#main h1');
+    if (head) { head.setAttribute('tabindex', '-1'); head.focus(); }
+  }
+  // The pop-up carries the notification it shows, so exactly that alert is marked
+  // read, even when two alerts share a title.
   async function acknowledge(popup) {
-    const title = (popup.querySelector('h3') || {}).textContent;
-    try {
-      const { notifications } = await App.api.get('/api/notifications');
-      const n = notifications.find(x => x.priority === 'emergency' && x.ref_type === 'announcement' && x.title === title && !x.read_at);
-      if (n) await App.api.post(API + '/' + n.ref_id + '/read');
-    } catch (_) { /* signed out, or no longer theirs: nothing to count */ }
+    const id = Number(popup.getAttribute('data-notification-id'));
+    if (!id) return;
+    try { await App.api.post('/api/notifications/' + id + '/read'); } catch (_) { /* signed out: nothing to count */ }
   }
   const isAlertPopup = n => n.nodeType === 1 && n.matches('.emergency[role="alertdialog"]');
   new MutationObserver(records => {
     if (!App.me) return;
     const arrived = records.some(r => [...r.addedNodes].some(isAlertPopup));
     const acknowledged = records.flatMap(r => [...r.removedNodes].filter(isAlertPopup));
-    if (acknowledged.length) Promise.all(acknowledged.map(acknowledge)).then(redrawLive);
+    if (acknowledged.length) Promise.all(acknowledged.map(acknowledge)).then(() => { App.refreshBell(); return redrawLive(); });
     else if (arrived) redrawLive();
   }).observe(document.body, { childList: true });
 

@@ -11,7 +11,8 @@
 //   POST /manual-checkin             staff+: { studentId, reason, override } (CI-7, audited); override confirms
 //                                    checking in a student with no session now or an inactive membership
 //   POST /visits/:id/checkout        staff+: { reason } manual check-out (CI-7, audited)
-//   POST /visits/:id/review          staff+: { out_time? } mark a flagged visit reviewed, optionally fixing the time out (audited)
+//   POST /visits/:id/review          staff+: { out_time? } mark a flagged visit reviewed, optionally fixing the time out (audited);
+//                                    an out_time equal to the current time out just confirms it
 // Job: auto-checkout (CI-5, D-14).
 //
 // Scan order: today's code -> home location (D-1) -> inside the radius -> an
@@ -223,7 +224,10 @@ function router(ctx) {
     const loc = svc.getLocation(ctx, v.location_id);
     const student = auth.getUser(ctx, v.student_id);
     let out = v.check_out_at, method = v.checkout_method, by = v.checked_out_by;
-    if (b.out_time != null && b.out_time !== '') {
+    // "Fix time out" opens at the current time out (to the minute), so saving it unchanged
+    // confirms that time exactly like "Time is right" instead of relabeling it a staff correction.
+    const unchanged = v.check_out_at != null && b.out_time === time.localTime(loc, v.check_out_at);
+    if (b.out_time != null && b.out_time !== '' && !unchanged) {
       if (typeof b.out_time !== 'string' || !OUT_TIME.test(b.out_time)) throw bad('bad_time', 'Enter the time out as hours and minutes, like 15:45.');
       out = time.toMs(loc, v.local_date, b.out_time);
       if (out <= v.check_in_at || out > ctx.clock.now()) {

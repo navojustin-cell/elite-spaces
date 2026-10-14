@@ -1,6 +1,10 @@
 'use strict';
 // Announcements and emergency alerts (PRD 5, AN-1..AN-6) and their scope rules (NF-1).
-const { test, makeApp, assert, load, at } = require('./lib');
+const vm = require('vm');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { test, makeApp, assert, load, at, ROOT } = require('./lib');
 
 const LA = 'America/Los_Angeles';
 const TO = 'America/Toronto';
@@ -646,7 +650,7 @@ test(['AN-5', 'AN-6'], '"I have read this" on the emergency pop-up counts toward
   const n = w.t.fx.notifications(w.famA.parent, 'emergency_alert')[0];
   assert.equal((await w.t.as(w.famA.parent).post('/api/notifications/' + n.id + '/read')).status, 200);
   assert.deepEqual(await stats(), { recipients: 6, delivered: 6, read: 1, muted: 0 });
-  // Marked by the alert's own id (News, or the view acknowledging the pop-up) counts the same way.
+  // Marked by the alert's own id (seen in News) counts the same way.
   assert.equal((await w.t.as(w.staffA).post(API + '/' + id + '/read')).status, 200);
   assert.deepEqual(await stats(), { recipients: 6, delivered: 6, read: 2, muted: 0 });
   // The pinned alert is no longer new for those two, and still is for everyone else.
@@ -796,4 +800,231 @@ test(['NF-1'], 'every route refuses a signed-out caller', async () => {
     const r = await w.t.anon[m](API + p, ...(m === 'get' || m === 'del' ? [] : [{}]));
     assert.equal(r.status, 401, m + ' ' + p);
   }
+});
+
+// ---------------------------------------------------------------- the emergency pop-up in a browser tab
+
+// Just enough DOM for public/js/app.js and the announcements view. Elements live
+// in one tree under <html>; focus, events (which bubble), isConnected and a
+// MutationObserver on <body> work as in a browser, and a removed element loses
+// focus to <body>.
+class El {
+  constructor(doc, tag, data = '') { Object.assign(this, { doc, tag, data, childNodes: [], attrs: new Map(), on: {}, parentNode: null }); }
+  get nodeType() { return this.tag ? 1 : 3; }
+  get textContent() { return this.tag ? this.childNodes.map(c => c.textContent).join('') : this.data; }
+  set textContent(s) { this.replaceChildren(String(s)); }
+  setAttribute(k, v) { this.attrs.set(k, String(v)); }
+  getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
+  get id() { return this.getAttribute('id') || ''; }
+  get hidden() { return this.attrs.has('hidden'); }
+  set hidden(v) { if (v) this.attrs.set('hidden', ''); else this.attrs.delete('hidden'); }
+  get cls() { return (this.getAttribute('class') || '').split(/\s+/).filter(Boolean); }
+  get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === this.doc.documentElement; }
+  addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
+  dispatch(type, props) {
+    const ev = Object.assign({ type, target: this, stopped: false, preventDefault() {}, stopPropagation() { this.stopped = true; } }, props);
+    for (let n = this; n && !ev.stopped; n = n.parentNode) { ev.currentTarget = n; for (const fn of n.on[type] || []) fn(ev); }
+  }
+  click() { this.dispatch('click'); }
+  focus() { this.doc.focused = this; }
+  adopt(kids) {
+    const ns = kids.map(k => { const n = k instanceof El ? k : new El(this.doc, null, String(k)); n.remove(); n.parentNode = this; return n; });
+    this.doc.changed(this, ns, []);
+    return ns;
+  }
+  append(...kids) { this.childNodes.push(...this.adopt(kids)); }
+  appendChild(k) { this.append(k); return k; }
+  prepend(...kids) { this.childNodes.unshift(...this.adopt(kids)); }
+  after(...kids) { const p = this.parentNode, ns = p.adopt(kids); p.childNodes.splice(p.childNodes.indexOf(this) + 1, 0, ...ns); }
+  replaceChildren(...kids) {
+    const old = this.childNodes;
+    old.forEach(c => { c.parentNode = null; });
+    this.childNodes = [];
+    this.doc.changed(this, [], old);
+    this.append(...kids);
+  }
+  remove() {
+    const p = this.parentNode;
+    if (!p) return;
+    p.childNodes = p.childNodes.filter(c => c !== this);
+    this.parentNode = null;
+    this.doc.changed(p, [], [this]);
+  }
+  contains(n) { for (; n; n = n.parentNode) if (n === this) return true; return false; }
+  all() { return this.childNodes.flatMap(c => [c, ...c.all()]); }
+  find(pred) { return this.all().find(pred); }
+  findAll(pred) { return this.all().filter(pred); }
+  // One compound selector: tag, #id, .class, [attr] and [attr="value"] parts.
+  matches(sel) {
+    return !!this.tag && (sel.match(/\[[^\]]+\]|[#.]?[\w-]+/g) || []).every(p => {
+      if (p[0] === '#') return this.id === p.slice(1);
+      if (p[0] === '.') return this.cls.includes(p.slice(1));
+      if (p[0] === '[') { const [, k, v] = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(p); return v === undefined ? this.attrs.has(k) : this.getAttribute(k) === v; }
+      return this.tag === p;
+    });
+  }
+  // Descendant selectors made of compound parts: '#main h1', 'button'.
+  querySelector(sel) {
+    const parts = sel.trim().split(/\s+/);
+    const walk = (root, i) => {
+      for (const n of root.all()) {
+        if (!n.matches(parts[i])) continue;
+        const got = i === parts.length - 1 ? n : walk(n, i + 1);
+        if (got) return got;
+      }
+      return null;
+    };
+    return walk(this, 0);
+  }
+}
+
+// One browser tab running the real shell and announcements view (read from ROOT,
+// so the mutation runner's copy is the one exercised) against the test server.
+function alertTab(t, hash = '') {
+  let cookie = '';
+  const pending = new Set(), streams = [], observers = [];
+  const track = p => { pending.add(p); const done = () => pending.delete(p); p.then(done, done); return p; };
+  const doc = { title: '', hidden: false, on: {}, addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); },
+    // Child list changes reach observers a moment later, as in a browser.
+    changed(target, addedNodes, removedNodes) {
+      for (const o of observers) if (o.target === target) track(Promise.resolve().then(() => o.cb([{ addedNodes, removedNodes }])));
+    } };
+  const el = (tag, attrs = {}) => { const n = new El(doc, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; };
+  doc.documentElement = el('html');
+  doc.head = el('head');
+  doc.body = el('body');
+  doc.documentElement.append(doc.head, doc.body);
+  const shell = el('div', { id: 'shell' });
+  shell.append(el('nav', { id: 'nav', 'aria-label': 'Main', hidden: '' }), el('main', { id: 'main', tabindex: '-1' }));
+  doc.body.append(el('div', { id: 'devbar', hidden: '' }), el('header', { id: 'topbar', hidden: '' }),
+    el('div', { id: 'toasts', role: 'status', 'aria-live': 'polite' }), shell);
+  Object.assign(doc, {
+    createElement: tag => new El(doc, tag), createTextNode: s => new El(doc, null, String(s)),
+    getElementById: id => doc.documentElement.find(n => n.id === id) || null,
+    querySelector: sel => doc.documentElement.querySelector(sel),
+  });
+  Object.defineProperty(doc, 'activeElement', { get: () => (doc.focused && doc.focused.isConnected ? doc.focused : doc.body) });
+  const winOn = {};
+  const fire = type => (winOn[type] || []).forEach(fn => fn({ type }));
+  const location = {
+    _hash: hash,
+    get hash() { return this._hash; },
+    set hash(v) { this._hash = v ? (String(v).startsWith('#') ? String(v) : '#' + v) : ''; track(new Promise(r => setImmediate(() => { fire('hashchange'); r(); }))); },
+  };
+  class EventSource { constructor(url) { this.url = url; streams.push(this); } close() { this.closed = true; } }
+  class MutationObserver { constructor(cb) { this.cb = cb; } observe(target) { observers.push({ target, cb: this.cb }); } }
+  const fetchAs = (url, opts = {}) => track(fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie }) }))
+    .then(async r => new Response(await r.arrayBuffer(), { status: r.status, headers: r.headers })));
+  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, console, navigator: {}, location, EventSource, MutationObserver,
+    history: { replaceState(_s, _t, url) { location._hash = String(url).replace(/^[^#]*/, ''); } },
+    addEventListener(type, fn) { (winOn[type] = winOn[type] || []).push(fn); },
+    setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
+  win.window = win;
+  vm.createContext(win);
+  for (const f of ['public/js/app.js', 'public/js/views/announcements.js']) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
+  // Waits until every request has answered and the page has drawn what came back.
+  const settle = async () => {
+    do {
+      await Promise.allSettled([...pending]);
+      for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+    } while (pending.size);
+  };
+  return {
+    App: win.App, doc, settle,
+    main: () => doc.getElementById('main'),
+    signIn(user) { const token = crypto.randomBytes(16).toString('hex'); t.ctx.sessions.set(token, user.id); cookie = 'sid=' + token; },
+    async start() { win.App.start(); await settle(); },
+    async go(to) { location.hash = to; await settle(); },
+    // Notifications stream in, as the server pushes them to an open app.
+    async arrive(...rows) { for (const n of rows) streams.at(-1).onmessage({ data: JSON.stringify(n) }); await settle(); },
+    popups: () => doc.body.childNodes.filter(n => n.tag && n.getAttribute('role') === 'alertdialog'),
+  };
+}
+const bellOf = tab => {
+  const b = tab.doc.getElementById('bell'), c = b.find(n => n.cls.includes('bell-count'));
+  return { label: b.getAttribute('aria-label'), count: c.hidden ? 0 : Number(c.textContent) };
+};
+const readButton = popup => popup.find(n => n.tag === 'button' && n.textContent === 'I have read this');
+const readAt = (t, n) => t.db.prepare('SELECT read_at FROM notifications WHERE id = ?').get(n.id).read_at;
+
+test(['AN-5', 'AN-6'], '"I have read this" marks exactly the alert on that pop-up read when two alerts share a title, and the bell drops right away', async () => {
+  const w = await world();
+  const { t } = w;
+  const parent = w.famA.parent;
+  const tab = alertTab(t);
+  tab.signIn(parent);
+  await tab.start();
+  assert.deepEqual(bellOf(tab), { label: 'Inbox, 0 unread', count: 0 });
+  const navLink = tab.doc.getElementById('nav').find(n => n.tag === 'a' && n.getAttribute('href') === '#/news');
+  navLink.focus();
+
+  // Two alerts with the same title, ten minutes apart; both pop up.
+  const older = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  t.clock.set(t.clock.now() + 10 * 60e3);
+  const newer = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  const [nOld, nNew] = t.fx.notifications(parent, 'emergency_alert');
+  assert.deepEqual([nOld.ref_id, nNew.ref_id], [older, newer]);
+  await tab.arrive(nOld, nNew);
+  const [first, second] = tab.popups();
+  assert.equal(tab.popups().length, 2);
+  assert.deepEqual([first, second].map(p => p.find(n => n.tag === 'h3').textContent), ['Power outage', 'Power outage']);
+  assert.deepEqual(bellOf(tab), { label: 'Inbox, 2 unread', count: 2 });
+  assert.equal(tab.doc.activeElement, readButton(second), 'the newest pop-up has focus');
+
+  // Acknowledging the older pop-up marks the older alert read, and only it.
+  readButton(first).click();
+  await tab.settle();
+  assert.deepEqual(tab.popups(), [second]);
+  assert.ok(readAt(t, nOld), 'the older alert is read');
+  assert.equal(readAt(t, nNew), null, 'the newer alert with the same title is still unread');
+  const reads = async id => (await t.as(w.dirA).get(API + '/' + id + '/stats')).body.read;
+  assert.deepEqual([await reads(older), await reads(newer)], [1, 0]);
+  assert.deepEqual(bellOf(tab), { label: 'Inbox, 1 unread', count: 1 }, 'the bell drops without a reload');
+  assert.equal(tab.doc.activeElement, navLink, 'focus goes back to what had it before that pop-up opened');
+
+  // The newer one: what had focus before it (the older pop-up's button) is gone, so focus goes to the page heading.
+  readButton(second).click();
+  await tab.settle();
+  assert.deepEqual(tab.popups(), []);
+  assert.ok(readAt(t, nNew));
+  assert.deepEqual([await reads(older), await reads(newer)], [1, 1]);
+  assert.deepEqual(bellOf(tab), { label: 'Inbox, 0 unread', count: 0 });
+  const focused = tab.doc.activeElement;
+  assert.equal(focused.tag, 'h1');
+  assert.ok(focused.isConnected && tab.main().contains(focused));
+  assert.equal(focused.getAttribute('tabindex'), '-1', 'the heading can take focus');
+});
+
+test(['AN-5', 'NF-7'], 'on News, closing the pop-up puts focus on the page heading when the control that had it was redrawn, and it stays there', async () => {
+  const w = await world();
+  const { t } = w;
+  const tab = alertTab(t, '#/news');
+  tab.signIn(w.famA.parent);
+  await tab.start();
+  const box = tab.doc.getElementById('ann-notify');
+  assert.ok(box, 'the notification setting is on News');
+  box.focus();
+  await t.as(w.dirA).post(API + '/emergency', alert());
+  await tab.arrive(t.fx.notifications(w.famA.parent, 'emergency_alert')[0]);
+  assert.equal(box.isConnected, false, 'the alert arriving redrew News');
+  readButton(tab.popups()[0]).click();
+  await tab.settle();
+  const focused = tab.doc.activeElement;
+  assert.equal(focused.tag, 'h1');
+  assert.equal(focused.textContent, 'News');
+  assert.ok(focused.isConnected, 'focus is on the heading News shows now, not lost to the top of the page');
+  assert.equal(focused.getAttribute('tabindex'), '-1', 'the heading can take focus');
+});
+
+test(['AN-6'], 'opening News marks its new posts read and the bell drops right away, without a reload', async () => {
+  const w = await world();
+  const { t } = w;
+  await t.as(w.dirA).post(API, post());
+  const tab = alertTab(t);
+  tab.signIn(w.famA.parent);
+  await tab.start();
+  assert.deepEqual(bellOf(tab), { label: 'Inbox, 1 unread', count: 1 });
+  await tab.go('#/news');
+  assert.ok(t.fx.notifications(w.famA.parent, 'announcement')[0].read_at, 'seeing it in News marks it read');
+  assert.deepEqual(bellOf(tab), { label: 'Inbox, 0 unread', count: 0 });
 });

@@ -53,7 +53,9 @@ function studentLog(ctx, req) {
 }
 
 // NF-1 / AT-4: what a director or HQ may report on. Directors: their own location
-// only. HQ: one location or all of them. A session must belong to the chosen location.
+// only. HQ: one location or all of them (`all`). A session must belong to the chosen
+// location. `location` is where the report is: the one chosen or, with all locations
+// and one session chosen, the session's.
 function reportScope(ctx, user, q) {
   const raw = q.location == null || q.location === '' ? (user.role === 'hq' ? 'all' : String(user.location_id)) : String(q.location);
   let location = null; // null = every location
@@ -72,9 +74,12 @@ function reportScope(ctx, user, q) {
     if (!auth.canManageLocation(user, s.location_id)) throw forbidden('That session is at another location.');
     if (location && s.location_id !== location.id) throw bad('session_location', 'That session isn\'t at this location.');
     session = { id: s.id, name: s.name, location_id: s.location_id, label: sessionLabel(s) };
+    // A session is at one location, so with all locations chosen the report is still that
+    // location's: its heading, files, file name and times all name it.
+    if (!location) location = ctx.db.prepare('SELECT id, name, timezone FROM locations WHERE id = ?').get(s.location_id);
   }
   const { from, to } = svc.checkRange(q.from, q.to);
-  return { from, to, location, session };
+  return { from, to, all: raw === 'all', location, session };
 }
 
 // Every location an all-locations report covers, by name.
@@ -94,7 +99,7 @@ function timing(ctx, scope) {
 }
 
 function report(ctx, scope) {
-  const log = svc.log(ctx, { locationId: scope.location ? scope.location.id : null, sessionId: scope.session ? scope.session.id : null,
+  const log = svc.log(ctx, { locationId: scope.all ? null : scope.location.id, sessionId: scope.session ? scope.session.id : null,
     from: scope.from, to: scope.to });
   return {
     filters: { location: scope.location, session: scope.session, from: scope.from, to: scope.to },

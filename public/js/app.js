@@ -227,6 +227,8 @@
       if (shown !== 'inbox') setBell(unread);
     } catch (_) { /* signed out */ }
   }
+  // For views: call after marking something read so the bell drops right away.
+  App.refreshBell = updateBell;
 
   let stream = null;
   function listen() {
@@ -253,10 +255,20 @@
       if (!was || me.user.role !== was.user.role || me.user.location_id !== was.user.location_id) render();
     } catch (_) { /* signed out: api() already redrew the sign-in screen */ }
   }
+  // The pop-up carries its notification id, so "I have read this" marks exactly
+  // this alert read (the announcements view acknowledges it). Closing it puts focus
+  // back where it was before it opened, or on the page heading if that is gone.
   function showEmergency(n) {
-    const box = h('div', { class: 'emergency', role: 'alertdialog', 'aria-labelledby': 'em-t', style: 'position:fixed;inset:auto 12px 90px 12px;z-index:60;max-width:560px;margin:auto' },
+    const before = document.activeElement !== document.body ? document.activeElement : null;
+    const close = () => {
+      box.remove();
+      if (before && before.isConnected) return before.focus();
+      const head = document.querySelector('#main h1');
+      if (head) { head.setAttribute('tabindex', '-1'); head.focus(); }
+    };
+    const box = h('div', { class: 'emergency', role: 'alertdialog', 'aria-labelledby': 'em-t', 'data-notification-id': n.id, style: 'position:fixed;inset:auto 12px 90px 12px;z-index:60;max-width:560px;margin:auto' },
       h('div', { class: 'label' }, 'Emergency alert'), h('h3', { id: 'em-t' }, n.title), n.body && h('p', null, n.body),
-      h('button', { class: 'btn', onclick: () => box.remove() }, 'I have read this'));
+      h('button', { class: 'btn', onclick: close }, 'I have read this'));
     document.body.append(box);
     box.querySelector('button').focus();
   }

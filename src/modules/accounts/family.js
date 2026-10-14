@@ -8,7 +8,8 @@
 //   POST /signup                  { name, email, phone, password, location_id } -> parent account, signed in
 //   GET  /invites/:code           what an invite is for (email masked)
 //   POST /invites/accept          { code, password, email?, name?, phone? }
-//                                 student: sets their password; the link stays pending until a parent approves
+//                                 student: sets their password; the link stays pending until a parent approves.
+//                                 On a phone-only invite they add an email, which can't be one another open invite holds
 //                                 guardian: creates their parent account, linked to the family's students, signed in
 // Parent:
 //   GET  /family                  my students (with link state), my co-guardians and their open invites
@@ -17,7 +18,7 @@
 //                                 students already has an open invite to that email (use resend)
 //   POST /students/:id/approve    activate a student who accepted their invite
 //   POST /guardians/invite        { name, email } -> one-time code for a second guardian; refused for my own
-//                                 student's email, or while the family has an open invite to that email
+//                                 student's email, a co-guardian's, or while the family has an open invite to that email
 //   POST /invites/join            { code } -> an existing parent joins the family the invite came from
 //   POST /invites/:id/resend      new code and expiry; the old code stops working
 //   POST /invites/:id/cancel      the code stops working; a pending student is removed. For a student who
@@ -88,6 +89,12 @@ function openInviteTo(db, parentId, kind, addr) {
   return db.prepare(`SELECT * FROM account_invites WHERE kind = 'guardian' AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL
     AND invited_by IN (${fam.map(() => '?').join(',')}) ORDER BY id LIMIT 1`).get(addr, ...fam);
 }
+// Whether an invite other than `exceptId` that is neither used nor cancelled was
+// sent to `addr`, from any family. A student who picks their own email on a
+// phone-only invite may not take it: that other invite could never be used.
+const inviteHolds = (db, addr, exceptId) => !!db.prepare(`SELECT 1 FROM account_invites
+  WHERE email = ? AND id != ? AND accepted_at IS NULL AND revoked_at IS NULL`).get(addr, exceptId);
+
 const alreadyInvited = (row, now) => conflict('invite_pending',
   `${u.firstName(row.name)} already has an invite at that email. Use ${row.expires_at <= now ? 'Send a new code' : 'Resend'} on that invite instead of sending another.`);
 
@@ -154,6 +161,7 @@ function acceptStudent(ctx, row, body, pw) {
   if (!student) throw invalidInvite();
   const addr = row.email || u.email(body.email);
   if (u.emailTaken(db, addr, student.id)) throw emailUnavailable(!!row.email);
+  if (!row.email && inviteHolds(db, addr, row.id)) throw emailUnavailable(false);
   const now = ctx.clock.now();
   tx(db, () => {
     db.prepare('UPDATE users SET password_hash = ?, email = ? WHERE id = ?').run(auth.hashPassword(pw), addr, student.id);
@@ -324,6 +332,10 @@ function routes(r, ctx) {
       WHERE fl.parent_id = ?1 AND s.role = 'student' AND s.active = 1 AND (s.email = ?2 OR EXISTS (SELECT 1 FROM account_invites i
         WHERE i.kind = 'student' AND i.user_id = s.id AND i.revoked_at IS NULL AND i.email = ?2)) LIMIT 1`).get(req.user.id, addr);
     if (kid) throw bad('email', `That's the email for ${u.firstName(kid.name)}, a student on your account. Enter the guardian's own email.`);
+    // A co-guardian can't accept or join again, so that invite could never be used.
+    const fam = coGuardians(db, req.user.id);
+    const member = db.prepare(`SELECT name FROM users WHERE lower(email) = ? AND id IN (${fam.map(() => '?').join(',')})`).get(addr, ...fam);
+    if (member) throw conflict('already_family', `${member.name} is already in your family.`);
     const twinGuardian = openInviteTo(db, req.user.id, 'guardian', addr);
     if (twinGuardian) throw alreadyInvited(twinGuardian, ctx.clock.now());
     res.status(201).json(createInvite(ctx, { kind: 'guardian', by: req.user.id, name, email: addr }));

@@ -75,6 +75,12 @@ module.exports = [
     find: 'if (kid) throw bad(', repl: 'if (false) throw bad(' },
   { name: 'a guardian invite to the email a pending student was invited at is sent', covers: ['AC-2'], file: F,
     find: '(s.email = ?2 OR EXISTS (SELECT 1 FROM account_invites i', repl: '(s.email = ?2 OR 0 AND EXISTS (SELECT 1 FROM account_invites i' },
+  { name: 'a guardian invite to someone already a co-guardian is sent', covers: ['AC-2'], file: F,
+    find: "if (member) throw conflict('already_family',", repl: "if (false) throw conflict('already_family'," },
+  { name: 'a student on a phone-only invite takes an email another family\'s open invite holds', covers: ['AC-3', 'AC-1'], file: F,
+    find: 'if (!row.email && inviteHolds(db, addr, row.id)) throw', repl: 'if (false) throw' },
+  { name: 'a cancelled invite still holds its email', covers: ['AC-3'], file: F,
+    find: 'AND id != ? AND accepted_at IS NULL AND revoked_at IS NULL`).get(addr, exceptId)', repl: 'AND id != ? AND accepted_at IS NULL`).get(addr, exceptId)' },
 
   // ---- the invite accept screen never confirms that an email has an account
   { name: 'the accept screen says the email already has an account', covers: ['AC-1', 'NF-1'], file: F,

@@ -1,0 +1,489 @@
+<title>ELITE Spaces v1 Build Status</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+/* Layout: one reading column; a summary strip up top, then one ledger per PRD section, then what's left. */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --ink: #18202f;
+  --muted: #586174;
+  --line: #dde1e8;
+  --brand: #14213d;
+  --accent: #a8701a;
+  --done: #1d7048;  --done-bg: #e3f3ea;
+  --today: #1f5fbf; --today-bg: #e4edfb;
+  --decide: #7a3fa6; --decide-bg: #f1e8f8;
+  --later: #5b6272; --later-bg: #eceef2;
+  --display: "Archivo", "Segoe UI", system-ui, sans-serif;
+  --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10141c; --surface: #171d28; --ink: #e8ebf1; --muted: #a2aabb; --line: #2a3242;
+    --brand: #c9d6f2; --accent: #e0ac5c;
+    --done: #74d3a2; --done-bg: #14301f; --today: #8db7ff; --today-bg: #172843;
+    --decide: #cfa4ef; --decide-bg: #2a1d38; --later: #b3bac8; --later-bg: #232a37;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10141c; --surface: #171d28; --ink: #e8ebf1; --muted: #a2aabb; --line: #2a3242;
+  --brand: #c9d6f2; --accent: #e0ac5c;
+  --done: #74d3a2; --done-bg: #14301f; --today: #8db7ff; --today-bg: #172843;
+  --decide: #cfa4ef; --decide-bg: #2a1d38; --later: #b3bac8; --later-bg: #232a37;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 16px/1.55 var(--body); padding-inline: 16px; padding-block: 32px 56px; }
+.wrap { max-width: 920px; margin: 0 auto; display: grid; gap: 40px; }
+h1, h2, h3 { font-family: var(--display); line-height: 1.2; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.8rem, 4vw, 2.5rem); font-weight: 800; color: var(--brand); letter-spacing: -0.01em; }
+h2 { font-size: 1.35rem; font-weight: 700; }
+h3 { font-size: 1.02rem; font-weight: 700; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font-family: var(--display); font-weight: 700; text-transform: uppercase; letter-spacing: .09em; font-size: .74rem; color: var(--accent); }
+.lede { color: var(--muted); font-size: 1.05rem; }
+header { display: grid; gap: 10px; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: .9rem; }
+
+.strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 4px; align-content: start; }
+.tile .n { font-family: var(--display); font-weight: 800; font-size: 2rem; line-height: 1; font-variant-numeric: tabular-nums; }
+.tile .k { font-weight: 600; }
+.tile .s { color: var(--muted); font-size: .88rem; }
+.tile.done .n { color: var(--done); } .tile.today .n { color: var(--today); } .tile.decide .n { color: var(--decide); } .tile.later .n { color: var(--later); }
+
+section { display: grid; gap: 14px; }
+.section-head { display: grid; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: .78rem; font-weight: 600; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
+.chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.chip.done { color: var(--done); background: var(--done-bg); }
+.chip.today { color: var(--today); background: var(--today-bg); }
+.chip.decide { color: var(--decide); background: var(--decide-bg); }
+.chip.later { color: var(--later); background: var(--later-bg); }
+
+.ledger { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.ledger details { border-top: 1px solid var(--line); }
+.ledger details:first-child { border-top: 0; }
+.ledger summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 12px; padding: 14px 16px; flex-wrap: wrap; }
+.ledger summary::-webkit-details-marker { display: none; }
+.ledger summary:focus-visible { outline: 3px solid var(--today); outline-offset: -3px; }
+.ledger summary .title { flex: 1; min-width: 12rem; font-family: var(--display); font-weight: 700; }
+.ledger summary .count { color: var(--muted); font-size: .88rem; font-variant-numeric: tabular-nums; }
+.ledger summary .caret { color: var(--muted); transition: transform .15s; }
+.ledger details[open] summary .caret { transform: rotate(90deg); }
+.reqs { list-style: none; margin: 0; padding: 0 16px 14px; display: grid; gap: 2px; }
+.reqs li { display: grid; grid-template-columns: 4.2rem 1fr; gap: 12px; padding: 6px 0; border-top: 1px dashed var(--line); }
+.reqs li:first-child { border-top: 0; }
+.id { font-family: var(--mono); font-size: .8rem; color: var(--muted); padding-top: 2px; }
+
+.list { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 4px 16px; }
+.list ul { list-style: none; margin: 0; padding: 0; }
+.list li { display: grid; grid-template-columns: 1fr auto; gap: 6px 16px; align-items: start; padding: 12px 0; border-top: 1px solid var(--line); }
+.list li:first-child { border-top: 0; }
+.list li .what { font-weight: 600; }
+.list li .why { grid-column: 1 / -1; color: var(--muted); font-size: .92rem; }
+.table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: .94rem; }
+th, td { text-align: left; padding: 10px 14px; border-top: 1px solid var(--line); vertical-align: top; }
+thead th { border-top: 0; font-family: var(--display); font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.proof { display: grid; gap: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.proof dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
+.proof dt { font-weight: 600; font-variant-numeric: tabular-nums; }
+.proof dd { margin: 0; color: var(--muted); }
+.next { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 12px; }
+.next-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.progress { color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 600; }
+.bar { height: 8px; border-radius: 999px; background: var(--later-bg); overflow: hidden; }
+.bar span { display: block; height: 100%; width: 0; background: var(--done); transition: width .3s; }
+.next-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.next-cols > div { min-width: 0; }
+.next h4 { margin: 0 0 6px; font-family: var(--display); font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.next ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.next li.empty { list-style: none; margin-left: -18px; color: var(--muted); font-size: .92rem; }
+.status-line { color: var(--muted); font-size: .86rem; }
+.group-title { margin-top: 6px; }
+.cards { display: grid; gap: 10px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: grid; gap: 10px; }
+.card.answered { border-color: var(--done); }
+.card .q { font-weight: 600; }
+.card .d { color: var(--muted); font-size: .94rem; }
+.card .d b { color: var(--ink); font-weight: 600; }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.choices button { font: inherit; font-size: .92rem; font-weight: 600; min-height: 44px; padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+.choices button:hover { border-color: var(--muted); }
+.choices button[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: var(--surface); }
+.choices button[aria-pressed="true"]::before { content: "✓ "; }
+.choices button:focus-visible, .note-row button:focus-visible, .note-row textarea:focus-visible { outline: 3px solid var(--today); outline-offset: 2px; }
+.choices button:disabled, .note-row button:disabled { opacity: .55; cursor: not-allowed; }
+.note-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+.note-row label { grid-column: 1 / -1; font-size: .84rem; color: var(--muted); }
+.note-row textarea { font: inherit; font-size: .94rem; min-height: 44px; resize: vertical; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; min-width: 0; }
+.note-row button { font: inherit; font-weight: 600; min-height: 44px; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--brand); background: transparent; color: var(--brand); cursor: pointer; }
+.who { font-size: .84rem; color: var(--muted); display: flex; align-items: center; gap: 6px; min-height: 1.2em; }
+.who img { width: 18px; height: 18px; border-radius: 50%; }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.steps li { display: grid; grid-template-columns: 8.5rem 1fr auto; gap: 6px 16px; align-items: start; padding: 14px 16px; border-top: 1px solid var(--line); }
+.steps li:first-child { border-top: 0; }
+.steps .when { font-family: var(--display); font-weight: 700; font-variant-numeric: tabular-nums; }
+.steps .body { min-width: 0; }
+.steps .what { font-weight: 600; }
+.steps .why { color: var(--muted); font-size: .92rem; }
+@media (max-width: 620px) { .steps li { grid-template-columns: 1fr; } .note-row { grid-template-columns: 1fr; } }
+footer { color: var(--muted); font-size: .86rem; }
+@media (max-width: 520px) { .proof dl { grid-template-columns: 1fr; } .proof dd { margin-bottom: 6px; } .list li { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">ELITE Spaces · Build status against the PRD</div>
+    <h1>ELITE Spaces v1: what's built and what's left</h1>
+    <p class="lede">Measured against the ELITE Spaces App PRD (v1, Oct 6, 2026). Every requirement in the PRD is built into a working prototype that runs end to end with demo locations, families and staff.</p>
+    <div class="meta"><span>Status as of Wed, Oct 14, 2026, 10:00 AM</span><span>Prototype runs locally; not yet hosted for a pilot</span></div>
+  </header>
+
+  <div class="strip" aria-label="Summary">
+    <div class="tile done"><span class="n">44 / 44</span><span class="k">PRD requirements built</span><span class="s">All 7 modules plus users and roles, each with automated tests</span></div>
+    <div class="tile today"><span class="n">5</span><span class="k">Fixes finishing today</span><span class="s">Found during hands-on walkthroughs; being re-checked in a browser</span></div>
+    <div class="tile decide"><span class="n">15</span><span class="k">Decisions for ELITE</span><span class="s">9 open PRD questions answered with defaults, plus 6 ideas beyond the PRD</span></div>
+    <div class="tile later"><span class="n">Oct 21</span><span class="k">Testable by staff</span><span class="s">Secure web address, real phone notifications, then an internal test at one location</span></div>
+  </div>
+
+  <section>
+    <div class="section-head">
+      <h2>Built: every PRD requirement</h2>
+      <p class="lede">Open a section to see each requirement by its PRD number.</p>
+    </div>
+    <div class="ledger">
+      <details>
+        <summary><span class="title">1. Check-in and check-out</span><span class="count">7 of 7</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <ul class="reqs">
+          <li><span class="id">CI-1</span><span>Entrance QR code per location that changes every day at a set time; yesterday's code is refused. Staff get a full-screen "today's code" display.</span></li>
+          <li><span class="id">CI-2</span><span>Students scan with their own phone; scans from outside the building's radius are refused.</span></li>
+          <li><span class="id">CI-3</span><span>Each check-in is tied to the student's enrolled session; no session now means a clear message and no check-in.</span></li>
+          <li><span class="id">CI-4</span><span>The same code checks them out; a quick second scan asks before acting.</span></li>
+          <li><span class="id">CI-5</span><span>Automatic check-out at session end or closing time, whichever comes first, flagged for staff review.</span></li>
+          <li><span class="id">CI-6</span><span>Parents are notified at every check-in and check-out, with automatic ones labeled.</span></li>
+          <li><span class="id">CI-7</span><span>Live "In the building" list; staff check students in or out by hand, logged with their name and reason.</span></li>
+        </ul>
+      </details>
+      <details>
+        <summary><span class="title">2. Sessions and scheduling</span><span class="count">4 of 4</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <ul class="reqs">
+          <li><span class="id">SC-1</span><span>Directors create 2–3 hour study blocks on set days and times.</span></li>
+          <li><span class="id">SC-2</span><span>Capacity per session; no seat assignment.</span></li>
+          <li><span class="id">SC-3</span><span>Terms and holiday closures; closures cancel those days and notify enrolled families.</span></li>
+          <li><span class="id">SC-4</span><span>Editing or cancelling a session notifies enrolled families automatically.</span></li>
+        </ul>
+      </details>
+      <details>
+        <summary><span class="title">3. Enrollment and waitlists</span><span class="count">7 of 7</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <ul class="reqs">
+          <li><span class="id">EN-1</span><span>Recurring weekly enrollment for the rest of the term.</span></li>
+          <li><span class="id">EN-2</span><span>Parents enroll their students directly.</span></li>
+          <li><span class="id">EN-3</span><span>Students request a session; a parent approves or declines and the student is told.</span></li>
+          <li><span class="id">EN-4</span><span>Blocked when the membership is inactive, expired, or at its weekly cap.</span></li>
+          <li><span class="id">EN-5</span><span>Waitlist with automatic enrollment of the first eligible family when a seat opens.</span></li>
+          <li><span class="id">EN-6</span><span>Parents can drop anytime, which frees the seat for the waitlist.</span></li>
+          <li><span class="id">EN-7</span><span>No penalties; missed sessions simply show as absent.</span></li>
+        </ul>
+      </details>
+      <details>
+        <summary><span class="title">4. Membership status</span><span class="count">5 of 5</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <ul class="reqs">
+          <li><span class="id">MB-1</span><span>Status, weekly session cap, start date and expiration date per student.</span></li>
+          <li><span class="id">MB-2</span><span>Staff enter and update memberships by hand; no payment data is stored.</span></li>
+          <li><span class="id">MB-3</span><span>Parents and students see status, cap and expiration.</span></li>
+          <li><span class="id">MB-4</span><span>Reminders 14 and 3 days before expiration.</span></li>
+          <li><span class="id">MB-5</span><span>On expiration, enrollments pause rather than disappear, and come back on renewal.</span></li>
+        </ul>
+      </details>
+      <details>
+        <summary><span class="title">5. Announcements and emergency alerts</span><span class="count">6 of 6</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <ul class="reqs">
+          <li><span class="id">AN-1</span><span>Directors post to their location: events, workshops, holidays, session offerings, news.</span></li>
+          <li><span class="id">AN-2</span><span>HQ posts to all locations or a chosen set.</span></li>
+          <li><span class="id">AN-3</span><span>Notifications plus an in-app feed; posts can be scheduled ahead.</span></li>
+          <li><span class="id">AN-4</span><span>Audience: all families, parents only, students only, or one session's families.</span></li>
+          <li><span class="id">AN-5</span><span>Emergency alerts: visually distinct, cannot be muted, reach everyone at the location.</span></li>
+          <li><span class="id">AN-6</span><span>Senders see delivered and read counts.</span></li>
+        </ul>
+      </details>
+      <details>
+        <summary><span class="title">6. Daily notes</span><span class="count">5 of 5</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <ul class="reqs">
+          <li><span class="id">DN-1</span><span>A short note for each student who attended that day.</span></li>
+          <li><span class="id">DN-2</span><span>The same four-item checklist at every location on a 3-point scale; HQ can edit the items.</span></li>
+          <li><span class="id">DN-3</span><span>Optional comment.</span></li>
+          <li><span class="id">DN-4</span><span>Written straight from the day's attendance list, ratings blank until set.</span></li>
+          <li><span class="id">DN-5</span><span>Parents are notified and can browse past notes by date; students don't see notes in v1.</span></li>
+        </ul>
+      </details>
+      <details>
+        <summary><span class="title">7. Attendance and hours export</span><span class="count">4 of 4</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <ul class="reqs">
+          <li><span class="id">AT-1</span><span>Every visit records in, out, total time, session and how check-out happened.</span></li>
+          <li><span class="id">AT-2</span><span>Parents view history by week, month or term.</span></li>
+          <li><span class="id">AT-3</span><span>Parents export an attendance and hours log as PDF or CSV for any date range.</span></li>
+          <li><span class="id">AT-4</span><span>Directors and HQ view and export reports by location, session and date range.</span></li>
+        </ul>
+      </details>
+      <details>
+        <summary><span class="title">Users and roles</span><span class="count">6 of 6</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <ul class="reqs">
+          <li><span class="id">Roles</span><span>Student, parent, location staff, branch director and HQ admin, each scoped to the right location.</span></li>
+          <li><span class="id">Family</span><span>A parent creates the family, invites each student by email or phone, and approves the link before the student can sign in.</span></li>
+          <li><span class="id">Guardian</span><span>A second guardian can be invited and sees the same records.</span></li>
+          <li><span class="id">Staff</span><span>Directors manage staff accounts at their location.</span></li>
+          <li><span class="id">HQ</span><span>HQ creates locations and assigns directors.</span></li>
+          <li><span class="id">Access</span><span>Families see only their own data; staff only their location; HQ everything.</span></li>
+        </ul>
+      </details>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Platform, privacy and reliability</h2>
+      <p class="lede">The PRD's non-functional requirements.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th scope="col">PRD requirement</th><th scope="col">Status</th><th scope="col">Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Check-in scan under 2 seconds</td><td><span class="chip done">Built and tested</span></td><td>Measured well under 1 second locally.</td></tr>
+          <tr><td>No double-booking when two families take the last seat at once</td><td><span class="chip done">Built and tested</span></td><td>Tested with simultaneous requests.</td></tr>
+          <tr><td>Each location on its own time zone</td><td><span class="chip done">Built and tested</span></td><td>Demo includes a Toronto location alongside California.</td></tr>
+          <tr><td>Families see only their own data; staff only their location</td><td><span class="chip done">Built and tested</span></td><td>Checked on every screen's data.</td></tr>
+          <tr><td>Location checked only at the moment of a scan, never stored</td><td><span class="chip done">Built and tested</span></td><td>Coordinates are discarded after the radius check.</td></tr>
+          <tr><td>All staff edits logged</td><td><span class="chip done">Built and tested</span></td><td>Manual check-ins, membership changes and corrections.</td></tr>
+          <tr><td>Mobile-first, installable web app; desktop layout for staff</td><td><span class="chip done">Built</span></td><td>Walked through as every role on phone and desktop sizes.</td></tr>
+          <tr><td>WCAG 2.1 AA</td><td><span class="chip today">Mostly done</span></td><td>Labels, contrast and target sizes in place; a few keyboard-focus refinements remain.</td></tr>
+          <tr><td>Push notifications, incl. iOS Add to Home Screen walkthrough</td><td><span class="chip later">Before pilot</span></td><td>The prototype delivers to an in-app inbox and live alerts; real push needs hosting.</td></tr>
+          <tr><td>Data encrypted in transit and at rest</td><td><span class="chip later">Before pilot</span></td><td>Comes with hosting.</td></tr>
+          <tr><td>Legal privacy review (COPPA, FERPA, Canadian law)</td><td><span class="chip later">Before pilot</span></td><td>ELITE's legal team.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Finishing today</h2>
+      <p class="lede">Fixes found by walking through the app as each role. Each one is re-checked in a real browser before it counts.</p>
+    </div>
+    <div class="list"><ul>
+      <li><span class="what">Invites can't claim an email reserved by another family's open invite</span><span class="chip today">In progress</span></li>
+      <li><span class="what">A guardian invite can't go to someone already in the family</span><span class="chip today">In progress</span></li>
+      <li><span class="what">"I have read this" on an emergency alert marks exactly that alert, and the unread count updates right away</span><span class="chip today">In progress</span></li>
+      <li><span class="what">Confirming an automatic check-out time keeps it recorded as automatic</span><span class="chip today">In progress</span></li>
+      <li><span class="what">HQ all-locations report names the location on every row and heading</span><span class="chip today">In progress</span></li>
+    </ul></div>
+  </section>
+
+  <section id="decisions">
+    <div class="section-head">
+      <h2>Decisions for ELITE</h2>
+      <p class="lede">Pick an answer for each one. Answers save for everyone who opens this page, and the list below turns them into next steps.</p>
+    </div>
+    <div class="next" id="next" aria-live="polite">
+      <div class="next-head"><h3>What the answers add up to</h3><span class="progress" id="progress">0 of 15 answered</span></div>
+      <div class="bar" aria-hidden="true"><span id="bar-fill"></span></div>
+      <div class="next-cols">
+        <div><h4>Changes to make</h4><ul id="next-change"><li class="empty">Nothing yet. Choose "Change it" on a question below.</li></ul></div>
+        <div><h4>Add before the pilot</h4><ul id="next-build"><li class="empty">Nothing yet. Choose "Add for pilot" on an idea below.</li></ul></div>
+      </div>
+      <p class="status-line" id="db-status">Loading saved answers…</p>
+    </div>
+    <h3 class="group-title">Open questions from the PRD</h3>
+    <div class="cards" id="cards-q"></div>
+    <h3 class="group-title">Ideas beyond the PRD</h3>
+    <div class="cards" id="cards-i"></div>
+  </section>
+
+  <section id="timeline">
+    <div class="section-head">
+      <h2>Road to a testable build next week</h2>
+      <p class="lede">Goal: staff at one location can test it on their own phones by Wednesday, Oct 21. That is step 1 of the PRD's rollout: an internal test with staff acting as families.</p>
+    </div>
+    <ol class="steps">
+      <li><div class="when">Wed, Oct 14</div><div class="body"><div class="what">Finish today's 5 fixes and answer the decisions on this page</div><div class="why">Fixes are being re-checked now. Answers here decide what changes before testing.</div></div><span class="chip today">Today</span></li>
+      <li><div class="when">Thu, Oct 15</div><div class="body"><div class="what">Put it on a secure web address</div><div class="why">Phones need a secure (https) address for the camera, location check and notifications. Needs a hosting choice and account.</div></div><span class="chip decide">Needs ELITE</span></li>
+      <li><div class="when">Thu–Fri, Oct 15–16</div><div class="body"><div class="what">Turn on real phone notifications, with the iPhone "Add to Home Screen" walkthrough</div><div class="why">Today notifications show inside the app. Real push needs the secure address first.</div></div><span class="chip later">Build</span></li>
+      <li><div class="when">Fri, Oct 16</div><div class="body"><div class="what">Finish the remaining polish and any "Change it" answers</div><div class="why">Keyboard focus, very small phones and minor wording, plus whatever the decisions above ask for.</div></div><span class="chip later">Build</span></li>
+      <li><div class="when">Mon, Oct 19</div><div class="body"><div class="what">Set up the test location, its sessions and staff accounts</div><div class="why">Needs the location's address, hours, session times and the testers' names and emails.</div></div><span class="chip decide">Needs ELITE</span></li>
+      <li><div class="when">Tue, Oct 20</div><div class="body"><div class="what">Print the entrance QR display and hand testers a one-page guide</div><div class="why">One sheet per role: what to tap and what to check.</div></div><span class="chip later">Build</span></li>
+      <li><div class="when">Wed, Oct 21</div><div class="body"><div class="what">Internal test at one location, staff acting as families</div><div class="why">Fixes from the test follow the same build-and-check process.</div></div><span class="chip done">Testable</span></li>
+    </ol>
+    <div class="list"><ul>
+      <li><span class="what">Not needed for this internal test</span><span class="why">The legal privacy review (COPPA, FERPA, Canadian law) and real families' data come before the soft launch with real families, the PRD's step 2.</span></li>
+    </ul></div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>How it was checked</h2>
+    </div>
+    <div class="proof">
+      <dl>
+        <dt>303 automated tests</dt><dd>Cover every PRD requirement, each tagged with its PRD number; all pass.</dd>
+        <dt>662 deliberate breaks</dt><dd>The code was broken on purpose 662 different ways to prove the tests notice; every one was caught.</dd>
+        <dt>8 hands-on walkthroughs</dt><dd>Reviewers used the app as student, parent, staff, director and HQ on phone and desktop sizes; 53 issues found and fixed.</dd>
+        <dt>Independent reviewers</dt><dd>Each part was checked by a reviewer who didn't build it, against the PRD and a leading childcare app as the quality bar.</dd>
+      </dl>
+    </div>
+  </section>
+
+  <footer>Source: ELITE Spaces App PRD (v1), Oct 6, 2026. Prototype built Oct 13–14, 2026.</footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var DECISIONS = [
+    { id: "q-locations", g: "q", q: "Can a student enroll at more than one location?", d: "Home location only.", c: ["keep", "change"], change: "Allow students to enroll at more than one location" },
+    { id: "q-notes", g: "q", q: "Should students see their own daily notes?", d: "Parent-only.", c: ["keep", "change"], change: "Let students see their own daily notes" },
+    { id: "q-cap", g: "q", q: "When does the weekly cap reset, and how do holidays count?", d: "The cap limits how many weekly sessions a student holds, so holidays don't affect it.", c: ["keep", "change"], change: "Change how the weekly session cap is counted" },
+    { id: "q-capacity", g: "q", q: "Can staff add capacity for one busy day?", d: "Not in v1. Directors can raise a session's capacity for every week.", c: ["keep", "change"], change: "Let staff add extra seats for a single day" },
+    { id: "q-qr", g: "q", q: "Who sets the QR change time and building radius?", d: "Each director for their location (HQ for any). Defaults: 4:00 AM and 150 m.", c: ["keep", "change"], change: "Change who sets the QR time and building radius" },
+    { id: "q-canada", g: "q", q: "Do Canadian locations need anything different?", d: "Same rules, English only. Quebec French flagged for legal review.", c: ["keep", "change"], change: "Add Canada-specific rules or French" },
+    { id: "q-build", g: "q", q: "Build approach for the pilot?", d: "In-house prototype, built and running.", c: ["keep", "change"], change: "Revisit the build approach for the pilot" },
+    { id: "q-checklist", g: "q", q: "Daily note checklist and scale wording", d: "The four PRD items, rated Needs work / Good / Great.", c: ["keep", "change"], change: "Change the note checklist or rating words" },
+    { id: "q-metrics", g: "q", q: "Pilot success metric targets", d: "Kept as written in the PRD: 90%+ check-ins by QR, under 10% automatic check-outs, 80%+ families enrolling on their own, 90%+ notes posted the same day, 12 of 12 locations.", c: ["keep", "change"], change: "Adjust the pilot metric targets" },
+    { id: "i-feed", g: "i", q: "A single activity feed on the parent Home screen, filterable by child", d: "Parents see each child's status, notes and news as separate cards.", c: ["pilot", "later", "no"] },
+    { id: "i-endalert", g: "i", q: "Let a director end an emergency alert early", d: "Alerts stay pinned for 24 hours, even after an all-clear.", c: ["pilot", "later", "no"] },
+    { id: "i-missed", g: "i", q: "Tell parents when a session is missed entirely", d: "Missed sessions show as absent, without a notification.", c: ["pilot", "later", "no"] },
+    { id: "i-call", g: "i", q: "A phone number or call button on announcements", d: "Announcements are one-way.", c: ["pilot", "later", "no"] },
+    { id: "i-audit", g: "i", q: "Include the staff edit log in attendance exports", d: "Staff edits are logged but not included in exports.", c: ["pilot", "later", "no"] },
+    { id: "i-notify", g: "i", q: "More notification settings for families", d: "Families can mute routine announcements; emergencies always come through.", c: ["pilot", "later", "no"] }
+  ];
+  var LABEL = { keep: "Keep the default", change: "Change it", pilot: "Add for pilot", later: "Later (v2)", no: "Don't build" };
+  var answers = {};
+  var db = null, user = null, canWrite = true, saving = {};
+
+  function el(tag, attrs, text) {
+    var n = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function fmt(ms) {
+    try { return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(ms); } catch (e) { return ""; }
+  }
+  function status(t) { document.getElementById("db-status").textContent = t; }
+
+  function buildCards() {
+    DECISIONS.forEach(function (x) {
+      var card = el("article", { class: "card", id: "card-" + x.id, "aria-labelledby": "q-" + x.id });
+      card.appendChild(el("div", { class: "q", id: "q-" + x.id }, x.q));
+      var d = el("div", { class: "d" });
+      d.appendChild(el("b", null, x.g === "q" ? "Default: " : "Today: "));
+      d.appendChild(document.createTextNode(x.d));
+      card.appendChild(d);
+      var row = el("div", { class: "choices", role: "group", "aria-label": "Answer for: " + x.q });
+      x.c.forEach(function (c) {
+        var b = el("button", { type: "button", "data-choice": c, "aria-pressed": "false" }, LABEL[c]);
+        b.addEventListener("click", function () { save(x.id, { choice: c }); });
+        row.appendChild(b);
+      });
+      card.appendChild(row);
+      var nr = el("div", { class: "note-row" });
+      var lab = el("label", { for: "note-" + x.id }, x.g === "q" ? "Note (what it should be instead, or why)" : "Note (optional)");
+      var ta = el("textarea", { id: "note-" + x.id, rows: "1" });
+      var sb = el("button", { type: "button" }, "Save note");
+      sb.addEventListener("click", function () { save(x.id, { note: ta.value.trim() }); });
+      nr.appendChild(lab); nr.appendChild(ta); nr.appendChild(sb);
+      card.appendChild(nr);
+      card.appendChild(el("div", { class: "who", id: "who-" + x.id }));
+      document.getElementById(x.g === "q" ? "cards-q" : "cards-i").appendChild(card);
+    });
+  }
+
+  async function render() {
+    var ids = [];
+    DECISIONS.forEach(function (x) { var a = answers[x.id]; if (a && a.by) ids.push(a.by); });
+    var ps = {};
+    if (user && ids.length) { try { ps = await user.profiles(ids); } catch (e) { ps = {}; } }
+    var answered = 0, change = [], build = [];
+    DECISIONS.forEach(function (x) {
+      var a = answers[x.id] || {};
+      var card = document.getElementById("card-" + x.id);
+      card.classList.toggle("answered", !!a.choice);
+      card.querySelectorAll(".choices button").forEach(function (b) {
+        b.setAttribute("aria-pressed", String(b.getAttribute("data-choice") === a.choice));
+        b.disabled = !canWrite || !!saving[x.id];
+      });
+      var ta = document.getElementById("note-" + x.id);
+      if (document.activeElement !== ta) ta.value = a.note || "";
+      ta.disabled = !canWrite;
+      card.querySelector(".note-row button").disabled = !canWrite || !!saving[x.id];
+      var who = document.getElementById("who-" + x.id);
+      who.replaceChildren();
+      if (a.choice) {
+        answered++;
+        var p = a.by && ps[a.by];
+        if (p && p.avatarUrl) { var img = el("img", { alt: "" }); img.src = p.avatarUrl; who.appendChild(img); }
+        who.appendChild(document.createTextNode(LABEL[a.choice] + " · " + ((p && p.name) || "Someone") + (a.at ? " · " + fmt(a.at) : "")));
+      }
+      if (a.choice === "change") change.push((x.change || x.q) + (a.note ? ": " + a.note : ""));
+      if (a.choice === "pilot") build.push(x.q + (a.note ? ": " + a.note : ""));
+    });
+    document.getElementById("progress").textContent = answered + " of " + DECISIONS.length + " answered";
+    document.getElementById("bar-fill").style.width = Math.round(answered / DECISIONS.length * 100) + "%";
+    fill("next-change", change, 'Nothing yet. Choose "Change it" on a question below.');
+    fill("next-build", build, 'Nothing yet. Choose "Add for pilot" on an idea below.');
+  }
+  function fill(id, items, empty) {
+    var ul = document.getElementById(id);
+    ul.replaceChildren();
+    if (!items.length) { ul.appendChild(el("li", { class: "empty" }, empty)); return; }
+    items.forEach(function (t) { ul.appendChild(el("li", null, t)); });
+  }
+
+  async function save(id, patch) {
+    if (!db || !canWrite || saving[id]) return;
+    var prev = answers[id] || {};
+    var next = { choice: prev.choice || null, note: prev.note || "", by: prev.by || null, at: prev.at || null };
+    Object.keys(patch).forEach(function (k) { next[k] = patch[k]; });
+    try { next.by = (user && await user.id()) || next.by; } catch (e) {}
+    next.at = Date.now();
+    saving[id] = true;
+    answers[id] = next;
+    render();
+    try {
+      await db.doc("answers/" + id).set(next);
+      status("Saved.");
+    } catch (e) {
+      answers[id] = prev;
+      if (e && e.code === "invalid_argument") { canWrite = false; status("You can see these answers but not change them."); }
+      else status("Couldn't save that answer. Try again in a moment.");
+    } finally {
+      saving[id] = false;
+      render();
+    }
+  }
+
+  buildCards();
+  render();
+
+  (async function connect() {
+    if (!window.claude || !window.claude.use) { canWrite = false; status("Open this page on claude.ai to see and save answers."); render(); return; }
+    var got = await Promise.all([window.claude.use("db"), window.claude.use("user")]);
+    db = got[0]; user = got[1];
+    if (!db) { canWrite = false; status("Sign in on claude.ai to see and save answers."); render(); return; }
+    try { var w = user ? await user.can("data.write") : null; if (w === false) canWrite = false; } catch (e) {}
+    status(canWrite ? "Answers save as soon as you pick them." : "You can see these answers but not change them.");
+    db.collection("answers").onSnapshot(function (snap) {
+      var fresh = {};
+      snap.docs.forEach(function (doc) { if (doc.exists) fresh[doc.id] = doc.data(); });
+      Object.keys(saving).forEach(function (k) { if (saving[k] && answers[k]) fresh[k] = answers[k]; });
+      answers = fresh;
+      render();
+    }, function () { status("Live updates stopped. Reload the page to see the latest answers."); });
+  })();
+})();
+</script>
