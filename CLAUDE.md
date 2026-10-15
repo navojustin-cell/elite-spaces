@@ -10,12 +10,14 @@ Built with the gauntlet loop: builder versus a fresh critic, against a hard benc
 ## Run it
 ```
 npm install
-npm run seed      # demo data; every password is demo1234
-npm start         # http://localhost:3000 (PORT env to change); dev mode on by default
+npm run seed            # demo data; every password is demo1234
+ELITE_DEV=1 npm start   # demo mode, http://localhost:3000 (PORT env to change)
+                        # Windows PowerShell: $env:ELITE_DEV=1; npm start
+npm start               # dev mode OFF: no demo sign-in, clock control or /api/dev endpoints
 ```
-Dev mode adds a purple bar for setting the clock and running scheduled jobs, plus one-tap
-demo sign-in on the sign-in screen. The sign-in cookie is named per port (`sid_<PORT>`), so
-several local servers in one browser don't sign each other out.
+Dev mode is off unless `ELITE_DEV=1` is set explicitly. It adds a purple bar for setting the
+clock and running scheduled jobs, plus one-tap demo sign-in on the sign-in screen.
+The sign-in cookie is named per port (`sid_<PORT>`), so several local servers in one browser don't sign each other out.
 
 ## The benchmark (the gauntlet's pass condition)
 ```

@@ -16,7 +16,7 @@ const { DateTime } = require('luxon');
 const { tx } = require('../../db');
 const auth = require('../../auth');
 const audit = require('../../audit');
-const { bad, notFound } = require('../../errors');
+const { bad, notFound, conflict } = require('../../errors');
 const svc = require('./service');
 
 const FIELDS = ['status', 'weekly_cap', 'start_date', 'expires_on'];
@@ -119,6 +119,15 @@ module.exports = {
       const result = tx(db, () => {
         const before = membershipOf(ctx, student.id);
         const changed = !before || FIELDS.some(k => before[k] !== input[k]);
+        const today = svc.todayAt(ctx, svc.studentLocation(ctx, student.id));
+        // R1 / D-3: the weekly cap is a hard cap, so it can't be lowered below the
+        // weekly slots the student holds while those slots stay active.
+        const held = svc.heldSlots(ctx, student.id, today);
+        if (svc.isValid(input, today) && input.weekly_cap < held && (!before || input.weekly_cap < before.weekly_cap)) {
+          const first = String(student.name).split(' ')[0];
+          throw conflict('weekly_cap_below_held', `${first} holds ${held} weekly session${held === 1 ? '' : 's'}, so the weekly limit can't go below ${held}. ` +
+            'A parent can drop sessions on Schedule first, then you can lower the limit.');
+        }
         if (changed) {
           db.prepare(`INSERT INTO memberships (student_id, status, weekly_cap, start_date, expires_on, updated_by, updated_at)
             VALUES (?,?,?,?,?,?,?) ON CONFLICT(student_id) DO UPDATE SET status = excluded.status, weekly_cap = excluded.weekly_cap,
@@ -134,7 +143,6 @@ module.exports = {
         }
         // MB-5 / D-16: no longer valid -> pause; valid again -> restore or front of the waitlist,
         // up to the weekly cap (D-3); slots over the cap stay paused.
-        const today = svc.todayAt(ctx, svc.studentLocation(ctx, student.id));
         let paused = 0, restored = { back: [], waitlisted: [], kept: [] };
         if (svc.isValid(after, today)) {
           restored = svc.restore(ctx, after, today, req.user.id);

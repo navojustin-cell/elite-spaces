@@ -86,6 +86,12 @@ function startSession(ctx, res, userId) {
   return token;
 }
 
+// Signs `userId` out of every session except `keepToken` (R10: changing a
+// password signs out the account's other devices; the current one stays).
+function endOtherSessions(ctx, userId, keepToken) {
+  for (const [token, uid] of ctx.sessions) if (uid === userId && token !== keepToken) ctx.sessions.delete(token);
+}
+
 function parseCookies(h) {
   const out = {};
   for (const part of String(h || '').split(';')) {
@@ -123,6 +129,6 @@ function requireRole(...roles) {
 
 module.exports = {
   OPS_RANK, hashPassword, verifyPassword, atLeast, getUser, studentLinked, linkedStudentIds,
-  canManageLocation, canSeeStudent, assertSeeStudent, assertManageLocation, login, startSession, sessionToken,
+  canManageLocation, canSeeStudent, assertSeeStudent, assertManageLocation, login, startSession, endOtherSessions, sessionToken,
   attachUser, requireRole,
 };

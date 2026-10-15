@@ -6,6 +6,8 @@
 const { DateTime } = require('luxon');
 const time = require('../../time');
 const { bad, notFound } = require('../../errors');
+// R8: the times a session had on each date (the sessions module's read-only helper).
+const sessionTimes = require('../sessions/times');
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const isIsoDate = s => ISO_DATE.test(String(s || '')) && DateTime.fromISO(s).isValid;
@@ -127,26 +129,40 @@ function shapeVisit(v) {
 // and, unless it is still open, ended after the start.
 const overlaps = (v, start, end) => v.check_in_at < end && (v.check_out_at == null || v.check_out_at > start);
 
-// Does a visit with no session (a staff override check-in) at the session's
-// location cover one of its occurrences? The rule absences() uses for attended
-// (EN-7): a date inside its term, on one of its weekdays, not a closure, and
-// overlapping its hours.
+// Does a visit at the session's location that isn't its own cover one of its
+// occurrences? The rule absences() uses for attended (EN-7, R2): a date inside its
+// term, on one of its weekdays, not a closure, and overlapping the hours it had
+// that day (R8). A visit with no session (a staff override check-in) covers it for
+// anyone; a visit for another session only for a student enrolled in that day's
+// slot at the time: made before that occurrence ended and not ended before it
+// began (back-to-back sessions are one visit, R2).
 function coversSession(ctx, sess) {
   const zone = { timezone: sess.timezone };
   const days = sess.weekdays.split(',').map(Number);
   const closed = new Set(ctx.db.prepare('SELECT date FROM closures WHERE location_id = ?').all(sess.location_id).map(c => c.date));
+  const hist = sessionTimes.history(ctx);
+  const held = new Map(); // student id|weekday -> their enrollments in that slot
+  for (const e of ctx.db.prepare('SELECT student_id, weekday, created_at, ended_at FROM enrollments WHERE session_id = ?').all(sess.id)) {
+    const k = e.student_id + '|' + e.weekday;
+    if (!held.has(k)) held.set(k, []);
+    held.get(k).push(e);
+  }
+  const enrolledFor = (v, wd, start, end) => (held.get(v.student_id + '|' + wd) || [])
+    .some(e => e.created_at < end && (e.ended_at == null || e.ended_at > start));
   return v => {
-    const d = v.local_date;
+    const d = v.local_date, wd = time.weekdayOfDate(d);
     if (d < sess.term_start || d > sess.term_end) return false; // outside its term
-    if (!days.includes(time.weekdayOfDate(d))) return false; // not one of its days
+    if (!days.includes(wd)) return false; // not one of its days
     if (closed.has(d)) return false; // a closure cancels the day (SC-3)
-    const start = time.toMs(zone, d, sess.start_time), end = time.toMs(zone, d, sess.end_time);
+    const hours = sessionTimes.timesOn(hist, sess.id, d, sess);
+    const start = time.toMs(zone, d, hours.start_time), end = time.toMs(zone, d, hours.end_time);
+    if (v.session_id != null && !enrolledFor(v, wd, start, end)) return false; // another session's visit, not enrolled here then
     return overlaps(v, start, end);
   };
 }
 
 // Visits matching the filters, oldest first. Filtered to one session, that is
-// the session's own visits plus the session-less ones that cover it (AT-4).
+// the session's own visits plus the other visits at its location that cover it (AT-4, R2).
 function visits(ctx, { studentId = null, locationId = null, sessionId = null, from, to }) {
   const where = ['v.local_date BETWEEN ? AND ?'], args = [from, to];
   if (studentId != null) { where.push('v.student_id = ?'); args.push(studentId); }
@@ -155,7 +171,7 @@ function visits(ctx, { studentId = null, locationId = null, sessionId = null, fr
   if (sessionId != null) {
     const sess = ctx.db.prepare(`SELECT s.*, t.start_date AS term_start, t.end_date AS term_end, l.timezone
       FROM sessions s JOIN terms t ON t.id = s.term_id JOIN locations l ON l.id = s.location_id WHERE s.id = ?`).get(sessionId);
-    where.push('(v.session_id = ? OR (v.session_id IS NULL AND v.location_id = ?))'); args.push(sess.id, sess.location_id);
+    where.push('(v.session_id = ? OR v.location_id = ?)'); args.push(sess.id, sess.location_id);
     covers = coversSession(ctx, sess);
   }
   return ctx.db.prepare(`SELECT v.*, s.name AS session_name, u.name AS student_name, l.name AS location_name, l.timezone,
@@ -164,7 +180,7 @@ function visits(ctx, { studentId = null, locationId = null, sessionId = null, fr
     LEFT JOIN sessions s ON s.id = v.session_id
     LEFT JOIN users cin ON cin.id = v.checked_in_by LEFT JOIN users cout ON cout.id = v.checked_out_by
     WHERE ${where.join(' AND ')} ORDER BY v.local_date, v.check_in_at, v.id`).all(...args)
-    .filter(v => !covers || v.session_id != null || covers(v)).map(shapeVisit);
+    .filter(v => !covers || v.session_id === Number(sessionId) || covers(v)).map(shapeVisit);
 }
 
 // D-16 / MB-5: while a membership isn't valid its slots are paused, and a paused
@@ -216,7 +232,8 @@ function pausedAt(log, t) {
 // and never while the membership wasn't valid (a paused stretch it came back
 // from). A pause is judged at each occurrence's start, so one already under way
 // when the slot was paused is still owed. One whose session was cancelled with
-// no end time recorded adds none.
+// no end time recorded adds none. Each date is judged by the hours the session
+// had that day (R8).
 function absences(ctx, { studentId = null, locationId = null, sessionId = null, from, to }) {
   const where = ['t.end_date >= ? AND t.start_date <= ?'], args = [from, to];
   if (studentId != null) { where.push('e.student_id = ?'); args.push(studentId); }
@@ -246,11 +263,12 @@ function absences(ctx, { studentId = null, locationId = null, sessionId = null, 
     if (!dayVisits.has(k)) dayVisits.set(k, []);
     dayVisits.get(k).push(v);
   }
-  // Attended, as the enrollment schedule counts it (EN-7): a visit that day at that
-  // location for this session, or one with no session (a staff override check-in)
-  // whose time overlaps the session's.
+  // Attended (EN-7, R2): a visit that day at that location for this session, or
+  // any other visit there whose time overlaps the session's: a staff check-in with
+  // no session, or one visit that runs on through back-to-back sessions.
   const attended = (e, d, start, end) => (dayVisits.get(e.student_id + '|' + d) || []).some(v => v.location_id === e.location_id
-    && (v.session_id === e.session_id || (v.session_id == null && overlaps(v, start, end))));
+    && (v.session_id === e.session_id || overlaps(v, start, end)));
+  const hist = sessionTimes.history(ctx); // R8: each date keeps the session times it had
 
   const now = ctx.clock.now();
   const stretches = new Map(); // student id -> when their membership wasn't valid
@@ -270,7 +288,8 @@ function absences(ctx, { studentId = null, locationId = null, sessionId = null, 
     while (d <= hi && time.weekdayOfDate(d) !== e.weekday) d = time.addDays(d, 1);
     for (; d <= hi; d = time.addDays(d, 7)) {
       if (closed.has(e.location_id + '|' + d)) continue; // closure (SC-3)
-      const start = time.toMs(zone, d, e.start_time), end = time.toMs(zone, d, e.end_time);
+      const hours = sessionTimes.timesOn(hist, e.session_id, d, e);
+      const start = time.toMs(zone, d, hours.start_time), end = time.toMs(zone, d, hours.end_time);
       if (start < e.created_at) continue; // before they enrolled
       if (end > now) continue; // not over yet
       // Each week is judged by the slot's state when it began, as the enrollment
@@ -282,7 +301,7 @@ function absences(ctx, { studentId = null, locationId = null, sessionId = null, 
       if (attended(e, d, start, end)) continue;
       out.push({
         date: d, student_id: e.student_id, student_name: e.student_name, session_id: e.session_id,
-        session_name: e.session_name, start_time: e.start_time, end_time: e.end_time,
+        session_name: e.session_name, start_time: hours.start_time, end_time: hours.end_time,
         location_id: e.location_id, location_name: e.location_name, timezone: e.timezone,
       });
     }

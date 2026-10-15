@@ -1,6 +1,7 @@
 'use strict';
 // Sessions mutations: each breaks one scheduling rule; sessions.test.js must catch it.
 const F = 'src/modules/sessions/index.js';
+const V = 'public/js/views/sessions.js';
 module.exports = [
   // ---- SC-1: 2-3 hour blocks on set days ----
   { name: 'allow sessions shorter than 2 hours', covers: ['SC-1'], file: F,
@@ -20,10 +21,13 @@ module.exports = [
   { name: 'allow a capacity of 0', covers: ['SC-2'], file: F,
     find: 'capacity < 1 ||', repl: 'capacity < 0 ||' },
   { name: 'count capacity per session instead of per weekly day', covers: ['SC-2'], file: F,
-    find: "\"SELECT weekday, COUNT(*) AS n FROM enrollments WHERE session_id = ? AND status = 'active' GROUP BY weekday\"",
-    repl: "\"SELECT weekday, (SELECT COUNT(*) FROM enrollments x WHERE x.session_id = enrollments.session_id AND x.status = 'active') AS n FROM enrollments WHERE session_id = ? AND status = 'active' GROUP BY weekday\"" },
+    find: "\"SELECT weekday, status, COUNT(*) AS n FROM enrollments WHERE session_id = ? AND status IN ('active','paused') GROUP BY weekday, status\"",
+    repl: "\"SELECT weekday, status, (SELECT COUNT(*) FROM enrollments x WHERE x.session_id = enrollments.session_id AND x.status = enrollments.status) AS n FROM enrollments WHERE session_id = ? AND status IN ('active','paused') GROUP BY weekday, status\"" },
   { name: 'count paused students as holding a seat', covers: ['SC-2'], file: F,
-    find: "AND status = 'active' GROUP BY weekday", repl: "AND status <> 'dropped' GROUP BY weekday" },
+    find: "at(r.weekday)[r.status === 'active' ? 'enrolled' : 'paused'] = r.n;", repl: 'at(r.weekday).enrolled += r.n;' },
+  // S7: paused enrollments end with a removed day or a cancelled session, so they are counted apart.
+  { name: 'leave paused enrollments out of a day\'s counts', covers: ['SC-2', 'SC-4'], file: F,
+    find: "at(r.weekday)[r.status === 'active' ? 'enrolled' : 'paused'] = r.n;", repl: "if (r.status === 'active') at(r.weekday).enrolled = r.n;" },
   { name: 'let capacity drop below the students already enrolled', covers: ['SC-2', 'SC-4'], file: F,
     find: 'if (n > next.capacity) {', repl: 'if (false) {' },
   { name: 'refuse a capacity equal to the enrolled count', covers: ['SC-2'], file: F,
@@ -167,4 +171,60 @@ module.exports = [
     find: 'starts_at: time.toMs(loc, date, s.start_time)', repl: "starts_at: time.toMs({ timezone: 'UTC' }, date, s.start_time)" },
   { name: 'list sessions on days they do not meet', covers: ['NF-4', 'SC-1'], file: F,
     find: '.filter(s => parseDays(s.weekdays).includes(wd))', repl: '.filter(s => true)' },
+
+  // ---- R3: closures are added or removed for today or later only ----
+  { name: 'add a closure for a date that has passed', covers: ['SC-3'], file: F,
+    find: "assertNotPast(ctx, loc, date, 'added');", repl: '' },
+  { name: 'remove a closure for a date that has passed', covers: ['SC-3'], file: F,
+    find: "assertNotPast(ctx, loc, c.date, 'removed');", repl: '' },
+  { name: 'judge a past closure date by UTC instead of the location\'s date', covers: ['SC-3', 'NF-4'], file: F,
+    find: "if (date < localToday(ctx, loc)) throw bad('past_date'", repl: "if (date < time.localDate({ timezone: 'UTC' }, ctx.clock.now())) throw bad('past_date'" },
+  { name: 'refuse a closure for today', covers: ['SC-3'], file: F,
+    find: "if (date < localToday(ctx, loc)) throw bad('past_date'", repl: "if (date <= localToday(ctx, loc)) throw bad('past_date'" },
+
+  // ---- R4: a session fits inside its location's opening hours ----
+  { name: 'create a session that runs past closing time', covers: ['SC-1'], file: F,
+    find: 'assertWithinHours(ctx, loc.id, v);', repl: '' },
+  { name: 'edit a session to run past closing time', covers: ['SC-4'], file: F,
+    find: 'assertWithinHours(ctx, s.location_id, next);', repl: '' },
+  { name: 'refuse a session that ends exactly at closing time', covers: ['SC-1'], file: F,
+    find: 'v.end_time > loc.close_time', repl: 'v.end_time >= loc.close_time' },
+  { name: 'refuse a session that starts exactly at opening time', covers: ['SC-1'], file: F,
+    find: 'v.start_time < loc.open_time', repl: 'v.start_time <= loc.open_time' },
+
+  // ---- R7: shortening a term tells the families whose sessions it cuts ----
+  { name: 'shorten a term without telling anyone', covers: ['SC-3', 'SC-4'], file: F,
+    find: 'const cut = studentsCutByTerm(ctx, term.id, term, v, localToday(ctx, loc));', repl: 'const cut = [];' },
+  { name: 'tell families about term dates that have already passed', covers: ['SC-3'], file: F,
+    find: 'before.start_date > today ? before.start_date : today', repl: 'before.start_date' },
+  { name: 'tell families enrolled on days the shorter term doesn\'t cut', covers: ['SC-3'], file: F,
+    find: '.filter(r => days.has(r.weekday))', repl: '' },
+  { name: 'tell dropped enrollments about a shorter term', covers: ['SC-3'], file: F,
+    find: "AND e.status IN ('active','paused')`).all(termId)", repl: '`).all(termId)' },
+  { name: 'tell families from another term about a shorter term', covers: ['SC-3'], file: F,
+    find: 'WHERE s.term_id = ? AND s.status', repl: 'WHERE ? > 0 AND s.status' },
+
+  // ---- R8: a time edit applies from the edit date on; earlier dates keep their times ----
+  { name: 'keep no record of the times an edit replaced', covers: ['SC-4'], file: F,
+    find: 'if (next.start_time !== before.start_time || next.end_time !== before.end_time) {', repl: 'if (false) {' },
+  { name: 'let a second edit the same day overwrite the times the day before had', covers: ['SC-4'], file: F,
+    find: 'INSERT OR IGNORE INTO session_times', repl: 'INSERT OR REPLACE INTO session_times' },
+  { name: 'apply a time edit from tomorrow instead of today', covers: ['SC-4'], file: F,
+    find: 'time.addDays(localToday(ctx, loc), -1), before.start_time', repl: 'localToday(ctx, loc), before.start_time' },
+  { name: 'record a time change for an edit that only renames', covers: ['SC-4'], file: F,
+    find: 'if (next.start_time !== before.start_time || next.end_time !== before.end_time) {', repl: 'if (true) {' },
+
+  // ---- The Sessions screen: App.confirm (safe button first and focused, Escape cancels), paused counted ----
+  { name: 'cancel a session without asking', covers: ['SC-4'], file: V,
+    find: 'const ok = await App.confirm({ el: cancelHost,', repl: 'const ok = true || await App.confirm({ el: cancelHost,' },
+  { name: 'take a day off without asking', covers: ['SC-4'], file: V,
+    find: 'if (lost.length && !(await App.confirm(', repl: 'if (false && !(await App.confirm(' },
+  { name: 'close a day without asking', covers: ['SC-3'], file: V,
+    find: 'const ok = await App.confirm({ el: confirmHost, opener: save, title:', repl: 'const ok = true || await App.confirm({ el: confirmHost, opener: save, title:' },
+  { name: 'reopen a day without asking', covers: ['SC-3'], file: V,
+    find: 'const ok = await App.confirm({ el: confirmHost, opener: btn,', repl: 'const ok = true || await App.confirm({ el: confirmHost, opener: btn,' },
+  { name: 'leave paused enrollments out of what a removed day or cancel ends, on screen', covers: ['SC-4'], file: V,
+    find: 'const ends = x => x.enrolled + (x.paused || 0);', repl: 'const ends = x => x.enrolled;' },
+  { name: 'offer past dates in the closure form', covers: ['SC-3'], file: V,
+    find: 'min: t.start_date > today ? t.start_date : today', repl: 'min: t.start_date' },
 ];

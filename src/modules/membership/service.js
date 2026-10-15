@@ -32,14 +32,15 @@ function studentLocation(ctx, studentId) {
 const todayAt = (ctx, loc) => time.localDate(loc, ctx.clock.now());
 
 // What families and staff see: the record plus its state on `today`.
-// state: active | ending (within 14 days) | expired | inactive.
+// state: active | upcoming (before start_date, R6) | ending (within 14 days) | expired | inactive.
 function describe(m, today) {
   if (!m) return null;
   const days_left = daysUntil(today, m.expires_on);
-  const state = m.status !== 'active' ? 'inactive' : days_left < 0 ? 'expired' : days_left <= SOON_DAYS ? 'ending' : 'active';
+  const state = m.status !== 'active' ? 'inactive' : today < m.start_date ? 'upcoming'
+    : days_left < 0 ? 'expired' : days_left <= SOON_DAYS ? 'ending' : 'active';
   return {
     id: m.id, status: m.status, weekly_cap: m.weekly_cap, start_date: m.start_date, expires_on: m.expires_on,
-    days_left, state, renewal_needed: state !== 'active',
+    days_left, state, renewal_needed: state !== 'active' && state !== 'upcoming',
   };
 }
 
@@ -51,6 +52,14 @@ function slotCounts(ctx, studentId, today) {
     FROM enrollments e JOIN sessions s ON s.id = e.session_id JOIN terms t ON t.id = s.term_id
     WHERE e.student_id = ? AND t.end_date >= ?`).get(studentId, today);
   return { active_slots: Number(r.active || 0), paused_slots: Number(r.paused || 0) };
+}
+
+// Weekly slots the student holds against the cap, counted the way enrollment
+// counts them (D-3, EN-4): active enrollments in active sessions of the current
+// and every upcoming term, as of the location-local `today`.
+function heldSlots(ctx, studentId, today) {
+  return Number(ctx.db.prepare(`SELECT COUNT(*) AS n FROM enrollments e JOIN sessions s ON s.id = e.session_id JOIN terms t ON t.id = s.term_id
+    WHERE e.student_id = ? AND e.status = 'active' AND s.status = 'active' AND t.end_date >= ?`).get(studentId, today).n);
 }
 
 // MB-5: active enrollments in current and upcoming terms become paused (`today`
@@ -170,6 +179,6 @@ function runExpiry(ctx) {
 }
 
 module.exports = {
-  SOON_DAYS, describe, isValid, slotCounts, pause, restore, notifyPaused, notifyRestored, runExpiry,
+  SOON_DAYS, describe, isValid, slotCounts, heldSlots, pause, restore, notifyPaused, notifyRestored, runExpiry,
   studentLocation, todayAt,
 };

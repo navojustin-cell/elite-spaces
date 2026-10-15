@@ -42,6 +42,8 @@
   // A lapsed membership, said to the student the same way on Home and Schedule
   // (the membership view's Home card uses these exact words).
   const lapsed = m => m.code === 'membership_inactive' || m.code === 'membership_expired';
+  const notStarted = m => m.code === 'membership_not_started';
+  const longDay = d => App.fmtDate(d, { weekday: undefined, year: 'numeric' });
   const lapsedText = (paused, place) => (paused ? 'Your membership isn\'t active, so your sessions are paused.' : 'Your membership isn\'t active.') +
     ` Ask a parent or the front desk at ${place} to renew it.`;
 
@@ -50,22 +52,26 @@
     if (m.can_add) return null;
     if (lapsed(m)) return h('div', { class: 'notice notice-warn', role: 'note' }, 'Nothing new can be added until it\'s renewed. You can still ask; your parent will see this too.');
     const text = {
+      membership_not_started: `Your membership starts on ${longDay(m.start_date)}. Sessions can be added from that day.`,
       weekly_cap: `You have ${m.used} weekly sessions, the most your membership allows. A parent can drop one to make room.`,
       no_membership: "You don't have a membership yet. A parent can set one up with the front desk.",
     }[m.code] || m.message;
     return h('div', { class: 'notice notice-warn', role: 'note' }, text + ' You can still ask; your parent will see this too.');
   }
 
+  // A membership is valid from start_date through expires_on (D-16, R6): past its
+  // last day it is expired, before its first it hasn't started, whatever its status says.
   function membershipLine(m) {
     if (!m.status) return h('p', { class: 'muted small' }, 'No membership on file yet.');
-    const exp = App.fmtDate(m.expires_on, { weekday: undefined, year: 'numeric' });
-    return h('p', { class: 'muted small' },
-      (m.status === 'active' ? 'Membership active' : 'Membership inactive') + ' · ' +
-      m.used + ' of ' + m.weekly_cap + ' weekly sessions in use · valid through ' + exp);
+    const expired = m.status === 'active' && m.code === 'membership_expired';
+    const head = m.status !== 'active' ? 'Membership inactive' : expired ? 'Membership expired'
+      : notStarted(m) ? 'Membership starts ' + longDay(m.start_date) : 'Membership active';
+    return h('p', { class: 'muted small' }, head + ' · ' + m.used + ' of ' + m.weekly_cap + ' weekly sessions in use · ' +
+      (expired ? 'last day was ' : 'valid through ') + longDay(m.expires_on));
   }
 
   // One week of sessions with Previous / Next week controls.
-  function weekCard(sched, onWeek, title) {
+  function weekCard(sched, onWeek, title, m) {
     const tz = sched.location.timezone;
     const today = todayIn(tz);
     const label = App.fmtDate(sched.from, { weekday: undefined }) + ' – ' + App.fmtDate(sched.to, { weekday: undefined });
@@ -84,7 +90,8 @@
       const [cls, text] = STATUS[o.status] || ['', o.status];
       const detail = o.status === 'closed' && o.closure_reason ? 'Closed: ' + o.closure_reason
         : o.status === 'attended' && o.check_in_at ? 'Checked in ' + App.fmtTime(o.check_in_at, tz) + (o.check_out_at ? ', out ' + App.fmtTime(o.check_out_at, tz) : '')
-        : o.status === 'paused' ? (o.end_at <= App.now() ? 'Membership was paused' : 'Paused until the membership is renewed') : null;
+        : o.status === 'paused' ? (o.end_at <= App.now() ? 'Membership was paused'
+          : m && notStarted(m) ? 'Membership starts ' + longDay(m.start_date) : 'Paused until the membership is renewed') : null;
       list.append(h('li', null,
         h('div', { class: 'en-date' }, h('strong', null, o.date === today ? 'Today' : DAY[o.weekday].slice(0, 3)), h('span', { class: 'muted small' }, App.fmtDate(o.date, { weekday: undefined }))),
         h('div', { class: 'grow' }, h('div', null, h('strong', null, o.name)),
@@ -192,6 +199,7 @@
     const out = await App.run(btn, () => App.api.post(`${API}/requests/${r.id}/${approve ? 'approve' : 'decline'}`));
     if (!out) return App.refresh();
     if (out.outcome === 'declined') App.toast(`Declined. ${name} has been told.`);
+    else if (out.outcome === 'closed') App.toast(out.message); // the slot is gone; the center's reason, not a decline
     else if (out.outcome === 'enrolled') App.toast(`Approved. ${name} is enrolled in ${r.session_name}.`);
     else if (out.outcome === 'full') {
       const slot = { session_id: r.session_id, weekday: r.weekday, name: r.session_name };
@@ -263,7 +271,9 @@
       e.status === 'paused' && badge('badge-warn', 'Paused'),
       h('button', { class: 'btn', onclick: ev => dropEnrollment(ev.currentTarget, sel, e), 'aria-label': `Drop ${e.name} on ${DAY[e.weekday]}s` }, 'Drop')))));
     if (sel.enrollments.some(e => e.status === 'paused')) {
-      mine.append(h('p', { class: 'muted small' }, 'Paused sessions don\'t hold a seat. They come back once the membership is renewed, if the seat is still free.'));
+      mine.append(h('p', { class: 'muted small' }, notStarted(sel.membership)
+        ? `Paused sessions don't hold a seat. ${name}'s membership starts on ${longDay(sel.membership.start_date)}.`
+        : 'Paused sessions don\'t hold a seat. They come back once the membership is renewed, if the seat is still free.'));
     }
     el.append(mine);
 
@@ -280,7 +290,7 @@
           h('button', { class: 'btn', onclick: ev => leaveWaitlist(ev.currentTarget, sel, w), 'aria-label': `Leave the waitlist for ${w.name} on ${DAY[w.weekday]}s` }, 'Leave'))))));
     }
 
-    el.append(weekCard(sched, d => App.go('schedule', sel.id, d), from ? 'Week' : 'This week'));
+    el.append(weekCard(sched, d => App.go('schedule', sel.id, d), from ? 'Week' : 'This week', sel.membership));
 
     // Add a session
     const add = h('section', { class: 'card', 'aria-labelledby': 'en-add-h' },
@@ -307,7 +317,7 @@
 
   const REQ_STATE = {
     pending: () => ['badge-accent', 'Waiting for a parent'],
-    declined: () => ['', 'Declined'],
+    declined: r => (r.decided_by ? ['', 'Declined'] : ['', 'Closed']), // no decider: the slot was gone
     approved: r => r.outcome === 'enrolled' ? ['badge-ok', 'Approved · enrolled'] : r.outcome === 'full' ? ['badge-warn', 'Approved · session full'] : ['badge-warn', 'Approved · not enrolled yet'],
   };
 
@@ -327,7 +337,7 @@
       el.append(h('div', { class: 'notice notice-warn', role: 'note' }, lapsedText(me.enrollments.some(e => e.status === 'paused'), me.location.name)));
     }
 
-    el.append(weekCard(sched, d => App.go('schedule', me.id, d), from ? 'Week' : 'This week'));
+    el.append(weekCard(sched, d => App.go('schedule', me.id, d), from ? 'Week' : 'This week', me.membership));
 
     const mine = h('section', { class: 'card', 'aria-labelledby': 'en-mine-h' }, h('h2', { id: 'en-mine-h' }, 'Every week'), membershipLine(me.membership));
     if (!me.enrollments.length) mine.append(h('p', { class: 'empty' }, 'No weekly sessions yet. Ask a parent to add one below.'));
@@ -346,7 +356,7 @@
           return h('li', null,
             h('div', { class: 'grow' }, h('div', null, h('strong', null, r.session_name)),
               h('div', { class: 'muted small' }, slotText(r) + (r.decided_by_name ? ' · ' + first(r.decided_by_name) : '')),
-              r.status === 'approved' && r.outcome !== 'enrolled' && r.outcome_message && h('div', { class: 'small' }, r.outcome_message)),
+              (r.status === 'approved' && r.outcome !== 'enrolled' || r.status === 'declined' && !r.decided_by) && r.outcome_message && h('div', { class: 'small' }, r.outcome_message)),
             badge(cls, text));
         }))));
     }

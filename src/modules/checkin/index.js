@@ -15,7 +15,7 @@
 //                                    an out_time equal to the current time out just confirms it
 // Job: auto-checkout (CI-5, D-14).
 //
-// Scan order: today's code -> home location (D-1) -> inside the radius -> an
+// Scan order: today's code -> home location (D-1) -> location not marked closed (R5) -> inside the radius -> an
 // open visit today means check-out -> otherwise an enrolled slot window means
 // check-in. A scan within five minutes of the last check-in or check-out asks
 // before reversing it. Scan coordinates are used for the radius check only and
@@ -76,6 +76,8 @@ function router(ctx) {
       throw refuse('wrong_location', `This code is for ${loc.name}. You're a member at ${home ? home.name : 'another location'}. `
         + `Scan the code at ${home ? home.name : 'your own location'}, or ask staff at the front desk.`);
     }
+    // A location marked closed takes no scans (R5); staff can still check a student out by hand.
+    if (!loc.active) throw refuse('location_closed', `${loc.name} is marked closed, so scanning in and out is turned off. If you're here, ask staff at the front desk.`);
     if (!coordsGiven(b)) throw bad('location_needed', "We need your phone's location to check you in. It's only used for this check and isn't saved.");
     const today = time.localDate(loc, now);
     const open = svc.openVisit(ctx, student.id, loc.id, today);
@@ -97,7 +99,9 @@ function router(ctx) {
     }
 
     if (!svc.membershipOk(ctx, student.id, today)) {
-      throw refuse('membership_inactive', `Your membership isn't active, so your sessions are paused. Ask a parent or the front desk at ${loc.name} to renew it.`);
+      const starts = svc.startsLater(ctx, student.id, today);
+      if (starts) throw refuse('membership_inactive', `Your membership starts ${svc.dayName(loc, starts)}, so you can't check in yet. Ask a parent or the front desk at ${loc.name} if that's wrong.`);
+      throw refuse('membership_inactive',`Your membership isn't active, so your sessions are paused. Ask a parent or the front desk at ${loc.name} to renew it.`);
     }
     const slot = svc.slotNow(ctx, loc, student.id, now);
     if (!slot) throw refuse('no_session', svc.noSessionMessage(ctx, loc, student.id, now));
@@ -173,10 +177,13 @@ function router(ctx) {
     if (!student || student.role !== 'student') throw notFound('No such student.');
     auth.assertManageLocation(req.user, student.location_id);
     const loc = svc.getLocation(ctx, student.location_id);
+    if (!loc.active) throw refuse('location_closed', `${loc.name} is marked closed, so check-ins are turned off. HQ can reopen it in Locations.`);
     const now = ctx.clock.now();
     const open = svc.openVisit(ctx, student.id, loc.id, time.localDate(loc, now));
     if (open) throw conflict('already_here', `${student.name} is already checked in (since ${svc.clockTime(loc, open.check_in_at)}).`);
     if (!svc.membershipOk(ctx, student.id, time.localDate(loc, now)) && b.override !== true) {
+      const starts = svc.startsLater(ctx, student.id, time.localDate(loc, now));
+      if (starts) throw conflict('membership_inactive', `${svc.firstName(student.name)}'s membership starts ${svc.dayName(loc, starts)}. Check in anyway?`);
       throw conflict('membership_inactive', `${svc.firstName(student.name)}'s membership isn't active. Check in anyway?`);
     }
     const slot = svc.slotNow(ctx, loc, student.id, now);

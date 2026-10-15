@@ -9,14 +9,17 @@
 //   PUT    /:id            edit name, days, times, capacity; enrolled families are told
 //   POST   /:id/cancel     cancel a session: its enrollments end, its waitlist clears, families are told
 //   POST   /terms          create a term
-//   PUT    /terms/:id      edit a term
-//   POST   /closures       close the location on a date inside a term; families enrolled that day are told
-//   DELETE /closures/:id   reopen that date; the same families are told
+//   PUT    /terms/:id      edit a term; families whose weekly sessions it cuts are told (R7)
+//   POST   /closures       close the location on a date inside a term, today or later (R3); families enrolled that day are told
+//   DELETE /closures/:id   reopen that date, today or later (R3); the same families are told
 // No scheduled jobs: every change notifies at the moment it is made.
 //
 // A slot is (session, weekday) (D-10): capacity, enrollment and waitlist counts
 // are per slot, and nobody is ever assigned a seat (SC-2). Times are 'HH:MM' in
-// the location's own zone and are stored exactly as entered (NF-4).
+// the location's own zone and are stored exactly as entered (NF-4). A session
+// fits inside its location's opening hours (R4). A time edit applies from the
+// edit date forward: the times it replaced are kept in session_times for the
+// dates before it (R8), and times.js reads them back.
 
 const express = require('express');
 const { DateTime } = require('luxon');
@@ -120,12 +123,29 @@ function termInput(b) {
   return { name, start_date: start, end_date: end };
 }
 
+// R4: a session starts no earlier than its location opens and ends no later than it closes.
+function assertWithinHours(ctx, locationId, v) {
+  const loc = ctx.db.prepare('SELECT name, open_time, close_time FROM locations WHERE id = ?').get(locationId);
+  if (v.start_time < loc.open_time || v.end_time > loc.close_time) {
+    throw bad('outside_hours', `${loc.name} is open ${fmtTime(loc.open_time)}–${fmtTime(loc.close_time)}, so a session there has to start at ${fmtTime(loc.open_time)} or later and end by ${fmtTime(loc.close_time)}.`);
+  }
+}
+
+// R3: closures are added or removed for today or later, by the location's own date.
+function assertNotPast(ctx, loc, date, verb) {
+  if (date < localToday(ctx, loc)) throw bad('past_date', `${fmtDate(date)} has already passed at ${loc.name}. Closures can only be ${verb} for today or a later date.`);
+}
+
 // ---------- counts (per slot, D-10) ----------
 
+// `enrolled` holds seats; `paused` (D-16) doesn't, but a removed day or a
+// cancelled session ends those enrollments too (D-26), so the screen counts them.
 function slotCounts(ctx, sessionId) {
   const out = {};
-  const at = d => (out[d] = out[d] || { enrolled: 0, waiting: 0 });
-  for (const r of ctx.db.prepare("SELECT weekday, COUNT(*) AS n FROM enrollments WHERE session_id = ? AND status = 'active' GROUP BY weekday").all(sessionId)) at(r.weekday).enrolled = r.n;
+  const at = d => (out[d] = out[d] || { enrolled: 0, paused: 0, waiting: 0 });
+  for (const r of ctx.db.prepare("SELECT weekday, status, COUNT(*) AS n FROM enrollments WHERE session_id = ? AND status IN ('active','paused') GROUP BY weekday, status").all(sessionId)) {
+    at(r.weekday)[r.status === 'active' ? 'enrolled' : 'paused'] = r.n;
+  }
   for (const r of ctx.db.prepare("SELECT weekday, COUNT(*) AS n FROM waitlist WHERE session_id = ? AND status = 'waiting' GROUP BY weekday").all(sessionId)) at(r.weekday).waiting = r.n;
   return out;
 }
@@ -137,8 +157,8 @@ function shape(ctx, s) {
     id: s.id, location_id: s.location_id, term_id: s.term_id, name: s.name, weekdays,
     start_time: s.start_time, end_time: s.end_time, capacity: s.capacity, status: s.status,
     slots: weekdays.map(d => {
-      const c = counts[d] || { enrolled: 0, waiting: 0 };
-      return { weekday: d, enrolled: c.enrolled, waiting: c.waiting, capacity: s.capacity, seats_left: Math.max(0, s.capacity - c.enrolled) };
+      const c = counts[d] || { enrolled: 0, paused: 0, waiting: 0 };
+      return { weekday: d, enrolled: c.enrolled, paused: c.paused, waiting: c.waiting, capacity: s.capacity, seats_left: Math.max(0, s.capacity - c.enrolled) };
     }),
   };
 }
@@ -188,6 +208,20 @@ function endSlots(ctx, sessionId, weekdays, now) {
 
 function termCovering(ctx, locationId, date) {
   return ctx.db.prepare('SELECT id FROM terms WHERE location_id = ? AND ? BETWEEN start_date AND end_date').get(locationId, date);
+}
+
+// R7: students whose weekly sessions in the term lose a date that hasn't passed
+// when the term's dates go from `before` to `after`: an active or paused
+// enrollment in one of its active sessions, on a weekday a cut date falls on.
+function studentsCutByTerm(ctx, termId, before, after, today) {
+  const days = new Set();
+  for (let d = before.start_date > today ? before.start_date : today; d <= before.end_date && days.size < 7; d = time.addDays(d, 1)) {
+    if (d < after.start_date || d > after.end_date) days.add(time.weekdayOfDate(d));
+  }
+  if (!days.size) return [];
+  return [...new Set(ctx.db.prepare(`SELECT e.student_id, e.weekday FROM enrollments e JOIN sessions s ON s.id = e.session_id
+      WHERE s.term_id = ? AND s.status = 'active' AND e.status IN ('active','paused')`).all(termId)
+    .filter(r => days.has(r.weekday)).map(r => r.student_id))];
 }
 
 // ---------- routes ----------
@@ -243,7 +277,8 @@ module.exports = {
       if (!term) throw notFound('That term does not exist.');
       assertLocation(req.user, term.location_id);
       const v = termInput(Object.assign({ name: term.name, start_date: term.start_date, end_date: term.end_date }, req.body || {}));
-      tx(ctx.db, () => {
+      const loc = locationRow(ctx, term.location_id);
+      const notified = tx(ctx.db, () => {
         ctx.db.prepare('UPDATE terms SET name = ?, start_date = ?, end_date = ? WHERE id = ?').run(v.name, v.start_date, v.end_date, term.id);
         // A closure must always sit inside a term (SC-3).
         const stranded = ctx.db.prepare(`SELECT date FROM closures c WHERE c.location_id = ? AND NOT EXISTS
@@ -252,8 +287,16 @@ module.exports = {
         if (stranded) throw conflict('closure_outside_term', `The closure on ${fmtDate(stranded.date)} would fall outside every term. Remove that closure first, or keep the term around it.`);
         audit.log(ctx, req.user, 'term.update', { targetType: 'term', targetId: term.id, locationId: term.location_id,
           detail: { before: { name: term.name, start_date: term.start_date, end_date: term.end_date }, after: v } });
+        // R7: a shorter term ends weekly sessions early, so those families are told, as for a removed day.
+        const cut = studentsCutByTerm(ctx, term.id, term, v, localToday(ctx, loc));
+        if (!cut.length) return 0;
+        return notify.send(ctx, familyOf(ctx, cut), {
+          kind: 'term_shortened', title: `${v.name} at ${loc.name} now runs ${fmtDate(v.start_date)} – ${fmtDate(v.end_date)}`,
+          body: `${loc.name} changed ${term.name} from ${fmtDate(term.start_date)} – ${fmtDate(term.end_date)} to ${fmtDate(v.start_date)} – ${fmtDate(v.end_date)}. Your weekly sessions in it don't meet outside those dates. You can pick another session in the app.`,
+          refType: 'term', refId: term.id,
+        }).length;
       });
-      res.json({ term: ctx.db.prepare('SELECT id, name, start_date, end_date FROM terms WHERE id = ?').get(term.id) });
+      res.json({ term: ctx.db.prepare('SELECT id, name, start_date, end_date FROM terms WHERE id = ?').get(term.id), notified });
     });
 
     // ---- closures (SC-3, D-19): that date's occurrences are cancelled; enrollments stay ----
@@ -264,6 +307,7 @@ module.exports = {
       if (!isDate(date)) throw bad('date', 'Choose a date.');
       const reason = text(b.reason, 'reason', 'Type the reason as plain text.').trim().slice(0, REASON_MAX) || null;
       if (!termCovering(ctx, loc.id, date)) throw bad('outside_term', `${fmtDate(date)} isn't inside a term at ${loc.name}. Closures can only fall during a term.`);
+      assertNotPast(ctx, loc, date, 'added');
       if (ctx.db.prepare('SELECT 1 FROM closures WHERE location_id = ? AND date = ?').get(loc.id, date)) {
         throw conflict('duplicate', `${loc.name} is already closed on ${fmtDate(date)}.`);
       }
@@ -286,6 +330,7 @@ module.exports = {
       if (!c) throw notFound('That closure does not exist.');
       assertLocation(req.user, c.location_id);
       const loc = locationRow(ctx, c.location_id);
+      assertNotPast(ctx, loc, c.date, 'removed');
       const notified = tx(ctx.db, () => {
         ctx.db.prepare('DELETE FROM closures WHERE id = ?').run(c.id);
         const sent = notify.send(ctx, familyOf(ctx, studentsMeetingOn(ctx, c.location_id, c.date)), {
@@ -305,6 +350,7 @@ module.exports = {
       const term = ctx.db.prepare('SELECT * FROM terms WHERE id = ? AND location_id = ?').get(num(b.term_id) || 0, loc.id);
       if (!term) throw bad('term', 'Choose a term at this location.');
       const v = sessionInput(b);
+      assertWithinHours(ctx, loc.id, v);
       const id = Number(ctx.db.prepare(`INSERT INTO sessions (location_id, term_id, name, weekdays, start_time, end_time, capacity, created_by, created_at)
           VALUES (?,?,?,?,?,?,?,?,?)`)
         .run(loc.id, term.id, v.name, v.weekdays.join(','), v.start_time, v.end_time, v.capacity, req.user.id, ctx.clock.now()).lastInsertRowid);
@@ -317,6 +363,7 @@ module.exports = {
       if (s.status !== 'active') throw conflict('cancelled', 'This session was cancelled, so it can no longer be changed.');
       const before = { name: s.name, weekdays: parseDays(s.weekdays), start_time: s.start_time, end_time: s.end_time, capacity: s.capacity };
       const next = sessionInput(Object.assign({}, before, req.body || {}));
+      assertWithinHours(ctx, s.location_id, next);
       // Capacity is per day (D-10) and can't go below who already holds a seat on a day that stays.
       const counts = slotCounts(ctx, s.id);
       for (const d of next.weekdays) {
@@ -332,6 +379,12 @@ module.exports = {
       const out = tx(ctx.db, () => {
         ctx.db.prepare('UPDATE sessions SET name = ?, weekdays = ?, start_time = ?, end_time = ?, capacity = ? WHERE id = ?')
           .run(next.name, next.weekdays.join(','), next.start_time, next.end_time, next.capacity, s.id);
+        // R8: new times apply from today (the location's date) on; every date before
+        // keeps the times it had. A second edit the same day keeps the first one's record.
+        if (next.start_time !== before.start_time || next.end_time !== before.end_time) {
+          ctx.db.prepare('INSERT OR IGNORE INTO session_times (session_id, until_date, start_time, end_time, changed_at) VALUES (?,?,?,?,?)')
+            .run(s.id, time.addDays(localToday(ctx, loc), -1), before.start_time, before.end_time, now);
+        }
         let notified = 0;
         const ended = removed.length ? endSlots(ctx, s.id, removed, now) : [];
         if (ended.length) {

@@ -69,12 +69,14 @@ function content(b, bodyMax) {
 }
 
 // Locations a post goes to. HQ: 'all' or a chosen set (AN-2). Director: own only (AN-1, AN-5).
+// A location marked closed still gets HQ's alerts and posts (R5): its families and
+// staff keep their accounts, so they still need to hear from ELITE.
 function targetLocations(ctx, user, raw) {
   if (user.role === 'hq') {
-    if (raw === 'all') return ctx.db.prepare('SELECT id FROM locations WHERE active = 1 ORDER BY id').all().map(r => r.id);
+    if (raw === 'all') return ctx.db.prepare('SELECT id FROM locations ORDER BY id').all().map(r => r.id);
     if (!Array.isArray(raw) || !raw.length) throw bad('locations', 'Choose at least one location.');
     const ids = [...new Set(raw.map(toId))].sort((x, y) => x - y);
-    const known = ctx.db.prepare('SELECT 1 FROM locations WHERE active = 1 AND id = ?');
+    const known = ctx.db.prepare('SELECT 1 FROM locations WHERE id = ?');
     if (ids.some(id => !known.get(id))) throw bad('locations', 'One of those locations does not exist.');
     return ids;
   }
@@ -287,7 +289,9 @@ function shape(ctx, user, a) {
   const own = user.role === 'hq' ? null : ownLocationIds(ctx, user);
   const shown = own ? locs.filter(l => own.has(l.id)) : locs;
   const sender = db.prepare('SELECT name, role FROM users WHERE id = ?').get(a.created_by) || { name: 'ELITE Spaces', role: null };
-  const session = a.session_id ? db.prepare('SELECT id, name, weekdays, start_time, end_time FROM sessions WHERE id = ?').get(a.session_id) : null;
+  // With its term, so "Sent to" tells same-named sessions in different terms apart.
+  const session = a.session_id ? db.prepare(`SELECT s.id, s.name, s.weekdays, s.start_time, s.end_time, t.name AS term_name
+    FROM sessions s LEFT JOIN terms t ON t.id = s.term_id WHERE s.id = ?`).get(a.session_id) : null;
   const note = db.prepare("SELECT read_at FROM notifications WHERE user_id = ? AND ref_type = 'announcement' AND ref_id = ? ORDER BY id LIMIT 1").get(user.id, a.id);
   const seen = !!db.prepare('SELECT 1 FROM announcement_reads WHERE announcement_id = ? AND user_id = ?').get(a.id, user.id);
   // New until read, for anyone the post is for: a family member (muted or not)
@@ -331,14 +335,19 @@ function router(ctx) {
     res.json({ posts, active_emergencies: active, scheduled, muted: !!(pref && pref.muted) });
   });
 
+  // Sessions to target: those of the current and upcoming terms only (a term is
+  // over once the location's local date passes its end_date), each with its term
+  // so same-named sessions in different terms can be told apart.
   r.get('/options', auth.requireRole('director'), (req, res) => {
     const u = req.user;
+    const now = ctx.clock.now();
     const sessions = db.prepare(`SELECT s.id, s.name, s.weekdays, s.start_time, s.end_time, s.location_id,
-        l.name AS location_name, l.timezone,
+        l.name AS location_name, l.timezone, t.name AS term_name, t.end_date AS term_end,
         (SELECT COUNT(DISTINCT e.student_id) FROM enrollments e WHERE e.session_id = s.id AND e.status = 'active') AS enrolled
-      FROM sessions s JOIN locations l ON l.id = s.location_id
+      FROM sessions s JOIN locations l ON l.id = s.location_id JOIN terms t ON t.id = s.term_id
       WHERE s.status = 'active' AND (? = 'hq' OR s.location_id = ?)
-      ORDER BY l.name, s.start_time, s.name, s.id`).all(u.role, u.location_id);
+      ORDER BY l.name, t.start_date, t.id, s.start_time, s.name, s.id`).all(u.role, u.location_id)
+      .filter(s => s.term_end >= time.localDate(s, now));
     res.json({ categories: CATEGORIES, sessions, title_max: TITLE_MAX, body_max: BODY_MAX, emergency_max: EMERGENCY_MAX });
   });
 

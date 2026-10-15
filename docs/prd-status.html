@@ -143,12 +143,12 @@ footer { color: var(--muted); font-size: .86rem; }
     <div class="eyebrow">ELITE Spaces · Build status against the PRD</div>
     <h1>ELITE Spaces v1: what's built and what's left</h1>
     <p class="lede">Measured against the ELITE Spaces App PRD (v1, Oct 6, 2026). Every requirement in the PRD is built into a working prototype that runs end to end with demo locations, families and staff.</p>
-    <div class="meta"><span>Status as of Wed, Oct 14, 2026, 10:00 AM</span><span>Prototype runs locally; not yet hosted for a pilot</span></div>
+    <div class="meta"><span>Status as of Wed, Oct 14, 2026, afternoon</span><span>Prototype runs locally; not yet hosted for a pilot</span></div>
   </header>
 
   <div class="strip" aria-label="Summary">
     <div class="tile done"><span class="n">44 / 44</span><span class="k">PRD requirements built</span><span class="s">All 7 modules plus users and roles, each with automated tests</span></div>
-    <div class="tile today"><span class="n">5</span><span class="k">Fixes finishing today</span><span class="s">Found during hands-on walkthroughs; being re-checked in a browser</span></div>
+    <div class="tile today"><span class="n">5 / 5</span><span class="k">Today's fixes done</span><span class="s">Found during hands-on walkthroughs and re-checked in a browser</span></div>
     <div class="tile decide"><span class="n">15</span><span class="k">Decisions for ELITE</span><span class="s">9 open PRD questions answered with defaults, plus 6 ideas beyond the PRD</span></div>
     <div class="tile later"><span class="n">Oct 21</span><span class="k">Testable by staff</span><span class="s">Secure web address, real phone notifications, then an internal test at one location</span></div>
   </div>
@@ -273,15 +273,15 @@ footer { color: var(--muted); font-size: .86rem; }
 
   <section>
     <div class="section-head">
-      <h2>Finishing today</h2>
-      <p class="lede">Fixes found by walking through the app as each role. Each one is re-checked in a real browser before it counts.</p>
+      <h2>Fixed today</h2>
+      <p class="lede">Found by walking through the app as each role. Each one was re-checked in a real browser before it counted.</p>
     </div>
     <div class="list"><ul>
-      <li><span class="what">Invites can't claim an email reserved by another family's open invite</span><span class="chip today">In progress</span></li>
-      <li><span class="what">A guardian invite can't go to someone already in the family</span><span class="chip today">In progress</span></li>
-      <li><span class="what">"I have read this" on an emergency alert marks exactly that alert, and the unread count updates right away</span><span class="chip today">In progress</span></li>
-      <li><span class="what">Confirming an automatic check-out time keeps it recorded as automatic</span><span class="chip today">In progress</span></li>
-      <li><span class="what">HQ all-locations report names the location on every row and heading</span><span class="chip today">In progress</span></li>
+      <li><span class="what">Invites can't claim an email reserved by another family's open invite</span><span class="chip done">Fixed and checked</span></li>
+      <li><span class="what">A guardian invite can't go to someone already in the family</span><span class="chip done">Fixed and checked</span></li>
+      <li><span class="what">"I have read this" on an emergency alert marks exactly that alert, and the unread count updates right away</span><span class="chip done">Fixed and checked</span></li>
+      <li><span class="what">Confirming an automatic check-out time keeps it recorded as automatic</span><span class="chip done">Fixed and checked</span></li>
+      <li><span class="what">HQ all-locations report names the location on every row and heading</span><span class="chip done">Fixed and checked</span></li>
     </ul></div>
   </section>
 
@@ -311,7 +311,7 @@ footer { color: var(--muted); font-size: .86rem; }
       <p class="lede">Goal: staff at one location can test it on their own phones by Wednesday, Oct 21. That is step 1 of the PRD's rollout: an internal test with staff acting as families.</p>
     </div>
     <ol class="steps">
-      <li><div class="when">Wed, Oct 14</div><div class="body"><div class="what">Finish today's 5 fixes and answer the decisions on this page</div><div class="why">Fixes are being re-checked now. Answers here decide what changes before testing.</div></div><span class="chip today">Today</span></li>
+      <li><div class="when">Wed, Oct 14</div><div class="body"><div class="what">Today's 5 fixes done; answer the decisions on this page</div><div class="why">Answers here decide what changes before testing.</div></div><span class="chip today">Today</span></li>
       <li><div class="when">Thu, Oct 15</div><div class="body"><div class="what">Put it on a secure web address</div><div class="why">Phones need a secure (https) address for the camera, location check and notifications. Needs a hosting choice and account.</div></div><span class="chip decide">Needs ELITE</span></li>
       <li><div class="when">Thu–Fri, Oct 15–16</div><div class="body"><div class="what">Turn on real phone notifications, with the iPhone "Add to Home Screen" walkthrough</div><div class="why">Today notifications show inside the app. Real push needs the secure address first.</div></div><span class="chip later">Build</span></li>
       <li><div class="when">Fri, Oct 16</div><div class="body"><div class="what">Finish the remaining polish and any "Change it" answers</div><div class="why">Keyboard focus, very small phones and minor wording, plus whatever the decisions above ask for.</div></div><span class="chip later">Build</span></li>
@@ -330,9 +330,9 @@ footer { color: var(--muted); font-size: .86rem; }
     </div>
     <div class="proof">
       <dl>
-        <dt>303 automated tests</dt><dd>Cover every PRD requirement, each tagged with its PRD number; all pass.</dd>
-        <dt>662 deliberate breaks</dt><dd>The code was broken on purpose 662 different ways to prove the tests notice; every one was caught.</dd>
-        <dt>8 hands-on walkthroughs</dt><dd>Reviewers used the app as student, parent, staff, director and HQ on phone and desktop sizes; 53 issues found and fixed.</dd>
+        <dt>312 automated tests</dt><dd>Cover every PRD requirement, each tagged with its PRD number; all pass.</dd>
+        <dt>684 deliberate breaks</dt><dd>The code was broken on purpose 684 different ways to prove the tests notice; every one was caught.</dd>
+        <dt>8 hands-on walkthroughs</dt><dd>Reviewers used the app as student, parent, staff, director and HQ on phone and desktop sizes; 58 issues found and fixed.</dd>
         <dt>Independent reviewers</dt><dd>Each part was checked by a reviewer who didn't build it, against the PRD and a leading childcare app as the quality bar.</dd>
       </dl>
     </div>

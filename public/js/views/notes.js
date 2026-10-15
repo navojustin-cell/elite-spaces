@@ -127,6 +127,16 @@
         drawProgress();
       }
       const redraw = s => { const old = document.getElementById('dn-' + s.id); if (old) old.replaceWith(card(s)); };
+      // Fetch one student's row again and redraw the list, keeping focus on that card.
+      async function reload(s) {
+        const fresh = await App.api.get('/api/notes/day?' + new URLSearchParams({ date: data.date, location: data.location.id }));
+        const now = fresh.students.find(x => x.id === s.id);
+        if (!now) return;
+        Object.assign(s, now);
+        drawList();
+        const target = document.getElementById('dn-' + s.id);
+        if (target) target.focus();
+      }
 
       function card(s) {
         const key = data.location.id + '|' + data.date + '|' + s.id;
@@ -194,7 +204,15 @@
         const save = async (btn, post) => App.run(btn, async () => {
           const body = { ratings: ed.ratings, comment: ed.comment, post };
           if (isHq) body.location_id = data.location.id;
-          const r = await App.api.put('/api/notes/students/' + s.id + '/' + data.date, body);
+          let r;
+          try {
+            r = await App.api.put('/api/notes/students/' + s.id + '/' + data.date, body);
+          } catch (e) {
+            // Refused: the note or the checklist may have changed since this screen
+            // loaded. Redraw the card as it is now (unsaved edits stay), then show why.
+            await reload(s).catch(() => {});
+            throw e;
+          }
           unsaved.delete(key);
           open.delete(s.id);
           Object.assign(s, r.student);
@@ -207,7 +225,9 @@
           const target = next && document.getElementById('dn-' + next.id);
           if (target) target.focus();
         });
-        postBtn.addEventListener('click', () => save(postBtn, !posted));
+        // Post note posts; Save changes edits a posted note and sends no `post` (the server
+        // refuses post: true or false on a posted note, as only a stale screen sends those).
+        postBtn.addEventListener('click', () => save(postBtn, posted ? undefined : true));
 
         art.append(rates,
           h('label', { class: 'field', for: 'dn-c-' + s.id, style: 'margin:.75rem 0 0' },

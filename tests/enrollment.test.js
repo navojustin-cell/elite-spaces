@@ -152,6 +152,43 @@ test(['EN-4'], "expiry is judged by the location's local date, and the last day 
   assert.equal(active(t, b.student).length, 0);
 });
 
+// R6: a membership counts only from start_date through expires_on, by the location's local date.
+test(['EN-4', 'EN-3', 'EN-5'], "a membership that hasn't started yet is not active: enrolling, the waitlist and approvals are refused until its first day", async () => {
+  const t = await makeApp({ now: at(LA, '2026-10-14', '23:30') }); // already Oct 15 in Toronto
+  const la = t.fx.location({ name: 'Irvine' });
+  const to = t.fx.location({ name: 'Toronto', timezone: 'America/Toronto' });
+  const sLA = t.fx.session(la, { capacity: 1 }), sTO = t.fx.session(to);
+  const a = t.fx.family(la, { start: '2026-10-15' });
+  const b = t.fx.family(to, { start: '2026-10-15' });
+  const no = await enroll(t, a.parent, a.student, sLA, 1);
+  assert.equal(no.status, 409, 'Oct 15 has not begun in Los Angeles');
+  assert.equal(no.body.error, 'membership_not_started');
+  assert.equal(no.body.message, `${a.student.name.split(' ')[0]}'s membership starts on Oct 15, 2026. Sessions can be added from that day.`);
+  assert.equal((await enroll(t, b.parent, b.student, sTO, 1)).status, 201, 'it is already Oct 15 in Toronto');
+  // The catalog and the family overview say so before the server is asked.
+  const cat = await t.as(a.parent).get(`/api/enrollment/students/${a.student.id}/catalog`);
+  assert.deepEqual([cat.body.membership.can_add, cat.body.membership.code, cat.body.membership.start_date], [false, 'membership_not_started', '2026-10-15']);
+  assert.ok(cat.body.slots.every(s => s.can_add === false));
+  // The waitlist runs the same check, and so does a parent's approval.
+  fill(t, la, sLA, 3, 1);
+  const w = await joinLine(t, a.parent, a.student, sLA, 3);
+  assert.deepEqual([w.status, w.body.error], [409, 'membership_not_started']);
+  const r = await t.as(a.student).post('/api/enrollment/requests', { sessionId: sLA.id, weekday: 5 });
+  assert.equal(r.status, 201);
+  const list = await t.as(a.parent).get('/api/enrollment/requests');
+  assert.deepEqual([list.body.requests[0].check.ok, list.body.requests[0].check.code], [false, 'membership_not_started']);
+  const ok = await t.as(a.parent).post(`/api/enrollment/requests/${r.body.request.id}/approve`);
+  assert.deepEqual([ok.body.outcome, ok.body.code], ['blocked', 'membership_not_started']);
+  assert.equal(active(t, a.student).length, 0);
+  // A spot paused before the start says why, instead of blaming the weekly limit or asking for a renewal.
+  t.fx.enroll(a.student, sLA, 1, { status: 'paused' });
+  const p = await enroll(t, a.parent, a.student, sLA, 1);
+  assert.equal(p.body.message, `${a.student.name.split(' ')[0]}'s spot in Afternoon Study is paused because the membership doesn't start until Oct 15, 2026.`);
+  // From its first day it is active.
+  t.clock.set(at(LA, '2026-10-15', '00:05'));
+  assert.equal((await enroll(t, a.parent, a.student, sLA, 5)).status, 201);
+});
+
 test(['EN-4'], 'the weekly cap is a hard cap on slots held; paused, dropped and past-term slots do not count', async () => {
   const { t, loc, sess } = await world();
   const f = t.fx.family(loc, { cap: 2 });
@@ -586,6 +623,80 @@ test(['EN-3', 'NF-1'], 'only the student asks, and only that student\'s own pare
   assert.equal(t.db.prepare('SELECT status FROM enrollment_requests WHERE id = ?').get(id).status, 'pending');
   assert.deepEqual((await t.as(g.parent).get('/api/enrollment/requests')).body.requests, []);
   assert.deepEqual((await t.as(g.student).get('/api/enrollment/requests')).body.requests, []);
+});
+
+// A request whose slot is gone can never be approved: it is closed with the
+// center's real reason, and nobody tells the student a parent declined it.
+test(['EN-3'], 'a pending request for a day the session no longer meets is closed with that reason, never as a parent decline', async () => {
+  const { t, loc, sess } = await world();
+  const f = t.fx.family(loc);
+  const first = f.student.name.split(' ')[0];
+  const r = await t.as(f.student).post('/api/enrollment/requests', { sessionId: sess.id, weekday: 5 });
+  const keep = await t.as(f.student).post('/api/enrollment/requests', { sessionId: sess.id, weekday: 1 });
+  t.db.prepare("UPDATE sessions SET weekdays = '1,3' WHERE id = ?").run(sess.id); // the director takes Friday off
+  const list = await t.as(f.parent).get('/api/enrollment/requests');
+  assert.deepEqual(list.body.requests.filter(x => x.status === 'pending').map(x => x.id), [keep.body.request.id], 'only the Monday request still waits for a parent');
+  const row = t.db.prepare('SELECT * FROM enrollment_requests WHERE id = ?').get(r.body.request.id);
+  assert.deepEqual([row.status, row.decided_by, row.decided_at, row.outcome_message],
+    ['declined', null, t.clock.now(), 'Afternoon Study no longer meets on Fridays.']);
+  const told = t.fx.notifications(f.student, 'enrollment_request_closed');
+  assert.equal(told.length, 1);
+  assert.equal(told[0].title, 'Your request for Afternoon Study on Fridays was closed');
+  assert.equal(told[0].body, "Afternoon Study no longer meets on Fridays. Your request can't go ahead, so it was closed. You can ask for a different session in Schedule.");
+  assert.equal(told[0].ref_id, r.body.request.id);
+  assert.equal(t.fx.notifications(f.student, 'enrollment_request_declined').length, 0, 'no parent declined it');
+  // Listing again tells nobody twice; a late approve or decline says it was already closed, and why.
+  await t.as(f.student).get('/api/enrollment/requests');
+  t.jobs();
+  assert.equal(t.fx.notifications(f.student, 'enrollment_request_closed').length, 1);
+  for (const how of ['approve', 'decline']) {
+    const late = await t.as(f.parent).post(`/api/enrollment/requests/${r.body.request.id}/${how}`);
+    assert.deepEqual([late.status, late.body.error, late.body.message],
+      [409, 'already_decided', 'This request was already closed: Afternoon Study no longer meets on Fridays.']);
+  }
+  assert.equal(t.db.prepare('SELECT status FROM enrollment_requests WHERE id = ?').get(keep.body.request.id).status, 'pending');
+  assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM enrollments').get().n, 0);
+  // The student sees it closed, with the reason.
+  const mine = (await t.as(f.student).get('/api/enrollment/requests')).body.requests.find(x => x.id === r.body.request.id);
+  assert.deepEqual([mine.status, mine.decided_by, mine.outcome_message], ['declined', null, 'Afternoon Study no longer meets on Fridays.']);
+});
+
+test(['EN-3'], 'approving or declining a request for a cancelled session closes it with the real reason; the job closes ones whose term ended', async () => {
+  const { t, loc, sess } = await world();
+  const quiet = t.fx.session(loc, { name: 'Quiet Room', weekdays: '2,4', start: '16:30', end: '18:30' });
+  const f = t.fx.family(loc), g = t.fx.family(loc);
+  const name = s => s.name.split(' ')[0];
+  const a = (await t.as(f.student).post('/api/enrollment/requests', { sessionId: quiet.id, weekday: 2 })).body.request;
+  const b = (await t.as(g.student).post('/api/enrollment/requests', { sessionId: quiet.id, weekday: 4 })).body.request;
+  t.db.prepare("UPDATE sessions SET status = 'cancelled' WHERE id = ?").run(quiet.id); // the director cancels it
+  // Neither family has looked since, so each parent acts on the stale row.
+  const ok = await t.as(f.parent).post(`/api/enrollment/requests/${a.id}/approve`);
+  assert.equal(ok.status, 200);
+  assert.deepEqual([ok.body.outcome, ok.body.code, ok.body.message], ['closed', 'request_closed',
+    `The center cancelled Quiet Room. ${name(f.student)}'s request can't go ahead, so it was closed, and ${name(f.student)} has been told why.`]);
+  const no = await t.as(g.parent).post(`/api/enrollment/requests/${b.id}/decline`);
+  assert.equal(no.body.outcome, 'closed');
+  for (const [s, req] of [[f.student, a], [g.student, b]]) {
+    const row = t.db.prepare('SELECT status, decided_by, outcome_message FROM enrollment_requests WHERE id = ?').get(req.id);
+    assert.deepEqual({ ...row }, { status: 'declined', decided_by: null, outcome_message: 'The center cancelled Quiet Room.' });
+    assert.equal(t.fx.notifications(s, 'enrollment_request_closed').length, 1);
+    assert.match(t.fx.notifications(s, 'enrollment_request_closed')[0].body, /^The center cancelled Quiet Room\. /);
+    assert.equal(t.fx.notifications(s, 'enrollment_request_declined').length, 0);
+    assert.equal(t.fx.notifications(s, 'enrollment_request_approved').length, 0);
+  }
+  // A request left waiting until its term is over is closed by the scheduled job, with nobody looking.
+  const h = t.fx.family(loc);
+  const c = (await t.as(h.student).post('/api/enrollment/requests', { sessionId: sess.id, weekday: 1 })).body.request;
+  t.clock.set(at(LA, '2026-12-18', '20:00'));
+  t.jobs();
+  assert.equal(t.db.prepare('SELECT status FROM enrollment_requests WHERE id = ?').get(c.id).status, 'pending', 'Dec 18 is still the last day of the term');
+  t.clock.set(at(LA, '2026-12-19', '08:00'));
+  const ran = t.jobs();
+  assert.ok(ran.includes('enrollment.close-gone-requests'));
+  assert.deepEqual({ ...t.db.prepare('SELECT status, decided_by, outcome_message FROM enrollment_requests WHERE id = ?').get(c.id) },
+    { status: 'declined', decided_by: null, outcome_message: 'Fall 2026 has ended.' });
+  assert.equal(t.fx.notifications(h.student, 'enrollment_request_closed')[0].title, 'Your request for Afternoon Study on Mondays was closed');
+  assert.equal(t.fx.notifications(h.parent).filter(n => n.kind !== 'enrollment_request').length, 0, 'the student is the one told');
 });
 
 // ---------------------------------------------------------------- EN-6, EN-7
@@ -1097,4 +1208,60 @@ test(['EN-4', 'MB-5'], "a student whose membership lapsed hears one message on S
     await tab.open(who.student, '#/schedule');
     assert.deepEqual(notes(tab), want);
   }
+});
+
+// D-16 / R6: the Schedule's membership line names the state the server judged, never "active" for a lapsed or unstarted one.
+test(['EN-4'], 'the membership line on Schedule says expired past the last day and "starts" before the first, for parents and students alike', async () => {
+  const { t, loc, sess } = await world();
+  const expired = t.fx.family(loc, { expires: '2026-10-13' });
+  t.fx.enroll(expired.student, sess, 1, { status: 'paused' });
+  const early = t.fx.family(loc, { cap: 2, start: '2026-11-02' });
+  t.fx.enroll(early.student, sess, 3, { status: 'paused' });
+  const fine = t.fx.family(loc);
+  const off = t.fx.family(loc, { status: 'inactive' });
+  const lines = tab => tab.main().findAll(n => n.tag === 'p' && /^(Membership|No membership)/.test(words(n))).map(words);
+  for (const [who, want] of [
+    [expired, 'Membership expired · 0 of 3 weekly sessions in use · last day was Oct 13, 2026'],
+    [early, 'Membership starts Nov 2, 2026 · 0 of 2 weekly sessions in use · valid through Jun 30, 2027'],
+    [fine, 'Membership active · 0 of 3 weekly sessions in use · valid through Jun 30, 2027'],
+    [off, 'Membership inactive · 0 of 3 weekly sessions in use · valid through Jun 30, 2027']]) {
+    for (const u of [who.parent, who.student]) {
+      const tab = shellTab(t);
+      await tab.open(u, '#/schedule');
+      assert.deepEqual(lines(tab), [want], u.role);
+    }
+  }
+  // Before the start, nobody is told to renew, and paused weeks name the start date.
+  const tab = shellTab(t);
+  await tab.open(early.student, '#/schedule');
+  const notes = tab.main().findAll(n => n.getAttribute('role') === 'note').map(words);
+  assert.deepEqual(notes, ['Your membership starts on Nov 2, 2026. Sessions can be added from that day. You can still ask; your parent will see this too.']);
+  assert.ok(words(tab.main()).includes('Membership starts Nov 2, 2026'));
+  assert.ok(!/renew/i.test(words(tab.main())), 'nothing asks to renew a membership that has not started');
+  const parent = shellTab(t);
+  await parent.open(early.parent, '#/schedule');
+  assert.ok(words(parent.main()).includes("Paused sessions don't hold a seat. " + early.student.name.split(' ')[0] + "'s membership starts on Nov 2, 2026."));
+  assert.ok(!/renew/i.test(words(parent.main())));
+});
+
+test(['EN-3'], 'a request closed because its slot is gone shows as Closed with the reason, and a parent acting on a stale row is told the real reason', async () => {
+  const { t, loc, sess } = await world();
+  const f = t.fx.family(loc);
+  rename(t, f.student, 'Sofia Garcia');
+  const r = await t.as(f.student).post('/api/enrollment/requests', { sessionId: sess.id, weekday: 5 });
+  const parent = shellTab(t);
+  await parent.open(f.parent, '#/schedule');
+  const approve = byTag(parent.main(), 'button').find(b => b.getAttribute('aria-label') === "Approve Sofia's request for Afternoon Study on Fridays");
+  t.db.prepare("UPDATE sessions SET weekdays = '1,3' WHERE id = ?").run(sess.id); // Friday is taken off while the page is open
+  approve.click();
+  await parent.settle();
+  assert.deepEqual(parent.toasts(), ["Afternoon Study no longer meets on Fridays. Sofia's request can't go ahead, so it was closed, and Sofia has been told why."]);
+  assert.equal(byTag(parent.main(), 'button').find(b => /^Approve Sofia/.test(b.getAttribute('aria-label') || '')), undefined, 'the request is gone from the list');
+  assert.equal(t.db.prepare('SELECT outcome_message FROM enrollment_requests WHERE id = ?').get(r.body.request.id).outcome_message, 'Afternoon Study no longer meets on Fridays.');
+  const student = shellTab(t);
+  await student.open(f.student, '#/schedule');
+  const card = student.main().find(n => n.getAttribute('aria-labelledby') === 'en-myreq-h');
+  const row = card.findAll(n => n.tag === 'li')[0];
+  assert.match(words(row), /^Afternoon Study Fridays · 1pm–4pm Afternoon Study no longer meets on Fridays\. Closed$/);
+  assert.ok(!/Declined/.test(words(card)));
 });

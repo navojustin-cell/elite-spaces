@@ -11,7 +11,8 @@
 //   POST  /staff/:id/reset-password    same scope -> new temporary password (shown once)
 //   GET   /locations                   director+: my location (HQ: all), with its directors
 //   POST  /locations                   HQ: create a location
-//   PATCH /locations/:id               HQ: any field; director: own location's radius, QR time and hours only (D-5)
+//   PATCH /locations/:id               HQ: any field; director: own location's radius, QR time and hours only (D-5).
+//                                      New hours must still cover every active session of a term that hasn't ended (R4)
 //   POST  /directors                   HQ: { name, email, phone?, location_id } -> director + temporary password
 //   POST  /directors/assign            HQ: { user_id, location_id } -> make an existing staff member or director the director there
 
@@ -20,6 +21,7 @@ const { tx } = require('../../db');
 const auth = require('../../auth');
 const notify = require('../../notify');
 const audit = require('../../audit');
+const time = require('../../time');
 const { bad, forbidden, notFound, conflict } = require('../../errors');
 const u = require('./util');
 
@@ -105,6 +107,21 @@ function locationFields(b, cur) {
   }
   if (out.open_time >= out.close_time) throw bad('close_time', 'The closing time must be after the opening time.');
   return out;
+}
+
+// 'HH:MM' -> '9:00 AM'.
+const ampm = hhmm => { const [h, m] = hhmm.split(':').map(Number); return `${(h + 11) % 12 + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
+
+// R4: a location's hours may not be changed so that an active session of a
+// term that hasn't ended falls outside them. `f` holds the new hours and zone.
+function assertSessionsFit(ctx, locId, f) {
+  const today = time.localDate(f, ctx.clock.now());
+  const s = ctx.db.prepare(`SELECT s.name, s.start_time, s.end_time FROM sessions s JOIN terms t ON t.id = s.term_id
+    WHERE s.location_id = ? AND s.status = 'active' AND t.end_date >= ? AND (s.start_time < ? OR s.end_time > ?)
+    ORDER BY s.start_time, s.name LIMIT 1`).get(locId, today, f.open_time, f.close_time);
+  if (!s) return;
+  throw conflict('session_outside_hours', `${s.name} runs ${ampm(s.start_time)}–${ampm(s.end_time)}, outside ${ampm(f.open_time)}–${ampm(f.close_time)}. `
+    + 'Choose hours that cover it, or change that session first.');
 }
 
 function locationsOut(db, rows) {
@@ -210,6 +227,7 @@ function routes(r, ctx) {
     const f = locationFields(b, cur);
     const changes = {};
     for (const k of [...DIRECTOR_FIELDS, ...HQ_FIELDS]) if (f[k] !== cur[k]) changes[k] = [cur[k], f[k]];
+    if (changes.open_time || changes.close_time) assertSessionsFit(ctx, cur.id, f);
     if (Object.keys(changes).length) {
       tx(db, () => {
         db.prepare(`UPDATE locations SET name = ?, timezone = ?, address = ?, lat = ?, lng = ?, geofence_m = ?, qr_rotate_at = ?,

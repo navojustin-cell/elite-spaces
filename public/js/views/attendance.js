@@ -301,10 +301,23 @@
       };
       fillSessions();
 
+      // The range shortcuts are the chosen location's own (its week, month and term, by
+      // its own date). A new location redraws them, and a shortcut that was chosen
+      // stays chosen: "Fall 2026" becomes that location's Fall 2026.
+      let presets = locOf().presets;
+      const range = h('div', null, rangePicker(presets, repState, markStale));
+      const redrawRange = () => {
+        const was = presets.find(p => p.from === repState.from && p.to === repState.to);
+        presets = locOf().presets;
+        const same = was && presets.find(p => p.id === was.id);
+        if (same) Object.assign(repState, { from: same.from, to: same.to });
+        range.replaceChildren(rangePicker(presets, repState, markStale));
+      };
+
       let locationField;
       if (opts.all_locations) {
         const pickLocation = h('select', { id: 'rep-location', onchange: () => {
-          repState.location = pickLocation.value; repState.session = ''; fillSessions(); markStale();
+          repState.location = pickLocation.value; repState.session = ''; fillSessions(); redrawRange(); markStale();
         } }, h('option', { value: 'all' }, 'All locations'), opts.locations.map(l => h('option', { value: l.id }, l.name)));
         pickLocation.value = repState.location;
         locationField = h('label', { class: 'field' }, h('span', null, 'Location'), pickLocation);
@@ -315,7 +328,7 @@
       const results = h('section', { 'aria-busy': 'false', 'aria-label': 'Report' });
       const form = h('form', { class: 'card', onsubmit: e => { e.preventDefault(); draw(); } },
         h('div', { class: 'att-filters' }, locationField, h('label', { class: 'field' }, h('span', null, 'Session'), pickSession)),
-        rangePicker(locOf().presets, repState, markStale),
+        range,
         h('button', { type: 'submit', class: 'btn btn-primary' }, 'Show report'));
       el.append(form, status, results);
 

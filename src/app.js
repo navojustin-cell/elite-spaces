@@ -114,4 +114,8 @@ function runJobs(ctx) {
   return ran;
 }
 
-module.exports = { createApp, runJobs };
+// Dev mode (one-tap demo sign-in, clock control, the /api/dev endpoints) is off
+// unless ELITE_DEV=1 is set explicitly (R9). server.js reads it through here.
+const devFromEnv = env => env.ELITE_DEV === '1';
+
+module.exports = { createApp, runJobs, devFromEnv };

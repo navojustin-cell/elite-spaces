@@ -215,13 +215,25 @@ module.exports = {
       const note = noteFor(db, studentId, date);
       if (note && note.location_id !== loc.id) throw conflict('other_location', 'This student already has a note for that day from another location.');
       const wasPosted = !!note && note.status === 'posted';
+      // A posted note is only changed by a deliberate edit, which sends no `post`
+      // (D-25). "Save for later" or "Post note" from a screen that hadn't caught up
+      // with a colleague's post would otherwise overwrite the posted note.
+      if (wasPosted && body.post === false) {
+        throw conflict('already_posted', `${note.posted_by_name} already posted ${student.name.split(' ')[0]}'s note, so it can't be saved for later. Your changes weren't saved.`);
+      }
+      if (wasPosted && body.post === true) {
+        throw conflict('already_posted', `${note.posted_by_name} already posted ${student.name.split(' ')[0]}'s note, so yours wasn't posted. Your changes weren't saved.`);
+      }
 
       // DN-2: each item takes 1, 2 or 3; a missing one stays blank.
       const given = body.ratings == null ? {} : body.ratings;
       if (typeof given !== 'object' || Array.isArray(given)) throw bad('bad_ratings', 'Ratings must list each checklist item.');
       const base = ratingsToEdit(db, note);
       const known = new Set(base.map(x => String(x.item_id)));
-      if (Object.keys(given).some(k => !known.has(k))) throw bad('unknown_item', 'That checklist item is not on this note. Reload and try again.');
+      // An item HQ retired while the form was open is not on the note any more (D-8);
+      // its rating is dropped rather than blocking every save.
+      const retired = new Set(db.prepare('SELECT id FROM note_items WHERE active = 0').all().map(x => String(x.id)));
+      if (Object.keys(given).some(k => !known.has(k) && !retired.has(k))) throw bad('unknown_item', 'That checklist item is not on this note. Reload and try again.');
       const ratings = base.map(x => {
         const v = given[x.item_id] ?? null;
         if (v !== null && ![1, 2, 3].includes(v)) throw bad('bad_rating', `Rate ${x.label} as Needs work, Good or Great.`);

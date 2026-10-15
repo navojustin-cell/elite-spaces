@@ -315,6 +315,70 @@ test(['DN-2', 'DN-5'], 'a posted note keeps the checklist wording it was written
     ['On time', 'Stayed focused', 'Respectful of others / not distracting', 'Asked for help when stuck']);
 });
 
+test(['DN-2', 'DN-4'], 'an item HQ retires while a note form is open drops off the note instead of blocking every save', async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  w.visit(leo, w.A);
+  const [onTime, focused, respectful, productive] = w.items;
+  // The form was loaded with all four items; HQ then retires Focused.
+  assert.equal((await w.t.as(w.hq).patch('/api/notes/items/' + focused.id, { active: false })).status, 200);
+
+  // Save for later with the stale keys, the retired one rated or blank.
+  const later = await w.save(w.staffA, leo, TODAY, { ratings: { [onTime.id]: 3, [focused.id]: 2, [respectful.id]: null, [productive.id]: 2 }, comment: 'Busy day.', post: false });
+  assert.equal(later.status, 200);
+  assert.equal(later.body.student.status, 'draft');
+  assert.deepEqual(later.body.student.ratings.map(x => [x.label, x.rating]),
+    [['On time', 3], ['Respectful of others / not distracting', null], ['Productive use of time', 2]]);
+  const blankRetired = await w.save(w.staffA, leo, TODAY, { ratings: { [onTime.id]: 3, [focused.id]: null, [respectful.id]: 2, [productive.id]: 2 }, comment: 'Busy day.', post: true });
+  assert.equal(blankRetired.status, 200, 'a blank on a retired item does not block posting');
+  assert.equal(blankRetired.body.student.status, 'posted');
+  assert.deepEqual(w.ratingsOf(w.notes()[0].id).map(x => x.label), ['On time', 'Respectful of others / not distracting', 'Productive use of time']);
+  assert.equal(w.t.fx.notifications(w.fa.parent, 'note').length, 1);
+
+  // An id that was never on the checklist is still refused.
+  const unknown = await w.save(w.staffA, leo, TODAY, { ratings: { [onTime.id]: 3, [respectful.id]: 2, [productive.id]: 2, 999: 2 } });
+  assert.equal(unknown.status, 400);
+  assert.equal(unknown.body.error, 'unknown_item');
+});
+
+test(['DN-5', 'DN-4'], '"Save for later" or "Post note" on a note a colleague has already posted is refused and leaves the posted note alone', async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  w.visit(leo, w.A);
+  const sam = w.t.fx.staff(w.A, { name: 'Sam Rivera' });
+  w.t.clock.set(at(LA, TODAY, '16:10'));
+  assert.equal((await w.save(sam, leo, TODAY, { ratings: w.all(3), comment: 'Great day.', post: true })).status, 200);
+
+  // Chris's screen still shows the note as not posted.
+  w.t.clock.set(at(LA, TODAY, '16:12'));
+  const stale = await w.save(w.staffA, leo, TODAY, { ratings: w.all(1), comment: 'my draft', post: false });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.error, 'already_posted');
+  assert.equal(stale.body.message, "Sam Rivera already posted Leo's note, so it can't be saved for later. Your changes weren't saved.");
+  const [row] = w.notes();
+  assert.deepEqual([row.status, row.comment, row.edited_at, row.posted_by], ['posted', 'Great day.', null, sam.id]);
+  assert.deepEqual(w.ratingsOf(row.id).map(x => x.rating), [3, 3, 3, 3]);
+  assert.equal(w.t.fx.audit('note.edit').length, 0);
+  const feed = await w.t.as(w.fa.parent).get('/api/notes/feed');
+  assert.deepEqual([feed.body.notes[0].comment, feed.body.notes[0].edited_at], ['Great day.', null]);
+
+  // "Post note" from the same stale screen is refused too: it would overwrite Sam's note, and parents are not told again.
+  const stalePost = await w.save(w.staffA, leo, TODAY, { ratings: w.all(1), comment: 'my note', post: true });
+  assert.equal(stalePost.status, 409);
+  assert.equal(stalePost.body.error, 'already_posted');
+  assert.equal(stalePost.body.message, "Sam Rivera already posted Leo's note, so yours wasn't posted. Your changes weren't saved.");
+  assert.deepEqual([w.notes()[0].comment, w.notes()[0].edited_at], ['Great day.', null]);
+  assert.deepEqual(w.ratingsOf(row.id).map(x => x.rating), [3, 3, 3, 3]);
+  assert.equal(w.t.fx.audit('note.edit').length, 0);
+
+  // A deliberate edit (no `post`, as "Save changes" sends) still updates it in place, without a second notification.
+  const edit = await w.save(w.staffA, leo, TODAY, { ratings: Object.assign(w.all(3), { [w.items[1].id]: 2 }), comment: 'Great day.' });
+  assert.equal(edit.status, 200);
+  assert.equal(edit.body.student.note.edited_by_name, 'Chris Ortiz');
+  assert.equal(w.t.fx.audit('note.edit').length, 1);
+  assert.equal(w.t.fx.notifications(w.fa.parent, 'note').length, 1);
+});
+
 // ---------------------------------------------------------------- DN-3
 
 test(['DN-3'], 'the comment is optional; when given, parents see it as written', async () => {
@@ -952,4 +1016,139 @@ test(['DN-2', 'NF-7'], "the checklist's move up and move down buttons are 44px t
   assert.equal(moves.length, 8);
   for (const b of moves) assert.ok(b.cls.includes('note-move'), b.id);
   assert.match(tab.css(), /\.note-move \{ min-width: 44px; min-height: 44px; \}/);
+});
+
+// One student's card on the staff day list, with helpers to tap ratings, type and read it back.
+function noteCard(tab, student) {
+  const card = () => byId(tab.main, 'dn-' + student.id);
+  const groups = () => card().findAll(n => n.getAttribute('role') === 'group');
+  return {
+    card,
+    labels: () => groups().map(g => g.childNodes[0].textContent),
+    tap: (label, word) => tab.click(groups().find(g => g.childNodes[0].textContent === label).find(b => b.tag === 'button' && b.textContent === word)),
+    pressed: () => groups().map(g => { const b = g.find(x => x.tag === 'button' && x.getAttribute('aria-pressed') === 'true'); return b ? b.textContent : null; }),
+    hint: () => card().find(n => n.cls.includes('note-hint')).textContent,
+    badge: () => card().find(n => n.tag === 'span' && n.cls.includes('badge')).textContent,
+    button: label => card().find(n => n.tag === 'button' && n.textContent === label),
+    comment: () => byId(tab.main, 'dn-c-' + student.id),
+    type(text) { const c = this.comment(); c.value = text; c.dispatch('input'); },
+  };
+}
+const lastToast = tab => { const t = tab.main.parentNode.find(n => n.id === 'toasts').childNodes.at(-1); return t && [t.textContent, t.cls.includes('toast-error')]; };
+
+test(['DN-5', 'DN-4'], "on a stale screen, \"Save for later\" on a note a colleague posted says so, keeps the posted note, and redraws the card as posted with the edits kept", async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  w.visit(leo, w.A);
+  const sam = w.t.fx.staff(w.A, { name: 'Sam Rivera' });
+  const tab = notesTab(w.t);
+  await tab.signIn(w.staffA);
+  await tab.open('daily-notes');
+  const c = noteCard(tab, leo);
+  assert.equal(c.badge(), 'Not started');
+
+  // Sam posts from another device; Chris's screen hasn't caught up.
+  assert.equal((await w.save(sam, leo, TODAY, { ratings: w.all(3), comment: 'Great day.', post: true })).status, 200);
+  await c.tap('On time', 'Good');
+  c.type('my draft');
+  await tab.click(c.button('Save for later'));
+
+  const [row] = w.notes();
+  assert.deepEqual([row.status, row.comment, row.edited_at], ['posted', 'Great day.', null], "Sam's posted note is untouched");
+  assert.deepEqual(w.ratingsOf(row.id).map(x => x.rating), [3, 3, 3, 3]);
+  assert.deepEqual(lastToast(tab), ["Sam Rivera already posted Leo's note, so it can't be saved for later. Your changes weren't saved.", true]);
+  // The card now shows the note as posted, with Chris's edits still on the form to save deliberately or drop.
+  assert.equal(c.badge(), 'Posted');
+  assert.equal(c.button('Save for later'), undefined);
+  assert.ok(c.button('Save changes') && c.button('Cancel'));
+  assert.deepEqual(c.pressed(), ['Good', null, null, null]);
+  assert.equal(c.comment().value, 'my draft');
+  await tab.click(c.button('Cancel'));
+  assert.match(words(c.card()), /Great day\./);
+  assert.match(words(c.card()), /Posted .* by Sam Rivera/);
+
+  // Edit note, Save changes: a deliberate edit goes through, without a second notification.
+  await tab.click(c.button('Edit note'));
+  await c.tap('Focused', 'Good');
+  await tab.click(c.button('Save changes'));
+  assert.deepEqual(lastToast(tab), ["Saved changes to Leo's note.", false]);
+  assert.deepEqual(w.ratingsOf(w.notes()[0].id).map(x => x.rating), [3, 2, 3, 3]);
+  assert.equal(w.notes()[0].edited_by, w.staffA.id);
+  assert.equal(w.t.fx.notifications(w.fa.parent, 'note').length, 1);
+});
+
+test(['DN-5', 'DN-4'], 'on a stale screen, "Post note" on a note a colleague posted says so instead of claiming parents were notified, and keeps the posted note', async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  w.visit(leo, w.A);
+  const sam = w.t.fx.staff(w.A, { name: 'Sam Rivera' });
+  const tab = notesTab(w.t);
+  await tab.signIn(w.staffA);
+  await tab.open('daily-notes');
+  const c = noteCard(tab, leo);
+
+  assert.equal((await w.save(sam, leo, TODAY, { ratings: w.all(3), comment: 'Great day.', post: true })).status, 200);
+  for (const label of PRD_ITEMS) await c.tap(label, 'Needs work');
+  c.type('my note');
+  await tab.click(c.button('Post note'));
+
+  const [row] = w.notes();
+  assert.deepEqual([row.status, row.comment, row.edited_at, row.posted_by], ['posted', 'Great day.', null, sam.id], "Sam's posted note is untouched");
+  assert.deepEqual(w.ratingsOf(row.id).map(x => x.rating), [3, 3, 3, 3]);
+  assert.deepEqual(lastToast(tab), ["Sam Rivera already posted Leo's note, so yours wasn't posted. Your changes weren't saved.", true]);
+  assert.equal(w.t.fx.notifications(w.fa.parent, 'note').length, 1);
+  assert.equal(c.badge(), 'Posted');
+  assert.ok(c.button('Save changes') && c.button('Cancel'));
+  assert.deepEqual(c.pressed(), ['Needs work', 'Needs work', 'Needs work', 'Needs work']);
+  assert.equal(c.comment().value, 'my note');
+
+  // Saving those edits now is a deliberate edit of Sam's note.
+  await tab.click(c.button('Save changes'));
+  assert.deepEqual(lastToast(tab), ["Saved changes to Leo's note.", false]);
+  assert.deepEqual([w.notes()[0].comment, w.notes()[0].edited_by], ['my note', w.staffA.id]);
+  assert.equal(w.t.fx.notifications(w.fa.parent, 'note').length, 1);
+});
+
+test(['DN-2', 'DN-4'], 'when HQ retires a checklist item while a note form is open, saving and posting still work; when HQ adds one, the card redraws to show it', async () => {
+  const w = await world();
+  const leo = w.fa.students[0], anh = w.fb.student;
+  w.visit(leo, w.A); w.visit(anh, w.A);
+  const [, focused] = w.items;
+  const hq = w.t.as(w.hq);
+  const tab = notesTab(w.t);
+  await tab.signIn(w.staffA);
+  await tab.open('daily-notes');
+  const L = noteCard(tab, leo), A = noteCard(tab, anh);
+
+  // Leo: rated and commented, then HQ retires Focused.
+  for (const label of PRD_ITEMS) await L.tap(label, 'Great');
+  await L.tap('Respectful of others / not distracting', 'Great'); // cleared again: a draft
+  L.type('Busy day.');
+  assert.equal((await hq.patch('/api/notes/items/' + focused.id, { active: false })).status, 200);
+  await tab.click(L.button('Save for later'));
+  assert.deepEqual(lastToast(tab), ["Saved Leo's note for later. Parents can't see it yet.", false]);
+  assert.equal(L.badge(), 'Saved, not posted');
+  assert.deepEqual(L.labels(), ['On time', 'Respectful of others / not distracting', 'Productive use of time']);
+  assert.deepEqual(L.pressed(), ['Great', null, 'Great']);
+  assert.equal(L.comment().value, 'Busy day.');
+  await L.tap('Respectful of others / not distracting', 'Good');
+  await tab.click(L.button('Post note'));
+  assert.equal(L.badge(), 'Posted');
+  const leoNote = w.notes().find(n => n.student_id === leo.id);
+  assert.deepEqual(w.ratingsOf(leoNote.id).map(x => [x.label, x.rating]),
+    [['On time', 3], ['Respectful of others / not distracting', 2], ['Productive use of time', 3]]);
+  assert.equal(leoNote.comment, 'Busy day.');
+
+  // Anh: HQ adds an item the open form doesn't show yet. Post is refused, and the card redraws with it.
+  assert.equal((await hq.post('/api/notes/items', { label: 'Tidy' })).status, 201);
+  for (const label of A.labels()) await A.tap(label, 'Great');
+  await tab.click(A.button('Post note'));
+  assert.deepEqual(lastToast(tab), ['Rate Tidy to post this note.', true]);
+  assert.deepEqual(A.labels(), ['On time', 'Respectful of others / not distracting', 'Productive use of time', 'Tidy']);
+  assert.deepEqual(A.pressed(), ['Great', 'Great', 'Great', null], 'the ratings already chosen are kept');
+  assert.equal(A.hint(), 'Rate Tidy to post.');
+  assert.equal(A.button('Post note').disabled, true);
+  await A.tap('Tidy', 'Good');
+  await tab.click(A.button('Post note'));
+  assert.equal(w.notes().find(n => n.student_id === anh.id).status, 'posted');
 });

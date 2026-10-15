@@ -73,4 +73,10 @@ module.exports = [
     find: "h('h1', { class: 'logo' }, 'ELITE Spaces')", repl: "h('div', { class: 'logo' }, 'ELITE Spaces')" },
   { name: 'signing in from a scan link looks like any other sign-in', covers: ['CORE'], file: 'public/js/app.js',
     find: 'const scanning = /^#\\/scan\\//.test(location.hash);', repl: 'const scanning = false;' },
+  { name: 'dev mode is on unless ELITE_DEV=0 (fail-open)', covers: ['CORE'], file: 'src/app.js',
+    find: "const devFromEnv = env => env.ELITE_DEV === '1';", repl: "const devFromEnv = env => env.ELITE_DEV !== '0';" },
+  { name: 'dev mode turns on for any ELITE_DEV value', covers: ['CORE'], file: 'src/app.js',
+    find: "const devFromEnv = env => env.ELITE_DEV === '1';", repl: "const devFromEnv = env => !!env.ELITE_DEV;" },
+  { name: 'dev endpoints are registered even with dev mode off', covers: ['CORE'], file: 'src/app.js',
+    find: '  if (dev) {', repl: '  if (true) {' },
 ];

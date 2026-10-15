@@ -1,7 +1,11 @@
 'use strict';
 // Sessions and scheduling: SC-1..SC-4, scope on every route (NF-1), and
 // per-location time zones (NF-4).
-const { test, makeApp, assert, at } = require('./lib');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const crypto = require('crypto');
+const { test, makeApp, assert, at, ROOT } = require('./lib');
 
 const MON = '2026-11-23'; // a Monday inside the default Fall 2026 term (Aug 17 - Dec 18)
 
@@ -112,7 +116,7 @@ test(['SC-1', 'NF-1'], 'a session must belong to a term at its own location', as
 
 // ---------------- SC-2: capacity per weekly slot, no seats ----------------
 
-test(['SC-2'], 'capacity and counts are per weekly day, and nobody is assigned a seat', async () => {
+test(['SC-2'], 'capacity and counts are per weekly day, paused ones counted apart, and nobody is assigned a seat', async () => {
   const w = await world();
   const s = w.t.fx.session(w.a, { weekdays: '1,3', capacity: 3 });
   const kids = [1, 2, 3, 4, 5, 6].map(() => w.t.fx.family(w.a).student);
@@ -125,9 +129,10 @@ test(['SC-2'], 'capacity and counts are per weekly day, and nobody is assigned a
   const r = await w.t.as(w.staffA).get('/api/sessions?location_id=' + w.a.id);
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.sessions.find(x => x.id === s.id).slots, [
-    { weekday: 1, enrolled: 2, waiting: 1, capacity: 3, seats_left: 1 },
-    { weekday: 3, enrolled: 1, waiting: 0, capacity: 3, seats_left: 2 },
+    { weekday: 1, enrolled: 2, paused: 0, waiting: 1, capacity: 3, seats_left: 1 },
+    { weekday: 3, enrolled: 1, paused: 1, waiting: 0, capacity: 3, seats_left: 2 },
   ]);
+  // A paused enrollment holds no seat (D-16), but it is counted, because taking off its day ends it too (D-26).
   // Capacity can come down to the busiest day's count (2), not the whole session's (3).
   const e = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { capacity: 2 });
   assert.equal(e.status, 200);
@@ -666,8 +671,8 @@ test(['NF-1'], 'a location\'s schedule, counts and closures never include anothe
     assert.deepEqual(r.body.terms.map(x => x.id), [w.termA.id], u.role);
     assert.deepEqual(r.body.closures.map(x => [x.date, x.reason]), [[MON, 'Irvine staff training']], u.role);
     assert.deepEqual(r.body.sessions.map(s => [s.id, s.name, s.slots]), [[sA.id, 'Irvine Study', [
-      { weekday: 1, enrolled: 0, waiting: 0, capacity: 4, seats_left: 4 },
-      { weekday: 3, enrolled: 1, waiting: 0, capacity: 4, seats_left: 3 },
+      { weekday: 1, enrolled: 0, paused: 0, waiting: 0, capacity: 4, seats_left: 4 },
+      { weekday: 3, enrolled: 1, paused: 0, waiting: 0, capacity: 4, seats_left: 3 },
     ]]], u.role);
   }
   // Families never get the staff "today" view (see above); staff, director and HQ get Irvine's day only.
@@ -743,4 +748,312 @@ test(['NF-1'], 'closures: the location\'s own director or HQ only', async () => 
   }
   assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM closures'), 1);
   assert.equal((await w.t.as(w.hq).del('/api/sessions/closures/' + c.body.closure.id)).status, 200);
+});
+
+// ---------------- Round-1 sweep rules (R3, R4, R7, R8) ----------------
+
+test(['SC-3'], 'R3: closures are added and removed for today or later only, by the location\'s own date; a past date is refused and nobody is told', async () => {
+  const w = await world({ now: at('America/Los_Angeles', '2026-10-14', '22:30') }); // Wed 10:30pm in Irvine, already Thu in Toronto
+  const tor = w.t.fx.location({ name: 'Toronto', timezone: 'America/Toronto' });
+  w.t.fx.term(tor);
+  const dirT = w.t.fx.director(tor);
+  const s = w.t.fx.session(w.a, { weekdays: '1,3' });
+  const fam = w.t.fx.family(w.a);
+  w.t.fx.enroll(fam.student, s, 1);
+  w.t.fx.enroll(fam.student, s, 3);
+
+  // Mon Oct 12 is over: no closure, and no "closed" notice for a day the family already had.
+  const past = await w.t.as(w.dirA).post('/api/sessions/closures', { date: '2026-10-12', reason: 'Power outage' });
+  assert.equal(past.status, 400);
+  assert.equal(past.body.error, 'past_date');
+  assert.equal(past.body.message, 'Mon, Oct 12 has already passed at Irvine. Closures can only be added for today or a later date.');
+  assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM closures'), 0);
+  assert.equal(w.t.fx.notifications(fam.parent).length, 0);
+  // Today, by each location's own date: still Wednesday in Irvine, already Thursday in Toronto.
+  assert.equal((await w.t.as(w.dirA).post('/api/sessions/closures', { date: '2026-10-14', reason: 'Storm' })).status, 201);
+  assert.equal(sent(w.t, fam.parent, 'session_closure'), 1);
+  const torWed = await w.t.as(dirT).post('/api/sessions/closures', { date: '2026-10-14' });
+  assert.equal(torWed.status, 400);
+  assert.equal(torWed.body.error, 'past_date');
+  assert.equal((await w.t.as(dirT).post('/api/sessions/closures', { date: '2026-10-15' })).status, 201);
+
+  // A past closure stays as it was: removing it is refused, and nobody is told it reopened.
+  const old = Number(w.t.db.prepare("INSERT INTO closures (location_id, date, reason) VALUES (?, '2026-10-05', 'Heat')").run(w.a.id).lastInsertRowid);
+  const reopen = await w.t.as(w.dirA).del('/api/sessions/closures/' + old);
+  assert.equal(reopen.status, 400);
+  assert.equal(reopen.body.error, 'past_date');
+  assert.equal(reopen.body.message, 'Mon, Oct 5 has already passed at Irvine. Closures can only be removed for today or a later date.');
+  assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM closures WHERE id = ?', old), 1);
+  assert.equal(sent(w.t, fam.parent, 'session_reopened'), 0);
+  // Today's own closure can still be taken back.
+  const today = w.t.db.prepare("SELECT id FROM closures WHERE location_id = ? AND date = '2026-10-14'").get(w.a.id).id;
+  assert.equal((await w.t.as(w.dirA).del('/api/sessions/closures/' + today)).status, 200);
+  assert.equal(sent(w.t, fam.parent, 'session_reopened'), 1);
+});
+
+test(['SC-1', 'SC-4'], 'R4: a session starts no earlier than its location opens and ends no later than it closes, when created or edited', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine', open_time: '09:00', close_time: '18:00' });
+  const term = t.fx.term(loc);
+  const dir = t.fx.director(loc);
+  const post = over => t.as(dir).post('/api/sessions', block(Object.assign({ term_id: term.id }, over)));
+  const msg = 'Irvine is open 9:00 AM–6:00 PM, so a session there has to start at 9:00 AM or later and end by 6:00 PM.';
+  for (const [start_time, end_time] of [['16:30', '18:30'], ['08:00', '10:00'], ['08:59', '11:00'], ['16:00', '18:01']]) {
+    const r = await post({ start_time, end_time });
+    assert.equal(r.status, 400, start_time + '-' + end_time);
+    assert.deepEqual([r.body.error, r.body.message], ['outside_hours', msg]);
+  }
+  assert.equal(count(t, 'SELECT COUNT(*) AS n FROM sessions'), 0);
+  assert.equal((await post({ start_time: '09:00', end_time: '11:00' })).status, 201); // opens at 9
+  const late = await post({ start_time: '16:00', end_time: '18:00' });             // closes at 6
+  assert.equal(late.status, 201);
+  // An edit can't push it past closing either; the session keeps its times.
+  const e = await t.as(dir).put('/api/sessions/' + late.body.session.id, { end_time: '18:30' });
+  assert.equal(e.status, 400);
+  assert.equal(e.body.error, 'outside_hours');
+  assert.deepEqual([row(t, late.body.session.id).start_time, row(t, late.body.session.id).end_time], ['16:00', '18:00']);
+  assert.equal((await t.as(dir).put('/api/sessions/' + late.body.session.id, { start_time: '15:30' })).status, 200);
+});
+
+test(['SC-3', 'SC-4'], 'R7: shortening a term tells the families whose weekly sessions it cuts, like removing a day; nobody else', async () => {
+  const w = await world(); // Wed 14 Oct 2026; Fall 2026 runs Mon Aug 17 - Fri Dec 18
+  const mwf = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const tth = w.t.fx.session(w.a, { name: 'Tue/Thu Study', weekdays: '2,4' });
+  const mon = w.t.fx.family(w.a), fri = w.t.fx.family(w.a), thu = w.t.fx.family(w.a), gone = w.t.fx.family(w.a);
+  w.t.fx.enroll(mon.student, mwf, 1);
+  w.t.fx.enroll(fri.student, mwf, 5);
+  w.t.fx.enroll(thu.student, tth, 4, { status: 'paused' });
+  w.t.fx.enroll(gone.student, mwf, 5, { status: 'dropped' });
+  const spring = w.t.fx.term(w.a, { name: 'Spring 2027', start: '2027-01-11', end: '2027-05-28' });
+  const springFam = w.t.fx.family(w.a);
+  w.t.fx.enroll(springFam.student, w.t.fx.session(w.a, { term: spring, weekdays: '1,5' }), 5);
+  const kind = 'term_shortened';
+
+  // Ending on Wed Dec 16 cuts Thu Dec 17 and Fri Dec 18.
+  const r = await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { end_date: '2026-12-16' });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.notified, 4);
+  for (const u of [fri.student, fri.parent, thu.student, thu.parent]) {
+    const n = w.t.fx.notifications(u, kind);
+    assert.equal(n.length, 1, u.name);
+    assert.equal(n[0].title, 'Fall 2026 at Irvine now runs Mon, Aug 17 – Wed, Dec 16');
+    assert.equal(n[0].body, 'Irvine changed Fall 2026 from Mon, Aug 17 – Fri, Dec 18 to Mon, Aug 17 – Wed, Dec 16. ' +
+      'Your weekly sessions in it don\'t meet outside those dates. You can pick another session in the app.');
+  }
+  for (const u of [mon.student, mon.parent, gone.student, gone.parent, springFam.student, springFam.parent]) assert.equal(sent(w.t, u, kind), 0, u.name);
+  // Lengthening it again, or moving a start date that has already passed, cuts nothing ahead.
+  assert.equal((await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { end_date: '2026-12-18' })).body.notified, 0);
+  assert.equal((await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { start_date: '2026-08-24' })).body.notified, 0);
+  // A later start for a term ahead cuts its first weeks: Fri Jan 15 is gone for the spring family.
+  const sp = await w.t.as(w.dirA).put('/api/sessions/terms/' + spring.id, { start_date: '2027-01-18' });
+  assert.equal(sp.body.notified, 2);
+  assert.equal(sent(w.t, springFam.parent, kind), 1);
+  // Ending the term yesterday cuts every weekday from today on, Mondays included.
+  assert.equal((await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { end_date: '2026-10-13' })).body.notified, 6);
+  assert.equal(sent(w.t, mon.parent, kind), 1);
+  assert.equal(count(w.t, "SELECT COUNT(*) AS n FROM enrollments WHERE status = 'active'"), 3); // enrollments are left as they are
+});
+
+test(['SC-4'], 'R8: a time edit applies from the edit date on; the times it replaced are kept for every date before it', async () => {
+  const w = await world(); // Wed 14 Oct 2026, 10:00 in Los Angeles
+  const s = w.t.fx.session(w.a, { weekdays: '1,3,5', start: '13:00', end: '16:00' });
+  const hist = id => w.t.db.prepare('SELECT until_date, start_time, end_time FROM session_times WHERE session_id = ? ORDER BY until_date').all(id).map(r => ({ ...r }));
+  const put = body => w.t.as(w.dirA).put('/api/sessions/' + s.id, body);
+  // Name, days or seats alone don't touch the times.
+  assert.equal((await put({ name: 'Afternoon Focus', capacity: 12 })).status, 200);
+  assert.deepEqual(hist(s.id), []);
+  assert.equal((await put({ start_time: '15:00', end_time: '18:00' })).status, 200);
+  assert.deepEqual(hist(s.id), [{ until_date: '2026-10-13', start_time: '13:00', end_time: '16:00' }]);
+  // A second edit the same day: the days before today still had 1-4pm.
+  assert.equal((await put({ start_time: '14:00', end_time: '17:00' })).status, 200);
+  assert.deepEqual(hist(s.id), [{ until_date: '2026-10-13', start_time: '13:00', end_time: '16:00' }]);
+  w.t.clock.set(at('America/Los_Angeles', '2026-10-20', '09:00'));
+  assert.equal((await put({ start_time: '13:00', end_time: '16:00' })).status, 200);
+  assert.deepEqual(hist(s.id), [{ until_date: '2026-10-13', start_time: '13:00', end_time: '16:00' },
+    { until_date: '2026-10-19', start_time: '14:00', end_time: '17:00' }]);
+  // The edit date is the location's own: 10:30pm Tuesday in Irvine is already Wednesday in Toronto.
+  const tor = w.t.fx.location({ name: 'Toronto', timezone: 'America/Toronto' });
+  w.t.fx.term(tor);
+  const ts = w.t.fx.session(tor, { weekdays: '1,3,5', start: '09:00', end: '11:30' });
+  w.t.clock.set(at('America/Los_Angeles', '2026-10-20', '22:30'));
+  assert.equal((await w.t.as(w.hq).put('/api/sessions/' + ts.id, { start_time: '09:30', end_time: '12:00' })).status, 200);
+  assert.deepEqual(hist(ts.id), [{ until_date: '2026-10-20', start_time: '09:00', end_time: '11:30' }]);
+});
+
+// ---------------- The Sessions screen in a browser tab (S6, S7) ----------------
+
+// Just enough DOM for public/js/app.js and the sessions view: one tree under
+// <html>, focus, bubbling events, input values and checkboxes.
+class El {
+  constructor(doc, tag, data = '') { Object.assign(this, { doc, tag, data, childNodes: [], attrs: new Map(), on: {}, parentNode: null }); }
+  get textContent() { return this.tag ? this.childNodes.map(c => c.textContent).join('') : this.data; }
+  set textContent(s) { this.replaceChildren(String(s)); }
+  setAttribute(k, v) { this.attrs.set(k, String(v)); }
+  getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
+  get id() { return this.getAttribute('id') || ''; }
+  get cls() { return (this.getAttribute('class') || '').split(/\s+/).filter(Boolean); }
+  get value() { return this.typed ?? this.getAttribute('value') ?? ''; }
+  set value(v) { this.typed = String(v); }
+  get checked() { return this.ticked ?? this.attrs.has('checked'); }
+  set checked(v) { this.ticked = !!v; }
+  get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === this.doc.documentElement; }
+  addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
+  dispatch(type, props) {
+    const ev = Object.assign({ type, target: this, stopped: false, preventDefault() {}, stopPropagation() { this.stopped = true; } }, props);
+    for (let n = this; n && !ev.stopped; n = n.parentNode) { ev.currentTarget = n; for (const fn of n.on[type] || []) fn(ev); }
+  }
+  click() { this.dispatch('click'); }
+  focus() { this.doc.focused = this; }
+  adopt(kids) { return kids.map(k => { const n = k instanceof El ? k : new El(this.doc, null, String(k)); n.remove(); n.parentNode = this; return n; }); }
+  append(...kids) { this.childNodes.push(...this.adopt(kids)); }
+  appendChild(k) { this.append(k); return k; }
+  prepend(...kids) { this.childNodes.unshift(...this.adopt(kids)); }
+  after(...kids) { const p = this.parentNode, ns = p.adopt(kids); p.childNodes.splice(p.childNodes.indexOf(this) + 1, 0, ...ns); }
+  replaceChildren(...kids) { this.childNodes.forEach(c => { c.parentNode = null; }); this.childNodes = []; this.append(...kids); }
+  remove() { if (this.parentNode) this.parentNode.childNodes = this.parentNode.childNodes.filter(c => c !== this); this.parentNode = null; }
+  contains(n) { for (; n; n = n.parentNode) if (n === this) return true; return false; }
+  all() { return this.childNodes.flatMap(c => [c, ...c.all()]); }
+  find(pred) { return this.all().find(pred); }
+  findAll(pred) { return this.all().filter(pred); }
+  // Only the shape the view asks for: '[attr] tag, [attr] tag'.
+  querySelector(sel) {
+    for (const part of sel.split(',').map(x => x.trim().match(/^\[([\w-]+)\] (\w+)$/))) {
+      for (const host of this.findAll(n => n.attrs.has(part[1]))) { const f = host.find(n => n.tag === part[2]); if (f) return f; }
+    }
+    return null;
+  }
+}
+
+// One browser tab running the real shell and sessions view (read from ROOT, so the
+// mutation runner's copy is the one exercised) against the test server.
+function sessionsTab(t, user) {
+  const pending = new Set(), requests = [];
+  const token = crypto.randomBytes(16).toString('hex');
+  t.ctx.sessions.set(token, user.id);
+  const doc = { title: '', hidden: false, addEventListener() {} };
+  const el = tag => new El(doc, tag);
+  doc.documentElement = el('html');
+  doc.head = el('head');
+  doc.body = el('body');
+  doc.documentElement.append(doc.head, doc.body);
+  const main = el('main');
+  main.setAttribute('id', 'main');
+  const toasts = el('div');
+  toasts.setAttribute('id', 'toasts');
+  doc.body.append(toasts, main);
+  Object.assign(doc, {
+    createElement: tag => new El(doc, tag), createTextNode: s => new El(doc, null, String(s)),
+    getElementById: id => doc.documentElement.find(n => n.id === id) || null,
+  });
+  Object.defineProperty(doc, 'activeElement', { get: () => (doc.focused && doc.focused.isConnected ? doc.focused : doc.body) });
+  const fetchAs = (url, opts = {}) => {
+    const p = fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie: 'sid=' + token }) }))
+      .then(async r => { requests.push(`${opts.method || 'GET'} ${url} ${r.status}`); return new Response(await r.arrayBuffer(), { status: r.status, headers: r.headers }); });
+    pending.add(p);
+    const done = () => pending.delete(p);
+    p.then(done, done);
+    return p;
+  };
+  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, console, navigator: {}, location: { hash: '' },
+    history: { replaceState() {} }, addEventListener() {}, setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
+  win.window = win;
+  vm.createContext(win);
+  for (const f of ['public/js/app.js', 'public/js/views/sessions.js']) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
+  win.App.me = { user: { id: user.id, role: user.role, name: user.name, location_id: user.location_id } };
+  const settle = async () => {
+    do {
+      await Promise.allSettled([...pending]);
+      for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+    } while (pending.size);
+  };
+  return {
+    doc, main, requests, settle,
+    async open() { const view = el('div'); main.replaceChildren(view); await win.App.views.find(v => v.id === 'sessions').render(view, []); await settle(); return view; },
+  };
+}
+const words = n => n.all().filter(c => !c.tag).map(c => c.data).join(' ').replace(/\s+/g, ' ').trim();
+const btn = (root, label) => root.find(n => n.tag === 'button' && n.textContent === label);
+const dialog = root => root.find(n => n.getAttribute('role') === 'alertdialog');
+const labels = box => box.findAll(n => n.tag === 'button').map(b => b.textContent);
+
+test(['SC-3', 'SC-4', 'NF-7'], 'Sessions screen: every confirm puts the safe button first and focused, Escape keeps things as they were, and paused enrollments are counted in what a change ends', async () => {
+  const w = await world(); // Wed 14 Oct 2026, 10:00 in Los Angeles
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const act = w.t.fx.family(w.a), pau = w.t.fx.family(w.a);
+  w.t.fx.enroll(act.student, s, 1);
+  w.t.fx.enroll(pau.student, s, 1, { status: 'paused' });
+  waitlist(w.t, w.t.fx.family(w.a).student, s, 1);
+  const tab = sessionsTab(w.t, w.dirA);
+  let view = await tab.open();
+  const openSession = () => view.find(n => n.tag === 'button' && n.cls.includes('sx-slot')).click();
+
+  // Cancel this session: the box says what ends, the paused enrollment included.
+  openSession();
+  const kill = btn(view, 'Cancel this session');
+  kill.focus();
+  kill.click();
+  let box = dialog(view);
+  assert.equal(words(box), 'Cancel Afternoon Study? This ends 2 enrollments and 1 waitlist spot, and those families are told. This can\'t be undone. Keep session Cancel session');
+  assert.deepEqual(labels(box), ['Keep session', 'Cancel session']);
+  assert.equal(tab.doc.activeElement, btn(box, 'Keep session'), 'focus starts on the safe button');
+  tab.doc.activeElement.dispatch('keydown', { key: 'Escape' });
+  await tab.settle();
+  assert.equal(dialog(view), undefined);
+  assert.equal(tab.doc.activeElement, kill, 'focus goes back to Cancel this session');
+  assert.equal(row(w.t, s.id).status, 'active');
+  assert.ok(!tab.requests.some(r => r.startsWith('POST')), tab.requests.join('\n'));
+
+  // Taking Monday off: the warning and the confirm count the paused enrollment too.
+  const monday = view.find(n => n.tag === 'input' && n.getAttribute('type') === 'checkbox' && n.value === '1');
+  monday.checked = false;
+  monday.dispatch('change');
+  assert.match(words(view), /Taking off Monday ends 2 enrollments and 1 waitlist spot for that day\. Those families will be told\./);
+  view.find(n => n.tag === 'form').dispatch('submit');
+  box = dialog(view);
+  assert.deepEqual(labels(box), ['Keep that day', 'End that day and save']);
+  assert.equal(tab.doc.activeElement, btn(box, 'Keep that day'));
+  tab.doc.activeElement.dispatch('keydown', { key: 'Escape' });
+  await tab.settle();
+  assert.equal(row(w.t, s.id).weekdays, '1,3,5');
+  assert.ok(!tab.requests.some(r => r.startsWith('PUT')), tab.requests.join('\n'));
+  view.find(n => n.tag === 'form').dispatch('submit');
+  btn(dialog(view), 'End that day and save').click();
+  await tab.settle();
+  assert.equal(row(w.t, s.id).weekdays, '3,5');
+  assert.equal(count(w.t, "SELECT COUNT(*) AS n FROM enrollments WHERE session_id = ? AND status = 'dropped'", s.id), 2);
+
+  // A closure: today or later only (R3), and its confirm starts on the safe button too.
+  view = await tab.open();
+  btn(view, 'Add a closure').click();
+  const date = view.find(n => n.getAttribute('id') === 'sx-cdate');
+  assert.equal(date.getAttribute('min'), '2026-10-14');
+  date.value = '2026-10-16';
+  view.find(n => n.tag === 'form').dispatch('submit');
+  box = dialog(view);
+  assert.deepEqual(labels(box), ['Keep it open', 'Close and tell families']);
+  assert.equal(tab.doc.activeElement, btn(box, 'Keep it open'));
+  tab.doc.activeElement.dispatch('keydown', { key: 'Escape' });
+  await tab.settle();
+  assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM closures'), 0);
+  view.find(n => n.tag === 'form').dispatch('submit');
+  btn(dialog(view), 'Close and tell families').click();
+  await tab.settle();
+  assert.deepEqual(w.t.db.prepare('SELECT date FROM closures').all().map(c => c.date), ['2026-10-16']);
+
+  // Reopen: the safe button keeps the day closed.
+  view = await tab.open();
+  view.find(n => n.tag === 'button' && n.textContent === 'Reopen').click();
+  box = dialog(view);
+  assert.deepEqual(labels(box), ['Keep closed', 'Reopen this day']);
+  assert.equal(tab.doc.activeElement, btn(box, 'Keep closed'));
+  tab.doc.activeElement.dispatch('keydown', { key: 'Escape' });
+  await tab.settle();
+  assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM closures'), 1);
+
+  // And Cancel session goes through when it is chosen.
+  openSession();
+  btn(view, 'Cancel this session').click();
+  btn(dialog(view), 'Cancel session').click();
+  await tab.settle();
+  assert.equal(row(w.t, s.id).status, 'cancelled');
 });

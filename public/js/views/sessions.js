@@ -44,20 +44,8 @@
     } catch (_) { return tz; }
   }
   const field = (label, input, hint) => h('label', { class: 'field' }, h('span', null, label), input, hint && h('div', { class: 'hint' }, hint));
-
-  // An inline confirm step that names the consequence. Resolves true or false.
-  function ask(host, { text, yes, no = 'Go back', danger }) {
-    return new Promise(resolve => {
-      const done = v => { box.remove(); resolve(v); };
-      const box = h('div', { class: 'notice notice-warn', role: 'alertdialog', 'aria-label': yes },
-        h('p', null, text),
-        h('div', { class: 'row' },
-          h('button', { type: 'button', class: 'btn ' + (danger ? 'btn-danger' : 'btn-primary'), onclick: () => done(true) }, yes),
-          h('button', { type: 'button', class: 'btn', onclick: () => done(false) }, no)));
-      host.replaceChildren(box);
-      box.querySelector('button').focus();
-    });
-  }
+  // Enrollments a day or session ends: active and paused alike (D-26).
+  const ends = x => x.enrolled + (x.paused || 0);
 
   // ---------- the Sessions screen ----------
   App.register({
@@ -152,7 +140,8 @@
               h('div', { class: 'muted small' }, c.reason || 'Closed')),
             editor && !past && h('button', { class: 'btn', 'aria-label': 'Reopen ' + longDate(c.date), onclick: async e => {
               const btn = e.currentTarget;
-              const ok = await ask(confirmHost, { text: `Reopen ${d.location.name} on ${longDate(c.date)}? Families enrolled that day are told their sessions meet as usual.`, yes: 'Reopen this day', no: 'Keep closed' });
+              const ok = await App.confirm({ el: confirmHost, opener: btn, title: `Reopen ${d.location.name} on ${longDate(c.date)}?`,
+                body: 'Families enrolled that day are told their sessions meet as usual.', confirmLabel: 'Reopen this day', cancelLabel: 'Keep closed' });
               if (!ok) return;
               await App.run(btn, async () => {
                 const r = await App.api.del('/api/sessions/closures/' + c.id);
@@ -229,7 +218,7 @@
         const confirmHost = h('div');
         const chosen = () => boxes.filter(b => b.checked).map(b => Number(b.value));
         // Days being taken off that still have families on them.
-        const losing = () => !s ? [] : s.slots.filter(x => !chosen().includes(x.weekday) && (x.enrolled || x.waiting));
+        const losing = () => !s ? [] : s.slots.filter(x => !chosen().includes(x.weekday) && (ends(x) || x.waiting));
         function refresh() {
           const len = start.value && end.value ? mins(end.value) - mins(start.value) : null;
           lenHint.textContent = len == null ? 'Sessions run 2 to 3 hours.'
@@ -237,7 +226,7 @@
               : `This session is ${fmtLen(len).trim()}. Sessions run 2 to 3 hours.`;
           const lost = losing();
           dropWarn.replaceChildren(lost.length ? h('div', { class: 'notice notice-warn' },
-            `Taking off ${lost.map(x => LONG[x.weekday]).join(' and ')} ends ${spots(lost.reduce((n, x) => n + x.enrolled, 0), lost.reduce((n, x) => n + x.waiting, 0))} for that day. Those families will be told.`) : '');
+            `Taking off ${lost.map(x => LONG[x.weekday]).join(' and ')} ends ${spots(lost.reduce((n, x) => n + ends(x), 0), lost.reduce((n, x) => n + x.waiting, 0))} for that day. Those families will be told.`) : '');
         }
         [start, end].forEach(i => i.addEventListener('input', refresh));
         boxes.forEach(b => b.addEventListener('change', refresh));
@@ -248,9 +237,10 @@
           e.preventDefault();
           const body = { name: name.value, weekdays: chosen(), start_time: start.value, end_time: end.value, capacity: Number(cap.value) };
           const lost = losing();
-          if (lost.length && !(await ask(confirmHost, {
-            text: `Stop meeting on ${lost.map(x => LONG[x.weekday]).join(' and ')}? Enrollments and waitlist spots for that day end, and those families are told. This can't be undone.`,
-            yes: 'End that day and save', danger: true,
+          if (lost.length && !(await App.confirm({ el: confirmHost, opener: save,
+            title: `Stop meeting on ${lost.map(x => LONG[x.weekday]).join(' and ')}?`,
+            body: 'Enrollments and waitlist spots for that day end, and those families are told. This can\'t be undone.',
+            confirmLabel: 'End that day and save', cancelLabel: 'Keep that day', danger: true,
           }))) return;
           await App.run(save, async () => {
             if (s) {
@@ -278,11 +268,11 @@
 
         if (s) {
           const cancelHost = h('div');
-          const enrolled = s.slots.reduce((n, x) => n + x.enrolled, 0), waiting = s.slots.reduce((n, x) => n + x.waiting, 0);
+          const enrolled = s.slots.reduce((n, x) => n + ends(x), 0), waiting = s.slots.reduce((n, x) => n + x.waiting, 0);
           const kill = h('button', { class: 'btn btn-danger', type: 'button', onclick: async () => {
-            const ok = await ask(cancelHost, {
-              text: `Cancel ${s.name}? This ends ${spots(enrolled, waiting)}, and those families are told. This can't be undone.`,
-              yes: 'Cancel session', no: 'Keep session', danger: true,
+            const ok = await App.confirm({ el: cancelHost, opener: kill, title: `Cancel ${s.name}?`,
+              body: `This ends ${spots(enrolled, waiting)}, and those families are told. This can't be undone.`,
+              confirmLabel: 'Cancel session', cancelLabel: 'Keep session', danger: true,
             });
             if (!ok) return;
             await App.run(kill, async () => {
@@ -307,9 +297,11 @@
           e.preventDefault();
           const body = { name: name.value, start_date: start.value, end_date: end.value };
           await App.run(save, async () => {
-            if (t) await App.api.put('/api/sessions/terms/' + t.id, body);
-            else ui.termId = (await App.api.post('/api/sessions/terms', Object.assign({ location_id: locId }, body))).term.id;
-            App.toast(t ? 'Term saved.' : `${body.name.trim()} added.`);
+            if (t) App.toast('Term saved.' + told((await App.api.put('/api/sessions/terms/' + t.id, body)).notified));
+            else {
+              ui.termId = (await App.api.post('/api/sessions/terms', Object.assign({ location_id: locId }, body))).term.id;
+              App.toast(`${body.name.trim()} added.`);
+            }
             await reload();
           });
         } },
@@ -320,17 +312,18 @@
       }
 
       function closureForm(box) {
-        const t = term(), loc = ui.data.location;
-        const date = h('input', { id: 'sx-cdate', type: 'date', required: true, min: t.start_date, max: t.end_date });
+        const t = term(), loc = ui.data.location, today = ui.data.today;
+        // Closures are for today or later (R3), inside the term.
+        const date = h('input', { id: 'sx-cdate', type: 'date', required: true, min: t.start_date > today ? t.start_date : today, max: t.end_date });
         const reason = h('input', { id: 'sx-creason', maxlength: 120, placeholder: 'For example, Thanksgiving' });
         const confirmHost = h('div');
         const save = h('button', { class: 'btn btn-primary', type: 'submit' }, 'Close this day');
         box.append(h('form', { onsubmit: async e => {
           e.preventDefault();
           const day = date.value;
-          const ok = await ask(confirmHost, {
-            text: `Close ${loc.name} on ${longDate(day)}? Sessions that day are cancelled and every family enrolled that day is told now. Enrollments stay as they are.`,
-            yes: 'Close and tell families',
+          const ok = await App.confirm({ el: confirmHost, opener: save, title: `Close ${loc.name} on ${longDate(day)}?`,
+            body: 'Sessions that day are cancelled and every family enrolled that day is told now. Enrollments stay as they are.',
+            confirmLabel: 'Close and tell families', cancelLabel: 'Keep it open',
           });
           if (!ok) return;
           await App.run(save, async () => {
@@ -340,7 +333,7 @@
           });
         } },
           h('h2', null, 'Add a closure'),
-          h('p', { class: 'muted small' }, `Closures fall inside ${t.name} (${shortDate(t.start_date)} – ${shortDate(t.end_date, true)}).`),
+          h('p', { class: 'muted small' }, `Closures fall inside ${t.name} (${shortDate(t.start_date)} – ${shortDate(t.end_date, true)}), today or later.`),
           h('div', { class: 'sx-pair' }, field('Date', date), field('Reason (optional)', reason, 'Families see this.')),
           confirmHost,
           h('div', { class: 'row' }, save, h('button', { class: 'btn', type: 'button', onclick: close }, 'Close'))));

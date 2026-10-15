@@ -78,7 +78,8 @@ const capUsed = (ctx, studentId, d) => ctx.db.prepare(
 
 // ---------- the membership check (EN-4) ----------
 
-// Active, not expired as of the location's local date (D-16), under the weekly cap.
+// Active, started and not expired as of the location's local date (D-16, R6:
+// valid from start_date through expires_on), under the weekly cap.
 // The same answer for every slot, so the catalog can show it before the server is asked.
 function eligibility(ctx, student, loc) {
   const name = firstName(student);
@@ -88,6 +89,7 @@ function eligibility(ctx, student, loc) {
   const used = capUsed(ctx, student.id, d);
   const out = { membership: m, used };
   if (m.status !== 'active') return Object.assign(out, { ok: false, code: 'membership_inactive', message: `${name}'s membership is inactive, so new sessions can't be added. The front desk can reactivate it.` });
+  if (m.start_date > d) return Object.assign(out, { ok: false, code: 'membership_not_started', message: `${name}'s membership starts on ${longDate(m.start_date)}. Sessions can be added from that day.` });
   if (m.expires_on < d) return Object.assign(out, { ok: false, code: 'membership_expired', message: `${name}'s membership expired on ${longDate(m.expires_on)}. Once the front desk renews it, you can add sessions again.` });
   if (used >= m.weekly_cap) {
     return Object.assign(out, { ok: false, code: 'weekly_cap', message: `${name} already has ${used} weekly session${used === 1 ? '' : 's'}, the most the membership allows. Drop one to add another.` });
@@ -167,8 +169,12 @@ function promoteAll(ctx) {
 // renewal; with the membership valid it was kept paused at renewal because it
 // would go over the weekly limit (D-16a), and comes back if the limit goes up.
 function pausedMessage(ctx, student, session, loc) {
-  const m = ctx.db.prepare('SELECT status, expires_on FROM memberships WHERE student_id = ?').get(student.id);
-  const valid = !!m && m.status === 'active' && m.expires_on >= today(ctx, loc);
+  const m = ctx.db.prepare('SELECT status, start_date, expires_on FROM memberships WHERE student_id = ?').get(student.id);
+  const d = today(ctx, loc);
+  if (m && m.status === 'active' && m.start_date > d) { // R6: not started yet, so not over any limit
+    return `${firstName(student)}'s spot in ${session.name} is paused because the membership doesn't start until ${longDate(m.start_date)}.`;
+  }
+  const valid = !!m && m.status === 'active' && m.expires_on >= d;
   return valid
     ? `${firstName(student)}'s spot in ${session.name} is paused because it would go over the membership's weekly limit. It stays saved, and the front desk can bring it back if the limit goes up.`
     : `${firstName(student)}'s spot in ${session.name} is paused until the membership is renewed.`;
@@ -286,18 +292,70 @@ function createRequest(ctx, actor, body) {
   });
 }
 
+// A pending request whose slot is gone (the session was cancelled, its day was
+// removed, or its term is over) can never be approved. It is closed with the
+// real reason: status 'declined' with no parent as decider (decided_by NULL),
+// the reason in outcome_message, and the student told why. Nobody says a parent
+// declined it. Runs as a job, and before requests are listed or decided.
+function goneReason(ctx, r) {
+  const session = ctx.db.prepare('SELECT * FROM sessions WHERE id = ?').get(r.session_id);
+  if (session.status !== 'active') return `The center cancelled ${session.name}.`;
+  if (!session.weekdays.split(',').map(Number).includes(r.weekday)) return `${session.name} no longer meets on ${DAYS[r.weekday]}s.`;
+  const term = ctx.db.prepare('SELECT name, end_date FROM terms WHERE id = ?').get(session.term_id);
+  if (term.end_date < today(ctx, getLocation(ctx, session.location_id))) return `${term.name} has ended.`;
+  return null;
+}
+
+function closeRequest(ctx, r, reason) {
+  const session = ctx.db.prepare('SELECT * FROM sessions WHERE id = ?').get(r.session_id);
+  ctx.db.prepare("UPDATE enrollment_requests SET status = 'declined', decided_by = NULL, decided_at = ?, outcome_message = ? WHERE id = ?")
+    .run(ctx.clock.now(), reason, r.id);
+  notify.send(ctx, [r.student_id], {
+    kind: 'enrollment_request_closed',
+    title: `Your request for ${session.name} on ${DAYS[r.weekday]}s was closed`,
+    body: `${reason} Your request can't go ahead, so it was closed. You can ask for a different session in Schedule.`,
+    refType: 'enrollment_request', refId: r.id,
+  });
+}
+
+// Closes every gone request among `studentIds` (every student when omitted).
+function closeGoneRequests(ctx, studentIds) {
+  return tx(ctx.db, () => {
+    const rows = studentIds
+      ? studentIds.length ? ctx.db.prepare(`SELECT * FROM enrollment_requests WHERE status = 'pending' AND student_id IN (${studentIds.map(() => '?').join(',')})`).all(...studentIds) : []
+      : ctx.db.prepare("SELECT * FROM enrollment_requests WHERE status = 'pending'").all();
+    let n = 0;
+    for (const r of rows) {
+      const reason = goneReason(ctx, r);
+      if (reason) { closeRequest(ctx, r, reason); n++; }
+    }
+    return n;
+  });
+}
+
 function decide(ctx, actor, id, approve) {
   const r0 = getRequest(ctx, id);
   if (!r0) throw notFound('That request no longer exists.');
   assertParentOf(ctx, actor, r0.student_id);
   return tx(ctx.db, () => {
     const r = getRequest(ctx, r0.id);
+    if (r.status === 'declined' && r.decided_by == null) {
+      throw conflict('already_decided', `This request was already closed: ${r.outcome_message}`);
+    }
     if (r.status !== 'pending') {
       const who = r.decided_by ? ctx.db.prepare('SELECT name FROM users WHERE id = ?').get(r.decided_by).name : 'Someone';
       throw conflict('already_decided', `${firstName({ name: who })} already ${r.status} this request.`);
     }
     const now = ctx.clock.now();
     const student = getStudent(ctx, r.student_id);
+    const gone = goneReason(ctx, r);
+    if (gone) {
+      closeRequest(ctx, r, gone);
+      return {
+        request: getRequest(ctx, r.id), outcome: 'closed', code: 'request_closed',
+        message: `${gone} ${firstName(student)}'s request can't go ahead, so it was closed, and ${firstName(student)} has been told why.`,
+      };
+    }
     const session = ctx.db.prepare('SELECT * FROM sessions WHERE id = ?').get(r.session_id);
     const by = firstName(actor);
     if (!approve) {
@@ -338,6 +396,7 @@ function decide(ctx, actor, id, approve) {
 function listRequests(ctx, user) {
   const ids = user.role === 'parent' ? auth.linkedStudentIds(ctx, user.id) : [user.id];
   if (!ids.length) return [];
+  closeGoneRequests(ctx, ids);
   const since = ctx.clock.now() - 14 * 864e5;
   const rows = ctx.db.prepare(`SELECT r.*, u.name AS student_name, s.name AS session_name, s.start_time, s.end_time, s.location_id,
       d.name AS decided_by_name
@@ -370,6 +429,7 @@ function membershipSummary(ctx, student, loc) {
   return {
     status: c.membership ? c.membership.status : null,
     weekly_cap: c.membership ? c.membership.weekly_cap : 0,
+    start_date: c.membership ? c.membership.start_date : null,
     expires_on: c.membership ? c.membership.expires_on : null,
     used: c.used, can_add: c.ok, code: c.code, message: c.message,
   };
@@ -507,5 +567,5 @@ function schedule(ctx, student, q) {
 
 module.exports = {
   getStudent, enroll, joinWaitlist, leaveWaitlist, drop, createRequest, decide, listRequests,
-  familyStudents, catalog, schedule, promoteAll,
+  familyStudents, catalog, schedule, promoteAll, closeGoneRequests,
 };

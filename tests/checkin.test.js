@@ -1127,3 +1127,269 @@ test(['CI-2', 'CI-7'], 'a location or student sent as an object or a list is tre
   // the same requests with plain ids work (the app sends numbers; a link from the QR may carry text)
   assert.equal((await t.scan(undefined, { locationId: String(t.loc.id) })).body.action, 'checkin');
 });
+
+// ---------------------------------------------------------------- sweep 2026-10-14: R2, R5, R6, D-15a, D-16a
+
+test(['CI-5', 'CI-4', 'CI-7'], 'back-to-back sessions are one visit: no auto-checkout between them, and a scan during the stay checks out (R2)', async () => {
+  const t = await setup(); // Afternoon Study, Wed 13:00-16:00
+  const late = t.fx.session(t.loc, { name: 'Late Study', weekdays: '3', start: '16:00', end: '19:00' });
+  t.fx.enroll(t.fam.student, late, 3);
+  const building = async () => (await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`)).body;
+  setClock(t, '12:55');
+  const r = await t.scan();
+  assert.equal(r.body.action, 'checkin');
+  assert.equal(r.body.session.id, t.sess.id);
+  setClock(t, '16:05');
+  t.jobs();
+  assert.equal(visitsOf(t, t.fam.student)[0].check_out_at, null, 'Late Study follows, so the visit stays open');
+  assert.equal(t.fx.notifications(t.fam.parent, 'checkout_auto').length, 0);
+  assert.deepEqual((await building()).here.map(v => v.student_id), [t.fam.student.id]);
+  setClock(t, '18:55');
+  const out = await t.scan();
+  assert.equal(out.status, 200);
+  assert.equal(out.body.action, 'checkout');
+  assert.equal(out.body.total_minutes, 360);
+  const vs = visitsOf(t, t.fam.student);
+  assert.equal(vs.length, 1, 'one visit, not a second check-in');
+  assert.deepEqual([vs[0].check_out_at, vs[0].checkout_method, vs[0].flagged], [at(LA, '2026-10-14', '18:55'), 'scan', 0]);
+  // the stay overlapped Late Study, so she is not still expected for it once she has left
+  const b = await building();
+  assert.deepEqual(b.expected.map(e => e.student_id), []);
+  assert.deepEqual(b.left.map(v => v.student_id), [t.fam.student.id]);
+  setClock(t, '19:05');
+  t.jobs();
+  assert.equal(visitsOf(t, t.fam.student)[0].check_out_at, at(LA, '2026-10-14', '18:55'));
+  assert.deepEqual(t.fx.notifications(t.fam.parent).map(n => n.kind), ['checkin', 'checkout']);
+});
+
+test(['CI-5', 'CI-6'], 'a stay is checked out automatically at the end of the last back-to-back session, capped by closing time (R2)', async () => {
+  const t = await setup();
+  // Wed: Afternoon 13:00-16:00; Late 16:30-18:00 (its window opens at 16:00, exactly when Afternoon ends);
+  // Night 17:45-21:00 overlaps Late and runs past Irvine's 20:00 closing; Gap 16:31-18:00 opens a minute too late.
+  const late = t.fx.session(t.loc, { name: 'Late Study', weekdays: '3,5', start: '16:30', end: '18:00' });
+  const night = t.fx.session(t.loc, { name: 'Night Study', weekdays: '3', start: '17:45', end: '21:00' });
+  const gap = t.fx.session(t.loc, { name: 'Gap Study', weekdays: '3', start: '16:31', end: '18:00' });
+  t.fx.enroll(t.fam.student, late, 3);
+  t.fx.enroll(t.fam.student, night, 3);
+  const ivy = kid(t, t.loc, 'Ivy Chen', t.sess, [3]);
+  t.fx.enroll(ivy, late, 3);
+  const leo = kid(t, t.loc, 'Leo Garcia', t.sess, [3]);
+  t.fx.enroll(leo, gap, 3);
+  t.fx.enroll(leo, late, 5); // Late Study on Friday is not that day
+  setClock(t, '15:45');
+  for (const s of [t.fam.student, ivy, leo]) {
+    const r = await t.scan(s);
+    assert.equal(r.body.action, 'checkin', s.name);
+    assert.equal(r.body.session.id, t.sess.id, s.name);
+  }
+  setClock(t, '16:05');
+  t.jobs();
+  const outAt = s => visitsOf(t, s)[0].check_out_at;
+  assert.deepEqual([outAt(t.fam.student), outAt(ivy), outAt(leo)], [null, null, at(LA, '2026-10-14', '16:00')]);
+  // Leo's Gap Study is a new visit
+  setClock(t, '16:35');
+  const back = await t.scan(leo);
+  assert.equal(back.body.action, 'checkin');
+  assert.equal(back.body.session.id, gap.id);
+  setClock(t, '18:01');
+  t.jobs();
+  assert.equal(outAt(ivy), at(LA, '2026-10-14', '18:00'));
+  assert.equal(outAt(t.fam.student), null);
+  const [ivyAuto] = t.fx.notifications(ivy.parent, 'checkout_auto');
+  assert.equal(ivyAuto.title, 'Ivy was checked out automatically · 6:00 PM');
+  assert.equal(ivyAuto.body, "Ivy didn't scan out of Irvine, so the app checked them out when the session ended. Total time 2h 15m. Staff will review it.");
+  setClock(t, '19:59');
+  t.jobs();
+  assert.equal(outAt(t.fam.student), null);
+  setClock(t, '20:01');
+  t.jobs();
+  const [v] = visitsOf(t, t.fam.student);
+  assert.deepEqual([v.check_out_at, v.checkout_method, v.flagged, v.flag_reason], [at(LA, '2026-10-14', '20:00'), 'auto', 1, 'Did not scan out']);
+  const auto = t.fx.notifications(t.fam.parent, 'checkout_auto');
+  assert.equal(auto.length, 1);
+  assert.equal(auto[0].body, "Maya didn't scan out of Irvine, so the app checked them out when Irvine closed. Total time 4h 15m. Staff will review it.");
+});
+
+test(['CI-7'], 'a staff check-in with no session counts toward the session it overlaps: after leaving, the student is not still expected (D-15a)', async () => {
+  const t = await setup();
+  setClock(t, '12:00');
+  const ask = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: t.fam.student.id, reason: 'Phone is dead' });
+  assert.equal(ask.body.error, 'no_session');
+  const r = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: t.fam.student.id, reason: 'Phone is dead', override: true });
+  assert.equal(r.status, 200);
+  assert.equal(visitsOf(t, t.fam.student)[0].session_id, null);
+  // Ivy came in the morning and left before Afternoon Study started: she is still expected
+  const ivy = kid(t, t.loc, 'Ivy Chen', t.sess, [3]);
+  t.fx.visit(ivy, t.loc, { check_in_at: at(LA, '2026-10-14', '10:00'), check_out_at: at(LA, '2026-10-14', '12:30'),
+    checkin_method: 'staff', checkout_method: 'staff', checked_in_by: t.staff.id, checked_out_by: t.staff.id });
+  setClock(t, '14:00');
+  const [v] = visitsOf(t, t.fam.student);
+  assert.equal((await t.as(t.staff).post(`/api/checkin/visits/${v.id}/checkout`, {})).status, 200);
+  const b = (await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`)).body;
+  assert.deepEqual(b.here, []);
+  assert.deepEqual(b.left.map(x => x.student_id), [t.fam.student.id, ivy.id]);
+  assert.deepEqual(b.expected.map(e => [e.student_id, e.session_name]), [[ivy.id, 'Afternoon Study']]);
+});
+
+test(['CI-3'], "the Home card says sessions are paused by the membership only when the membership isn't valid (D-16a)", async () => {
+  const t = await setup();
+  // Summer slots paused when the membership lapsed stay paused after renewal (D-16a); the membership is valid now
+  const summer = t.fx.term(t.loc, { name: 'Summer 2026', start: '2026-06-01', end: '2026-08-14' });
+  const summerSess = t.fx.session(t.loc, { term: summer, name: 'Summer Study', weekdays: '3', start: '13:00', end: '16:00' });
+  const sam = kid(t, t.loc, 'Sam Summer');
+  t.fx.enroll(sam, summerSess, 3, { status: 'paused' });
+  // a slot kept paused because it is over the weekly cap, membership valid
+  const cy = kid(t, t.loc, 'Cy Capped', t.sess, [1], { cap: 1 });
+  t.fx.enroll(cy, t.sess, 3, { status: 'paused' });
+  // a lapsed membership with paused slots, and one with nothing paused
+  const dan = kid(t, t.loc, 'Dan Lapsed', t.sess, [], { expires: '2026-10-13' });
+  t.fx.enroll(dan, t.sess, 3, { status: 'paused' });
+  const ina = kid(t, t.loc, 'Ina Active', t.sess, [], { status: 'inactive' });
+  const paused = async s => (await t.as(s).get('/api/checkin/status')).body.students[0].paused;
+  assert.equal(await paused(sam), false);
+  assert.equal(await paused(cy), false);
+  assert.equal(await paused(dan), true);
+  assert.equal(await paused(ina), false);
+  const parent = (await t.as(sam.parent).get('/api/checkin/status')).body.students[0];
+  assert.deepEqual([parent.id, parent.paused, parent.next], [sam.id, false, null]);
+});
+
+test(['CI-3', 'CI-7'], "a membership that hasn't started yet can't check in until its start date (R6)", async () => {
+  const t = await setup();
+  const ben = kid(t, t.loc, 'Ben Okafor', t.sess, [1, 3], { start: '2026-11-02' });
+  const r = await t.scan(ben);
+  assert.equal(r.status, 403);
+  assert.equal(r.body.error, 'membership_inactive');
+  assert.equal(r.body.message, "Your membership starts Mon, Nov 2, so you can't check in yet. Ask a parent or the front desk at Irvine if that's wrong.");
+  assert.equal(visitsOf(t, ben).length, 0);
+  assert.equal(t.fx.notifications(ben.parent).length, 0);
+  const found = await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/students?q=ben`);
+  assert.deepEqual(found.body.students.map(s => [s.id, s.membership_active]), [[ben.id, false]]);
+  const b = (await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`)).body;
+  assert.deepEqual(b.expected.filter(e => e.student_id === ben.id).map(e => e.membership_active), [false]);
+  const ask = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: ben.id });
+  assert.equal(ask.status, 409);
+  assert.equal(ask.body.error, 'membership_inactive');
+  assert.equal(ask.body.message, "Ben's membership starts Mon, Nov 2. Check in anyway?");
+  assert.equal(visitsOf(t, ben).length, 0);
+  // the evening before, in Irvine, is still before the start date (it is already Nov 2 in UTC)
+  setClock(t, '17:30', '2026-11-01');
+  const eve = await t.scan(ben);
+  assert.equal(eve.body.error, 'membership_inactive');
+  assert.match(eve.body.message, /^Your membership starts Mon, Nov 2,/);
+  // on the start date it works
+  setClock(t, '13:05', '2026-11-02');
+  const ok = await t.scan(ben);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.action, 'checkin');
+});
+
+test(['CI-2', 'CI-7'], 'a location marked closed refuses scans and manual check-ins with a clear message; staff can still check a student out (R5)', async () => {
+  const t = await setup();
+  assert.equal((await t.scan()).body.action, 'checkin');
+  const leo = kid(t, t.loc, 'Leo Garcia', t.sess, [3]);
+  t.db.prepare('UPDATE locations SET active = 0 WHERE id = ?').run(t.loc.id);
+  setClock(t, '13:30');
+  for (const s of [leo, t.fam.student]) {
+    const r = await t.scan(s);
+    assert.equal(r.status, 403, s.name);
+    assert.equal(r.body.error, 'location_closed', s.name);
+    assert.equal(r.body.message, "Irvine is marked closed, so scanning in and out is turned off. If you're here, ask staff at the front desk.");
+  }
+  assert.equal(visitsOf(t, leo).length, 0);
+  assert.equal(visitsOf(t, t.fam.student)[0].check_out_at, null);
+  for (const body of [{ studentId: leo.id }, { studentId: leo.id, override: true, reason: 'Phone is dead' }]) {
+    const m = await t.as(t.staff).post('/api/checkin/manual-checkin', body);
+    assert.equal(m.status, 403);
+    assert.equal(m.body.error, 'location_closed');
+    assert.equal(m.body.message, 'Irvine is marked closed, so check-ins are turned off. HQ can reopen it in Locations.');
+  }
+  assert.equal(visitsOf(t, leo).length, 0);
+  assert.equal(t.fx.audit('checkin.manual_checkin').length, 0);
+  assert.equal(t.fx.notifications(leo.parent).length, 0);
+  const [v] = visitsOf(t, t.fam.student);
+  assert.equal((await t.as(t.staff).post(`/api/checkin/visits/${v.id}/checkout`, { reason: 'Leaving early' })).status, 200);
+  t.db.prepare('UPDATE locations SET active = 1 WHERE id = ?').run(t.loc.id);
+  assert.equal((await t.scan(leo)).body.action, 'checkin');
+});
+
+// ---------------------------------------------------------------- sweep 2026-10-14, round 2: the Home card
+
+test(['CI-3', 'CI-5'], 'the Home card follows a back-to-back stay into the session the student is in now, and after it offers no session the stay covered (R2)', async () => {
+  const t = await setup(); // Afternoon Study, Mon/Wed/Fri 13:00-16:00
+  const late = t.fx.session(t.loc, { name: 'Late Study', weekdays: '3', start: '16:00', end: '19:00' });
+  t.fx.enroll(t.fam.student, late, 3);
+  const st = async who => (await t.as(who).get('/api/checkin/status')).body.students[0];
+  setClock(t, '12:55');
+  assert.equal((await t.scan()).body.action, 'checkin');
+  // before Late Study starts the stay is still in Afternoon Study, even inside Late Study's check-in window
+  setClock(t, '15:45');
+  let s = await st(t.fam.student);
+  assert.deepEqual([s.state, s.visit.session_name, s.visit.ends_at], ['here', 'Afternoon Study', at(LA, '2026-10-14', '16:00')]);
+  setClock(t, '16:30');
+  t.jobs();
+  for (const who of [t.fam.student, t.fam.parent]) {
+    s = await st(who);
+    assert.deepEqual([s.state, s.visit.session_name, s.visit.ends_at], ['here', 'Late Study', at(LA, '2026-10-14', '19:00')]);
+  }
+  setClock(t, '18:30');
+  assert.equal((await t.scan()).body.action, 'checkout');
+  s = await st(t.fam.student);
+  assert.equal(s.state, 'left');
+  // Late Study is still running, but the stay covered it: the next one is next Wednesday's Afternoon Study
+  assert.deepEqual([s.next.session_name, s.next.date], ['Afternoon Study', '2026-10-21']);
+});
+
+test(['CI-7', 'CI-5'], 'In the building follows a back-to-back stay into the session the student is in now (R2)', async () => {
+  const t = await setup(); // Afternoon Study, Mon/Wed/Fri 13:00-16:00
+  const late = t.fx.session(t.loc, { name: 'Late Study', weekdays: '3', start: '16:00', end: '19:00' });
+  t.fx.enroll(t.fam.student, late, 3);
+  const ivy = kid(t, t.loc, 'Ivy Chen', t.sess, [3]); // Afternoon Study only
+  const here = async () => (await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`)).body.here
+    .map(v => [v.student_id, v.session_name, v.ends_at]);
+  setClock(t, '12:55');
+  assert.equal((await t.scan()).body.action, 'checkin');
+  assert.equal((await t.scan(ivy)).body.action, 'checkin');
+  // inside Late Study's check-in window but before it starts, the stay is still in Afternoon Study
+  setClock(t, '15:45');
+  assert.deepEqual(await here(), [[t.fam.student.id, 'Afternoon Study', at(LA, '2026-10-14', '16:00')], [ivy.id, 'Afternoon Study', at(LA, '2026-10-14', '16:00')]]);
+  setClock(t, '16:30');
+  t.jobs();
+  assert.deepEqual(await here(), [[t.fam.student.id, 'Late Study', at(LA, '2026-10-14', '19:00')]]);
+  // the visit stays linked to the session it began in
+  assert.equal(visitsOf(t, t.fam.student)[0].session_id, t.sess.id);
+});
+
+test(['CI-3', 'CI-7'], 'after a staff check-in with no session, the Home card does not offer the session the visit overlapped as next (D-15a)', async () => {
+  const t = await setup();
+  setClock(t, '12:00');
+  const r = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: t.fam.student.id, reason: 'Phone is dead', override: true });
+  assert.equal(r.status, 200);
+  // Ivy came in the morning and left before Afternoon Study started: it is still her next session
+  const ivy = kid(t, t.loc, 'Ivy Chen', t.sess, [3]);
+  t.fx.visit(ivy, t.loc, { check_in_at: at(LA, '2026-10-14', '10:00'), check_out_at: at(LA, '2026-10-14', '12:30'),
+    checkin_method: 'staff', checkout_method: 'staff', checked_in_by: t.staff.id, checked_out_by: t.staff.id });
+  setClock(t, '14:00');
+  const [v] = visitsOf(t, t.fam.student);
+  assert.equal((await t.as(t.staff).post(`/api/checkin/visits/${v.id}/checkout`, {})).status, 200);
+  const maya = (await t.as(t.fam.parent).get('/api/checkin/status')).body.students[0];
+  assert.deepEqual([maya.state, maya.next.session_name, maya.next.date], ['left', 'Afternoon Study', '2026-10-21']);
+  const iv = (await t.as(ivy).get('/api/checkin/status')).body.students[0];
+  assert.deepEqual([iv.state, iv.next.session_name, iv.next.date], ['left', 'Afternoon Study', '2026-10-14']);
+});
+
+test(['CI-3', 'NF-1'], "the Home card says when a membership that hasn't started begins, and only for that student (R6)", async () => {
+  const t = await setup();
+  const ben = kid(t, t.loc, 'Ben Okafor', t.sess, [3], { start: '2026-11-02' });
+  const dan = kid(t, t.loc, 'Dan Lapsed', t.sess, [], { expires: '2026-10-13' });
+  const startsOn = async who => (await t.as(who).get('/api/checkin/status')).body.students.map(s => [s.id, s.starts_on]);
+  assert.deepEqual(await startsOn(ben), [[ben.id, '2026-11-02']]);
+  assert.deepEqual(await startsOn(ben.parent), [[ben.id, '2026-11-02']]);
+  assert.deepEqual(await startsOn(t.fam.parent), [[t.fam.student.id, null]]);
+  assert.deepEqual(await startsOn(dan), [[dan.id, null]]);
+  // the evening before, in Irvine, it hasn't started yet (it is already Nov 2 in UTC); on the day it has
+  setClock(t, '17:30', '2026-11-01');
+  assert.deepEqual(await startsOn(ben), [[ben.id, '2026-11-02']]);
+  setClock(t, '09:00', '2026-11-02');
+  assert.deepEqual(await startsOn(ben), [[ben.id, null]]);
+});

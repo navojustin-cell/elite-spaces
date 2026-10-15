@@ -345,7 +345,7 @@ test(['AT-2', 'AT-3', 'AT-4'], 'a staff check-in with no session that covers an 
   assert.deepEqual(rcsv.filter(x => x[0] === 'absent').map(x => x[1]), missed);
 });
 
-test(['AT-2'], 'a check-in with no session clears an absence only if it overlaps the session at that location; a visit for another session never does', async () => {
+test(['AT-2'], 'another visit clears an absence only if it overlaps the session at that location: a check-in with no session, or (R2) a visit for another enrolled session that runs into it', async () => {
   const w = await world();
   const lunch = w.t.fx.session(w.loc, { term: w.term, name: 'Lunch Club', weekdays: '1', start: '12:00', end: '13:30' });
   enrollSince(w.t, w.kid, lunch, 1, at(LA, '2026-09-28', '08:00'));
@@ -353,15 +353,15 @@ test(['AT-2'], 'a check-in with no session clears an absence only if it overlaps
   w.visit('2026-10-05', '12:00', '16:00', { session: null, location: arcadia }); // at another location
   w.visit('2026-10-07', '16:00', '17:00', { session: null });  // came just as the session ended
   w.visit('2026-10-09', '10:00', '13:00', { session: null });  // left just as it began
-  w.visit('2026-10-12', '12:00', '13:30', { session: lunch }); // Lunch Club, which runs into the afternoon session
+  w.visit('2026-10-12', '12:00', '13:30', { session: lunch }); // Lunch Club, which runs into the afternoon session: one visit for both (R2)
   w.visit('2026-10-14', '12:30', null, { session: null });     // still here at 4:30pm
   w.t.clock.set(at(LA, '2026-10-14', '16:30'));
   const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log?from=2026-10-05&to=2026-10-14`);
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.absences.map(a => [a.date, a.session_name]), [
     ['2026-10-05', 'Lunch Club'], ['2026-10-05', 'Afternoon Study'], ['2026-10-07', 'Afternoon Study'],
-    ['2026-10-09', 'Afternoon Study'], ['2026-10-12', 'Afternoon Study']]);
-  assert.equal(r.body.totals.absences, 5);
+    ['2026-10-09', 'Afternoon Study']]);
+  assert.equal(r.body.totals.absences, 4);
 });
 
 test(['AT-2'], 'absences count only sessions that have ended, and only after the family enrolled', async () => {
@@ -1615,4 +1615,108 @@ test(['NF-1'], 'a director cannot report on another location, on all locations, 
   const all = await w.t.as(w.hq).get(`${A}/report?location=all&${q}`);
   assert.deepEqual(all.body.absences.map(a => [a.date, a.student_name]), [['2026-10-07', 'Zoe Park'], ['2026-10-09', 'Maya Johnson']]);
   assert.deepEqual(all.body.by_student.map(s => [s.student_name, s.absences]), [['Ben Cole', 0], ['Maya Johnson', 1], ['Zoe Park', 1]]);
+});
+
+// ---------------------------------------------------------------- Round-1 sweep rules (R2, R8) and the report chips (S8)
+
+test(['AT-2', 'AT-4'], 'R2: back-to-back sessions are one visit, and it counts for every enrolled slot it overlaps at that location that day', async () => {
+  const w = await world();
+  const evening = w.t.fx.session(w.loc, { term: w.term, name: 'Evening Study', weekdays: '1', start: '16:00', end: '19:00' });
+  enrollSince(w.t, w.kid, evening, 1, at(LA, '2026-09-28', '08:00'));
+  // Ben holds only the afternoon slot on Mondays.
+  const ben = rename(w.t, w.t.fx.family(w.loc).student, 'Ben Cole');
+  enrollSince(w.t, ben, w.pm, 1, at(LA, '2026-09-28', '08:00'));
+  // Kai held both Monday slots, but his evening one ended Wed Sep 30, and his
+  // evening one again from Oct 6 on: neither was his on Oct 5.
+  const kai = rename(w.t, w.t.fx.family(w.loc).student, 'Kai Lee');
+  enrollSince(w.t, kai, w.pm, 1, at(LA, '2026-09-28', '08:00'));
+  const kaiOld = enrollSince(w.t, kai, evening, 1, at(LA, '2026-09-28', '08:00'));
+  w.t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(at(LA, '2026-09-30', '12:00'), kaiOld.id);
+  enrollSince(w.t, kai, evening, 1, at(LA, '2026-10-06', '08:00'));
+  const director = w.t.fx.director(w.loc);
+  w.visit('2026-10-05', '12:55', '18:55');                   // Maya stays from the afternoon through the evening
+  w.visit('2026-10-12', '13:00', '15:30');                   // and leaves before the evening one week later
+  w.visit('2026-10-05', '13:00', '17:00', { student: ben }); // Ben stays past his session
+  w.visit('2026-10-05', '13:00', '17:30', { student: kai }); // so does Kai
+  w.visit('2026-10-12', '13:00', '18:50', { student: kai }); // and on Oct 12 he holds the evening slot too
+
+  const log = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log?from=2026-10-05&to=2026-10-12`);
+  assert.deepEqual(log.body.absences.map(a => [a.date, a.session_name]),
+    [['2026-10-07', 'Afternoon Study'], ['2026-10-09', 'Afternoon Study'], ['2026-10-12', 'Evening Study']]);
+  // The evening session's report lists Maya's visit, which covered it, and Kai's on Oct 12; Ben was
+  // never enrolled there, and on Oct 5 Kai's evening slot had ended and not yet started again.
+  const rep = await w.t.as(director).get(`${A}/report?session=${evening.id}&from=2026-10-05&to=2026-10-12`);
+  assert.equal(rep.status, 200);
+  assert.deepEqual(rep.body.visits.map(v => [v.date, v.student_name, v.session_name, v.minutes]),
+    [['2026-10-05', 'Maya Johnson', 'Afternoon Study', 360], ['2026-10-12', 'Kai Lee', 'Afternoon Study', 350]]);
+  assert.deepEqual(rep.body.absences.map(a => [a.date, a.student_name]), [['2026-10-12', 'Maya Johnson']]);
+  assert.deepEqual(rep.body.by_student.map(s => [s.student_name, s.visits, s.absences]), [['Kai Lee', 1, 0], ['Maya Johnson', 1, 1]]);
+});
+
+test(['AT-2', 'AT-4'], 'R8: after a session\'s times change, past dates keep the times they had for absences, overlaps and the hours shown', async () => {
+  const w = await world();
+  const director = w.t.fx.director(w.loc);
+  // Leo enrolled on Mon Oct 5 at 2pm, with that day's 1-4pm session already under way.
+  const leoFam = w.t.fx.family(w.loc), leo = rename(w.t, leoFam.student, 'Leo Garcia');
+  enrollSince(w.t, leo, w.pm, 1, at(LA, '2026-10-05', '14:00'));
+  w.visit('2026-10-12', '13:02', '15:58', { student: leo });
+  // Ava has held Mondays since Sep 28: she missed Sep 28, came Oct 5, and on Oct 12 staff checked her in with no session.
+  const avaFam = w.t.fx.family(w.loc), ava = rename(w.t, avaFam.student, 'Ava Brown');
+  enrollSince(w.t, ava, w.pm, 1, at(LA, '2026-09-28', '08:00'));
+  w.visit('2026-10-05', '13:00', '16:00', { student: ava });
+  w.visit('2026-10-12', '13:05', '14:50', { student: ava, session: null, extra: { checkin_method: 'staff', checkout_method: 'staff' } });
+  // Tue Oct 13: the director moves the session to 3-6pm from that day on, as the sessions module records it.
+  w.t.clock.set(at(LA, '2026-10-13', '10:00'));
+  w.t.db.prepare("UPDATE sessions SET start_time = '15:00', end_time = '18:00' WHERE id = ?").run(w.pm.id);
+  w.t.db.prepare("INSERT INTO session_times (session_id, until_date, start_time, end_time, changed_at) VALUES (?, '2026-10-12', '13:00', '16:00', ?)")
+    .run(w.pm.id, w.t.clock.now());
+  // Another session's own history never applies to this one.
+  const other = w.t.fx.session(w.loc, { term: w.term, name: 'Morning Focus', weekdays: '2', start: '09:30', end: '12:00' });
+  w.t.db.prepare("INSERT INTO session_times (session_id, until_date, start_time, end_time, changed_at) VALUES (?, '2026-12-31', '09:00', '11:00', ?)")
+    .run(other.id, w.t.clock.now());
+  w.t.clock.set(at(LA, '2026-10-19', '19:00'));
+
+  const abs = async (fam, s) => (await w.t.as(fam.parent).get(`${A}/students/${s.id}/log?from=2026-09-28&to=2026-10-19`))
+    .body.absences.map(a => [a.date, a.start_time, a.end_time]);
+  // Oct 5 was never owed (he enrolled after 1pm); Oct 19 is under the new hours.
+  assert.deepEqual(await abs(leoFam, leo), [['2026-10-19', '15:00', '18:00']]);
+  // Sep 28 shows the hours it had; the staff check-in on Oct 12 overlapped that day's 1-4pm.
+  assert.deepEqual(await abs(avaFam, ava), [['2026-09-28', '13:00', '16:00'], ['2026-10-19', '15:00', '18:00']]);
+  // A report on the session lists that staff check-in, by the hours the session had on Oct 12.
+  const rep = await w.t.as(director).get(`${A}/report?session=${w.pm.id}&from=2026-10-12&to=2026-10-12`);
+  assert.deepEqual(rep.body.visits.map(v => [v.student_name, v.session_name, v.check_in_local]).sort(),
+    [['Ava Brown', null, '13:05'], ['Leo Garcia', 'Afternoon Study', '13:02']]);
+  assert.deepEqual(rep.body.absences.map(a => [a.student_name, a.start_time]), [['Maya Johnson', '13:00']]);
+});
+
+test(['AT-4'], 'Reports: HQ choosing another location gets that location\'s range shortcuts, and a chosen shortcut becomes the same one there (its own term and week)', async () => {
+  const w = await reportWorld();
+  // Toronto's Fall 2026 starts later than the Los Angeles terms.
+  const tor = w.t.fx.location({ name: 'Toronto', timezone: TOR, lat: 43.65, lng: -79.38 });
+  w.t.fx.term(tor, { start: '2026-09-08' });
+  // Sun Oct 18, 10:30pm in Los Angeles is already Mon Oct 19 in Toronto.
+  w.t.clock.set(Date.UTC(2026, 9, 19, 5, 30));
+  const tab = browserTab(w.t);
+  tab.signIn(w.hq);
+  const view = await tab.open('reports');
+  const range = () => [field(view, 'From').value, field(view, 'To').value];
+  const chip = label => view.find(n => n.tag === 'button' && n.textContent === label && n.getAttribute('data-from'));
+
+  chip('Fall 2026').click();
+  assert.deepEqual(range(), ['2026-08-17', '2026-12-18']);
+  choose(view, { Location: String(tor.id) });
+  assert.deepEqual(range(), ['2026-09-08', '2026-12-18'], 'Fall 2026 is now Toronto\'s Fall 2026');
+  assert.equal(chip('Fall 2026').getAttribute('aria-pressed'), 'true');
+  chip('This week').click();
+  assert.deepEqual(range(), ['2026-10-19', '2026-10-25'], 'this week is Toronto\'s week');
+  submit(view);
+  await tab.settle();
+  assert.deepEqual(tab.requests.at(-1), { url: `${A}/report?location=${tor.id}&from=2026-10-19&to=2026-10-25`, status: 200 });
+  // Back to Arcadia: its own week, which has not turned over yet.
+  choose(view, { Location: String(w.arcadia.id) });
+  assert.deepEqual(range(), ['2026-10-12', '2026-10-18']);
+  // Dates typed by hand stay as typed when the location changes.
+  choose(view, { From: '2026-10-01', To: '2026-10-02' });
+  choose(view, { Location: String(tor.id) });
+  assert.deepEqual(range(), ['2026-10-01', '2026-10-02']);
 });

@@ -84,11 +84,40 @@ function nextSlot(ctx, loc, studentId, ms, skip = () => false) {
   return null;
 }
 
-// Membership must be active and not past its last valid day (D-16).
+// Membership must be active, started, and not past its last valid day (D-16, R6).
 function membershipOk(ctx, studentId, today) {
-  const m = ctx.db.prepare('SELECT status, expires_on FROM memberships WHERE student_id = ?').get(studentId);
-  return !!m && m.status === 'active' && m.expires_on >= today;
+  const m = ctx.db.prepare('SELECT status, start_date, expires_on FROM memberships WHERE student_id = ?').get(studentId);
+  return !!m && m.status === 'active' && m.expires_on >= today && m.start_date <= today;
 }
+
+// The first day of an active membership that hasn't started yet (R6), or null.
+function startsLater(ctx, studentId, today) {
+  const m = ctx.db.prepare("SELECT start_date FROM memberships WHERE student_id = ? AND status = 'active' AND start_date > ? AND expires_on >= ?")
+    .get(studentId, today, today);
+  return m ? m.start_date : null;
+}
+
+// The enrolled slots a stay that began in a slot ending at `end` runs on into (R2). Back-to-back
+// sessions are one visit: it runs on through each enrolled slot that day whose
+// check-in window (D-13) has opened by the time the stay so far ends.
+function stayAfter(ctx, loc, studentId, date, end) {
+  const more = [];
+  for (const s of slotsOn(ctx, loc, date, studentId)) { // ordered by start time
+    if (s.start_at - EARLY_MS <= end && s.end_at > end) { more.push(s); end = s.end_at; }
+  }
+  return more;
+}
+// When that stay really ends: the end of the last back-to-back slot, or `end` itself.
+function stayEnd(ctx, loc, studentId, date, end) {
+  const more = stayAfter(ctx, loc, studentId, date, end);
+  return more.length ? more[more.length - 1].end_at : end;
+}
+
+// A visit counts for a slot when it is linked to it or overlaps its hours: a staff
+// check-in with no session (D-15a) or a back-to-back stay (R2). A visit still open
+// overlaps every slot that hasn't ended.
+const visitCovers = (v, s) => v.student_id === s.student_id && (v.session_id === s.session_id
+  || (v.check_in_at < s.end_at && (v.check_out_at == null || v.check_out_at > s.start_at)));
 
 // ---------- visits ----------
 
@@ -128,6 +157,8 @@ const firstName = name => String(name || '').split(' ')[0];
 const clockTime = (loc, ms) => time.local(loc, ms).toFormat('h:mm a');
 const minutes = (from, to) => Math.max(0, Math.round((to - from) / 60000));
 const duration = mins => (Math.floor(mins / 60) ? Math.floor(mins / 60) + 'h ' : '') + (mins % 60) + 'm';
+// "Mon, Nov 2" for a location-local date.
+const dayName = (loc, date) => time.local(loc, time.toMs(loc, date, '12:00')).toFormat('ccc, LLL d');
 
 // "today at 1:00 PM", "tomorrow at 1:00 PM" or "Fri, Oct 16 at 1:00 PM".
 function when(loc, ms, now) {
@@ -202,16 +233,22 @@ function building(ctx, loc, ms) {
     check_in_at: v.check_in_at, check_out_at: v.check_out_at, checkin_method: v.checkin_method,
     checkout_method: v.checkout_method, ends_at: v.end_time ? time.toMs(loc, today, v.end_time) : null, flagged: !!v.flagged,
   }, byFields(v));
-  const here = visits.filter(v => v.check_out_at == null).map(row);
+  // During a back-to-back stay (R2) a student here is in the latest slot the visit has run on into.
+  const here = visits.filter(v => v.check_out_at == null).map(v => {
+    const inNow = v.end_time ? stayAfter(ctx, loc, v.student_id, today, time.toMs(loc, today, v.end_time)).filter(s => s.start_at <= ms).pop() : null;
+    return inNow ? Object.assign(row(v), { session_name: inNow.name, ends_at: inNow.end_at }) : row(v);
+  });
   const hereIds = new Set(here.map(v => v.student_id));
   // Left = students who have gone; someone who came back in shows only under Here.
   const left = visits.filter(v => v.check_out_at != null && !hereIds.has(v.student_id)).map(row)
     .sort((a, b) => b.check_out_at - a.check_out_at);
-  const visitedSlot = new Set(visits.map(v => v.student_id + ':' + v.session_id));
+  // A slot a visit today covers (linked or overlapping, D-15a and R2) is not expected; a
+  // student still here covers every slot that hasn't ended.
+  const visited = s => visits.some(v => visitCovers(v, s));
   const listed = new Set();
   const expected = [];
   for (const s of slotsOn(ctx, loc, today)) {
-    if (s.end_at <= ms || hereIds.has(s.student_id) || listed.has(s.student_id) || visitedSlot.has(s.student_id + ':' + s.session_id)) continue;
+    if (s.end_at <= ms || listed.has(s.student_id) || visited(s)) continue;
     listed.add(s.student_id);
     expected.push({ student_id: s.student_id, name: s.student_name, session_id: s.session_id, session_name: s.name, start_at: s.start_at, end_at: s.end_at,
       membership_active: membershipOk(ctx, s.student_id, today) });
@@ -235,17 +272,25 @@ function status(ctx, student, ms) {
   const visits = ctx.db.prepare(`SELECT v.*, s.name AS session_name, s.end_time FROM visits v LEFT JOIN sessions s ON s.id = v.session_id
     WHERE v.student_id = ? AND v.location_id = ? AND v.local_date = ? ORDER BY v.check_in_at DESC, v.id DESC`).all(student.id, loc.id, today);
   const v = visits[0];
-  const visited = new Set(visits.map(x => x.session_id));
-  const next = nextSlot(ctx, loc, student.id, ms, s => s.date === today && visited.has(s.session_id));
+  // The next slot skips any slot today's visits already cover (D-15a, R2).
+  const next = nextSlot(ctx, loc, student.id, ms, s => s.date === today && visits.some(x => visitCovers(x, s)));
+  // During a back-to-back stay (R2) the visit is in the latest slot it has run on into.
+  const inNow = v && v.check_out_at == null && v.end_time
+    ? stayAfter(ctx, loc, student.id, today, time.toMs(loc, today, v.end_time)).filter(s => s.start_at <= ms).pop() : null;
   return {
     id: student.id, name: student.name, location: publicLocation(loc),
     state: !v ? 'none' : v.check_out_at == null ? 'here' : 'left',
-    // Sessions paused by a lapsed membership (MB-5), so the screen can say why none are coming up.
-    paused: !!ctx.db.prepare("SELECT 1 FROM enrollments WHERE student_id = ? AND status = 'paused'").get(student.id),
+    // Sessions paused by a lapsed membership (MB-5), so the screen can say why none are coming up. A slot
+    // left paused while the membership is valid (an ended term or over the cap, D-16a) is not that.
+    paused: !membershipOk(ctx, student.id, today)
+      && !!ctx.db.prepare("SELECT 1 FROM enrollments WHERE student_id = ? AND status = 'paused'").get(student.id),
     visit: v ? {
       id: v.id, check_in_at: v.check_in_at, check_out_at: v.check_out_at, checkin_method: v.checkin_method,
-      checkout_method: v.checkout_method, session_name: v.session_name, ends_at: v.end_time ? time.toMs(loc, today, v.end_time) : null,
+      checkout_method: v.checkout_method, session_name: inNow ? inNow.name : v.session_name,
+      ends_at: inNow ? inNow.end_at : v.end_time ? time.toMs(loc, today, v.end_time) : null,
     } : null,
+    // A membership that hasn't started yet (R6): its first day, so the card can say when check-in opens.
+    starts_on: startsLater(ctx, student.id, today),
     next: next ? {
       session_name: next.name, date: next.date, start_at: next.start_at, end_at: next.end_at,
       opens_at: next.start_at - EARLY_MS, when: when(loc, next.start_at, ms),
@@ -257,7 +302,8 @@ function status(ctx, student, ms) {
 
 // Open visits past the earlier of their slot's end and the location's closing
 // time are checked out at that time, flagged for review, and parents are told
-// it was automatic. Each visit uses its own location's zone.
+// it was automatic. Each visit uses its own location's zone. A slot followed by
+// back-to-back slots ends with the last of them (R2).
 function autoCheckout(ctx) {
   const now = ctx.clock.now();
   const open = ctx.db.prepare(`SELECT v.*, s.end_time, u.name AS student_name FROM visits v
@@ -266,7 +312,7 @@ function autoCheckout(ctx) {
   for (const v of open) {
     const loc = getLocation(ctx, v.location_id);
     const close = time.toMs(loc, v.local_date, loc.close_time);
-    const slotEnd = v.end_time ? time.toMs(loc, v.local_date, v.end_time) : close;
+    const slotEnd = v.end_time ? stayEnd(ctx, loc, v.student_id, v.local_date, time.toMs(loc, v.local_date, v.end_time)) : close;
     const cutoff = Math.max(Math.min(slotEnd, close), v.check_in_at);
     if (now < cutoff) continue;
     const r = ctx.db.prepare(`UPDATE visits SET check_out_at = ?, checkout_method = 'auto', flagged = 1, flag_reason = ?
@@ -286,7 +332,7 @@ function autoCheckout(ctx) {
 
 module.exports = {
   EARLY_MS, FLAG_REASON, getLocation, getVisit, qrDay, currentCode, codeExpiresAt, checkCode,
-  slotsOn, slotNow, nextSlot, membershipOk, openVisit, createVisit, closeVisit, lastCheckout, visitSession,
-  firstName, clockTime, minutes, duration, when, noSessionMessage, announceCheckin, announceCheckout,
+  slotsOn, slotNow, nextSlot, membershipOk, startsLater, stayAfter, stayEnd, visitCovers, openVisit, createVisit, closeVisit, lastCheckout, visitSession,
+  firstName, clockTime, minutes, duration, dayName, when, noSessionMessage, announceCheckin, announceCheckout,
   publicLocation, building, status, autoCheckout,
 };

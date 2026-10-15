@@ -777,6 +777,101 @@ test('MB-1', 'the roster gives each student\'s account state the way People does
     [['A Linked', 'active', true], ['B Waiting', 'awaiting_approval', false], ['C Invited', 'invited', false]]);
 });
 
+// ---------------- R1 / D-3: the weekly limit is a hard cap ----------------
+
+test(['MB-1', 'MB-2'], 'staff can\'t lower the weekly limit below the weekly sessions a student holds; the refusal names how many they hold', async () => {
+  const t = await makeApp(); // Wed 2026-10-14, during Fall
+  const loc = t.fx.location();
+  const staff = t.fx.staff(loc);
+  const { parent, student } = fam(t, loc, { membership: { cap: 4, start: '2026-08-01', expires: '2027-06-30' } });
+  const sess = t.fx.session(loc, { weekdays: '1,2,3,4' });
+  const es = [1, 2, 3, 4].map(d => t.fx.enroll(student, sess, d));
+  const statuses = () => es.map(e => enr(t, e).status);
+  const msg = "Leo holds 4 weekly sessions, so the weekly limit can't go below 4. A parent can drop sessions on Schedule first, then you can lower the limit.";
+
+  for (const cap of [2, 3]) {
+    const r = await t.as(staff).put(url(student), body({ weekly_cap: cap, start_date: '2026-08-01' }));
+    assert.equal(r.status, 409, String(cap));
+    assert.equal(r.body.error, 'weekly_cap_below_held');
+    assert.equal(r.body.message, msg);
+  }
+  assert.equal(row(t, student).weekly_cap, 4);
+  assert.deepEqual(statuses(), ['active', 'active', 'active', 'active']);
+  assert.equal(t.fx.audit('membership.update').length, 0);
+  assert.equal(t.fx.notifications(parent).length, 0);
+
+  // Not below what they hold: saved.
+  const same = await t.as(staff).put(url(student), body({ weekly_cap: 4, start_date: '2026-08-01', expires_on: '2027-08-31' }));
+  assert.equal(same.status, 200);
+  assert.equal(row(t, student).expires_on, '2027-08-31');
+
+  // A dropped slot, or one from a term that has ended, holds nothing against the limit.
+  t.db.prepare("UPDATE enrollments SET status = 'dropped' WHERE id = ?").run(es[3].id);
+  const summer = t.fx.term(loc, { name: 'Summer 2026', start: '2026-06-15', end: '2026-08-14' });
+  t.fx.enroll(student, t.fx.session(loc, { term: summer, name: 'Summer Lab', weekdays: '5' }), 5);
+  const down = await t.as(staff).put(url(student), body({ weekly_cap: 3, start_date: '2026-08-01', expires_on: '2027-08-31' }));
+  assert.equal(down.status, 200);
+  assert.equal(row(t, student).weekly_cap, 3);
+  const two = await t.as(staff).put(url(student), body({ weekly_cap: 2, start_date: '2026-08-01', expires_on: '2027-08-31' }));
+  assert.equal(two.status, 409);
+  assert.match(two.body.message, /^Leo holds 3 weekly sessions, so the weekly limit can't go below 3\./);
+});
+
+test(['MB-2', 'MB-5'], 'a lower weekly limit is saved when the same save pauses the sessions, and an edit that keeps the limit is never refused', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const staff = t.fx.staff(loc);
+  const sess = t.fx.session(loc, { weekdays: '1,2,3' });
+  // Setting the membership inactive pauses every slot, so a lower limit leaves nothing over it.
+  const a = fam(t, loc, { name: 'Ana Ruiz', membership: { cap: 3 } });
+  [1, 2, 3].forEach(d => t.fx.enroll(a.student, sess, d));
+  const off = await t.as(staff).put(url(a.student), body({ status: 'inactive', weekly_cap: 1, start_date: '2026-08-01' }));
+  assert.equal(off.status, 200);
+  assert.equal(off.body.paused, 3);
+  assert.equal(row(t, a.student).weekly_cap, 1);
+
+  // A student already over the limit (held before this rule) can still be renewed at the same limit.
+  const b = fam(t, loc, { name: 'Ben Okafor', membership: { cap: 2, expires: '2026-10-20' } });
+  [1, 2, 3].forEach(d => t.fx.enroll(b.student, sess, d));
+  const renew = await t.as(staff).put(url(b.student), body({ weekly_cap: 2, start_date: '2026-08-01', expires_on: '2027-06-30' }));
+  assert.equal(renew.status, 200);
+  assert.equal(row(t, b.student).expires_on, '2027-06-30');
+  const lower = await t.as(staff).put(url(b.student), body({ weekly_cap: 1, start_date: '2026-08-01', expires_on: '2027-06-30' }));
+  assert.equal(lower.status, 409);
+  assert.equal(lower.body.message, "Ben holds 3 weekly sessions, so the weekly limit can't go below 3. A parent can drop sessions on Schedule first, then you can lower the limit.");
+});
+
+// ---------------- R6: a membership counts from its start date ----------------
+
+test(['MB-1', 'MB-3'], 'before its start date a membership reads as not started yet for staff and families, and as active from that day', async () => {
+  const t = await makeApp(); // Wed 2026-10-14 in Los Angeles
+  const loc = t.fx.location();
+  const staff = t.fx.staff(loc);
+  const { parent, student } = fam(t, loc, { name: 'Ben Okafor', membership: false });
+  const r = await t.as(staff).put(url(student), body({ weekly_cap: 2, start_date: '2026-11-02', expires_on: '2027-06-30' }));
+  assert.equal(r.status, 200);
+  const want = { id: row(t, student).id, status: 'active', weekly_cap: 2, start_date: '2026-11-02', expires_on: '2027-06-30',
+    days_left: 259, state: 'upcoming', renewal_needed: false };
+  assert.deepEqual(r.body.membership, want);
+  assert.deepEqual((await t.as(staff).get(url(student))).body.membership, want);
+  assert.deepEqual((await t.as(parent).get('/api/membership/mine')).body.members[0].membership, want);
+  assert.deepEqual((await t.as(student).get('/api/membership/mine')).body.members[0].membership, want);
+  const roster = (await t.as(staff).get('/api/membership/roster')).body.students.find(s => s.id === student.id);
+  assert.deepEqual(roster.membership, want);
+
+  // The evening before it starts, still not started (on Los Angeles' date, though UTC is already Nov 2).
+  t.clock.set(at(LA, '2026-11-01', '20:00'));
+  assert.equal((await t.as(staff).get(url(student))).body.membership.state, 'upcoming');
+  // From the start date on, it is active.
+  t.clock.set(at(LA, '2026-11-02', '06:00'));
+  const on = (await t.as(staff).get(url(student))).body.membership;
+  assert.deepEqual([on.state, on.renewal_needed], ['active', false]);
+
+  // An inactive membership with a future start reads as inactive, not as starting.
+  const c = fam(t, loc, { name: 'Cara Diaz', membership: { status: 'inactive', start: '2026-12-01', expires: '2027-06-30' } });
+  assert.equal((await t.as(staff).get(url(c.student))).body.membership.state, 'inactive');
+});
+
 // ---------------- the Members screen and the Home card in a browser tab ----------------
 
 // Just enough DOM for public/js/app.js and this module's view, as in core.test.js:
@@ -812,6 +907,14 @@ class El {
   all() { return this.childNodes.flatMap(c => [c, ...c.all()]); }
   find(pred) { return this.all().find(pred); }
   findAll(pred) { return this.all().filter(pred); }
+  // Form controls, for the edit screen: a value, a checked radio, and the one selector its preview uses.
+  get value() { return this.attrs.has('value') ? this.getAttribute('value') : ''; }
+  set value(v) { this.setAttribute('value', v); }
+  get checked() { return this.attrs.has('checked'); }
+  querySelector(sel) {
+    const m = /^(\w+)\[name="([^"]+)"\]:checked$/.exec(sel);
+    return m ? this.find(n => n.tag === m[1] && n.getAttribute('name') === m[2] && n.checked) || null : null;
+  }
 }
 
 // One tab running the real shell and membership view (read from ROOT, so the
@@ -882,4 +985,44 @@ test(['MB-3', 'MB-5'], "a student whose membership lapsed reads on Home the same
   assert.match(await card(expired.student), /Last day: Tue, Oct 13, 2026 Your membership isn't active\. Ask a parent or the front desk at Irvine to renew it\.$/);
   // Parents still get the details and what renewing does.
   assert.match(await card(lapsed.parent), /Daniel's membership isn't active right now\. 1 weekly session is paused and saved\. Renew with the front desk at Irvine to bring it back\.$/);
+});
+
+test(['MB-1', 'MB-2'], 'the edit screen warns before saving a weekly limit below the sessions the student holds, in the words the refusal uses', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine' });
+  const { student } = fam(t, loc, { membership: { cap: 4 } });
+  const sess = t.fx.session(loc, { weekdays: '1,2,3,4' });
+  [1, 2, 3, 4].forEach(d => t.fx.enroll(student, sess, d));
+  const doc = await openTab(t, t.fx.staff(loc), '#/members/' + student.id);
+  const main = doc.getElementById('main');
+  const cap = main.find(n => n.id === 'mb-cap');
+  const effect = () => words(main.find(n => n.getAttribute('aria-live') === 'polite'));
+  assert.equal(effect(), '');
+  cap.value = '2';
+  cap.dispatch('input');
+  assert.ok(main.find(n => n.cls.includes('notice-danger')), 'a notice says the save will be refused');
+  assert.equal(effect(), "Leo holds 4 weekly sessions, so the weekly limit can't go below 4. A parent can drop sessions on Schedule first, then you can lower the limit.");
+  cap.value = '4';
+  cap.dispatch('input');
+  assert.equal(effect(), '');
+});
+
+test(['MB-1', 'MB-3'], 'a membership that has not started shows "Starts <date>" on Members, Right now and the Home card, and counts as not active', async () => {
+  const t = await makeApp(); // Wed 2026-10-14
+  const loc = t.fx.location({ name: 'Irvine' });
+  const { parent, student } = fam(t, loc, { name: 'Ben Okafor', membership: { cap: 2, start: '2026-11-02', expires: '2027-06-30' } });
+  const staff = t.fx.staff(loc);
+
+  const roster = (await openTab(t, staff, '#/members')).getElementById('main');
+  const tr = roster.findAll(n => n.tag === 'tr').find(n => words(n).startsWith('Ben Okafor'));
+  assert.equal(words(tr.childNodes[1]), 'Starts Mon, Nov 2, 2026 Not active until then');
+  assert.equal(words(roster.find(n => n.id === 'mb-tab-off')), 'Not active (1)');
+
+  const edit = (await openTab(t, staff, '#/members/' + student.id)).getElementById('main');
+  const now = edit.find(n => n.cls.includes('card'));
+  assert.match(words(now), /^Right now Starts Mon, Nov 2, 2026 Up to 2 sessions a week · Mon, Nov 2, 2026 through Wed, Jun 30, 2027 Not active until Mon, Nov 2, 2026, so Ben can't enroll in sessions or check in before then\./);
+
+  const card = async u => words((await openTab(t, u, '#/home')).getElementById('main').find(n => n.getAttribute('data-card') === 'membership'));
+  assert.match(await card(parent), /Ben Okafor Starts Mon, Nov 2, 2026 Up to 2 sessions a week Valid through Wed, Jun 30, 2027 Ben's membership starts Mon, Nov 2, 2026\. Ben can enroll in sessions and check in from that day\.$/);
+  assert.match(await card(student), /Your membership starts Mon, Nov 2, 2026\. You can enroll in sessions and check in from that day\.$/);
 });

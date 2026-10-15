@@ -14,14 +14,16 @@
   // ---------- shared wording ----------
   const STATE = {
     active: { label: 'Active', badge: 'badge-ok' },
+    upcoming: { label: 'Not started yet', badge: 'badge-warn' },
     ending: { label: 'Ends soon', badge: 'badge-warn' },
     expired: { label: 'Expired', badge: 'badge-danger' },
     inactive: { label: 'Inactive', badge: 'badge-danger' },
     none: { label: 'No membership', badge: '' },
   };
   const stateOf = m => (m ? m.state : 'none');
-  const badge = m => { const s = STATE[stateOf(m)]; return h('span', { class: 'badge ' + s.badge }, s.label); };
   const fullDate = d => App.fmtDate(d, { year: 'numeric' });
+  // Before its start date a membership isn't active yet (R6), so its badge names the day it starts.
+  const badge = m => { const s = STATE[stateOf(m)]; return h('span', { class: 'badge ' + s.badge }, stateOf(m) === 'upcoming' ? 'Starts ' + fullDate(m.start_date) : s.label); };
   const first = name => String(name || '').split(' ')[0];
   const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
   const perWeek = cap => 'Up to ' + plural(cap, 'session', 'sessions') + ' a week';
@@ -46,7 +48,11 @@
     box.append(h('p', { class: 'muted small', style: 'margin:.25rem 0 0' },
       perWeek(m.weekly_cap), h('br'), (m.renewal_needed && m.state !== 'ending' ? 'Last day: ' : 'Valid through ') + fullDate(m.expires_on)));
     const renew = self ? 'Ask a parent or ' + desk + ' to renew it.' : 'Renew with ' + desk + ' to ';
-    if (m.state === 'ending') {
+    if (m.state === 'upcoming') {
+      box.append(h('div', { class: 'notice notice-warn', style: 'margin:.6rem 0 0' },
+        who + ' membership starts ' + fullDate(m.start_date) + '. ' + (self ? 'You' : first(x.student.name)) +
+        ' can enroll in sessions and check in from that day.'));
+    } else if (m.state === 'ending') {
       box.append(h('div', { class: 'notice notice-warn', style: 'margin:.6rem 0 0' },
         who + ' membership ends ' + inDays(m.days_left) + ' (' + fullDate(m.expires_on) + '). ' +
         (self ? renew : renew + 'keep ' + first(x.student.name) + '\'s weekly sessions.')));
@@ -90,7 +96,7 @@
   const FILTERS = [
     ['all', 'All', () => true, null],
     ['ending', 'Ending soon', s => stateOf(s.membership) === 'ending', 'No memberships end in the next 14 days.'],
-    ['off', 'Not active', s => ['expired', 'inactive'].includes(stateOf(s.membership)), 'Every membership here is active.'],
+    ['off', 'Not active', s => ['upcoming', 'expired', 'inactive'].includes(stateOf(s.membership)), 'Every membership here is active.'],
     ['none', 'No membership', s => !s.membership, 'Every student here has a membership.'],
   ];
 
@@ -162,9 +168,10 @@
   function rosterRow(s) {
     const m = s.membership;
     const note = !m ? null
-      : m.state === 'ending' ? 'Ends ' + inDays(m.days_left)
-        : m.state === 'expired' ? 'Ended ' + App.fmtDate(m.expires_on)
-          : null;
+      : m.state === 'upcoming' ? 'Not active until then'
+        : m.state === 'ending' ? 'Ends ' + inDays(m.days_left)
+          : m.state === 'expired' ? 'Ended ' + App.fmtDate(m.expires_on)
+            : null;
     const held = s.active_slots || s.paused_slots
       ? [s.active_slots ? plural(s.active_slots, 'weekly session', 'weekly sessions') : null,
         s.paused_slots ? s.paused_slots + ' paused' : null].filter(Boolean).join(', ')
@@ -220,6 +227,7 @@
     } else {
       now.append(h('p', { style: 'margin:.5rem 0 0' }, perWeek(m.weekly_cap) + ' · ' + fullDate(m.start_date) + ' through ' + fullDate(m.expires_on)));
       const notes = [];
+      if (m.state === 'upcoming') notes.push('Not active until ' + fullDate(m.start_date) + ', so ' + name + ' can\'t enroll in sessions or check in before then.');
       if (m.state === 'ending') notes.push('Ends ' + inDays(m.days_left) + '.');
       if (m.state === 'expired') notes.push('Ended on ' + fullDate(m.expires_on) + '.');
       notes.push(data.active_slots ? 'Holds ' + plural(data.active_slots, 'weekly session', 'weekly sessions') + '.' : 'No weekly sessions right now.');
@@ -261,13 +269,18 @@
       if (st === 'active' && end.value && end.value < data.today) {
         effect.append(h('div', { class: 'notice notice-warn' }, 'That last day has already passed, so the membership will show as expired. Choose a later last day to renew it.'));
       }
-      if (!valid && data.active_slots) {
+      const limit = Number(cap.value) || 0;
+      if (valid && m && limit && limit < data.active_slots && limit < m.weekly_cap) {
+        // R1 / D-3: the weekly limit is a hard cap, so saving this is refused.
+        effect.append(h('div', { class: 'notice notice-danger' }, name + ' holds ' + plural(data.active_slots, 'weekly session', 'weekly sessions') +
+          ', so the weekly limit can\'t go below ' + data.active_slots + '. A parent can drop sessions on Schedule first, then you can lower the limit.'));
+      } else if (!valid && data.active_slots) {
         effect.append(h('div', { class: 'notice notice-warn' }, 'Saving pauses ' + name + '\'s ' +
           plural(data.active_slots, 'weekly session', 'weekly sessions') + '. They\'re kept and come back when the membership is active again. The family gets a notification.'));
         label = 'Save and pause ' + plural(data.active_slots, 'session', 'sessions');
       } else if (valid && data.paused_slots) {
         // Sessions come back only up to the weekly limit (D-3); the rest stay paused and saved.
-        const paused = data.paused_slots, limit = Number(cap.value) || 0;
+        const paused = data.paused_slots;
         const room = limit ? Math.max(0, Math.min(paused, limit - data.active_slots)) : paused;
         if (!room) {
           effect.append(h('div', { class: 'notice notice-warn' }, name + ' already holds ' + plural(data.active_slots, 'weekly session', 'weekly sessions') +

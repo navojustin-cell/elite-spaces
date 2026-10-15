@@ -71,6 +71,11 @@
       const how = v.checkout_method === 'auto' ? ' (checked out automatically)' : v.checkout_method === 'staff' ? ' (checked out by staff)' : '';
       return `Left at ${App.fmtTime(v.check_out_at, tz)}${how}` + (nextText ? ' · ' + nextText : '');
     }
+    // A membership that hasn't started yet can't check in (R6), so no session is "on now" before then.
+    if (s.starts_on) {
+      const day = fmtDay(Date.parse(s.starts_on + 'T12:00:00Z'), 'UTC');
+      return you ? `Your membership starts ${day}, so you can check in from then.` : `${first(s.name)}'s membership starts ${day}.`;
+    }
     if (!nextText && s.paused) {
       return you ? `Your membership isn't active, so your sessions are paused. Ask a parent or the front desk at ${s.location.name} to renew it.`
         : `${first(s.name)}'s membership isn't active, so sessions are paused.`;
@@ -180,6 +185,7 @@
       code_expired: 'This code has expired', bad_code: "That code didn't work", wrong_location: 'This is a different location',
       outside_radius: "We couldn't confirm you're in the building", no_session: 'No session right now',
       membership_inactive: "Your membership isn't active", location_needed: 'We need your location',
+      location_closed: 'This location is closed',
     };
 
     // Send one scan. `pos` is reused when the student confirms a check-out, so they aren't asked twice.

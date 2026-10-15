@@ -40,7 +40,8 @@
   const count = (k, one, many) => k + ' ' + (k === 1 ? one : (many || one + 's'));
   const andList = a => a.length <= 1 ? (a[0] || '') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
   const days = s => String(s.weekdays).split(',').map(d => App.WEEKDAYS[Number(d)]).join('/');
-  const sessionLabel = s => s.name + ' · ' + days(s) + ' ' + App.hhmm(s.start_time) + '–' + App.hhmm(s.end_time);
+  // The term, when known, tells same-named sessions in different terms apart.
+  const sessionLabel = s => s.name + ' · ' + days(s) + ' ' + App.hhmm(s.start_time) + '–' + App.hhmm(s.end_time) + (s.term_name ? ' · ' + s.term_name : '');
   const isComposer = () => App.allowed(['director']);
   const isFamily = () => ['parent', 'student'].includes(App.role());
   const zoneName = tz => {
@@ -212,7 +213,8 @@
     }
     const isHq = App.role() === 'hq';
     const [opts, locRes] = await Promise.all([App.api.get(API + '/options'), App.api.get('/api/locations')]);
-    const locations = locRes.locations.filter(l => l.active).sort((a, b) => a.id - b.id);
+    // Closed locations are listed too: HQ can still send them alerts and posts (R5).
+    const locations = locRes.locations.slice().sort((a, b) => a.id - b.id);
     const draft = emergency ? {} : store.get(draftKey(), {});
 
     const form = h('form', { class: 'card', novalidate: true });
@@ -222,7 +224,8 @@
     const locMode = { all: h('input', { type: 'radio', name: 'ann-locmode', value: 'all', checked: draft.locMode !== 'some' }),
       some: h('input', { type: 'radio', name: 'ann-locmode', value: 'some', checked: draft.locMode === 'some' }) };
     const locChecks = locations.map(l => ({ l, input: h('input', { type: 'checkbox', value: String(l.id), checked: (draft.locIds || []).includes(l.id) }) }));
-    const locList = h('div', { style: 'padding-left:1.75rem' }, locChecks.map(c => h('label', { class: 'check' }, c.input, h('span', null, c.l.name))));
+    const locList = h('div', { style: 'padding-left:1.75rem' }, locChecks.map(c => h('label', { class: 'check' }, c.input,
+      h('span', null, c.l.name, !c.l.active && h('span', { class: 'muted small' }, ' (closed)')))));
     const locField = isHq && h('fieldset', null, h('legend', null, 'Which locations?'),
       h('label', { class: 'check' }, locMode.all, h('span', null, 'All locations (' + locations.length + ')')),
       h('label', { class: 'check' }, locMode.some, h('span', null, 'Choose locations')),

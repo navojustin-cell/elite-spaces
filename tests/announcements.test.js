@@ -223,6 +223,27 @@ test(['AN-2'], 'HQ has to pick at least one real location', async () => {
   assert.equal(countAnnouncements(w.t), 0);
 });
 
+test(['AN-2', 'AN-5'], 'HQ still reaches a location marked closed: alerts and posts, to it alone or to all locations (R5)', async () => {
+  const w = await world();
+  w.t.db.prepare('UPDATE locations SET active = 0 WHERE id = ?').run(w.B.id);
+  const pv = await w.t.as(w.hq).post(API + '/preview', alert({ type: 'emergency', locations: [w.B.id] }));
+  assert.equal(pv.status, 200, JSON.stringify(pv.body));
+  assert.deepEqual(pv.body.locations, ['Toronto']);
+  assert.equal(pv.body.recipients, 4);
+  const sos = await w.t.as(w.hq).post(API + '/emergency', alert({ locations: [w.B.id] }));
+  assert.equal(sos.status, 201, JSON.stringify(sos.body));
+  assert.deepEqual(notified(w.t, sos.body.announcement.id), sorted(w.famB.parent, w.famB.student, w.staffB, w.dirB));
+  const pvAll = await w.t.as(w.hq).post(API + '/preview', alert({ type: 'emergency', locations: 'all' }));
+  assert.deepEqual(pvAll.body.locations, ['Irvine', 'Toronto'], '"All locations" includes the closed one');
+  const r = await w.t.as(w.hq).post(API, post({ locations: 'all', category: 'news' }));
+  assert.equal(r.status, 201);
+  assert.deepEqual(notified(w.t, r.body.announcement.id),
+    sorted(w.famA.parent, w.famA.student, w.famA2.parent, w.famA2.student, w.famB.parent, w.famB.student));
+  const unknown = await w.t.as(w.hq).post(API + '/emergency', alert({ locations: [w.B.id, 987654] }));
+  assert.equal(unknown.status, 400);
+  assert.equal(unknown.body.error, 'locations');
+});
+
 // ---------------------------------------------------------------- AN-3
 
 test(['AN-3'], 'publishing sends one in-app notification per recipient and keeps the post in the News feed', async () => {
@@ -421,6 +442,7 @@ test(['AN-4'], 'a session audience reaches its actively enrolled students and th
   const id = r.body.announcement.id;
   assert.deepEqual(notified(t, id), sorted(w.famA.parent, guardian2, w.famA.student));
   assert.equal(r.body.announcement.session.id, s.id);
+  assert.equal(r.body.announcement.session.term_name, 'Fall 2026', 'a sent post names its session\'s term');
   assert.deepEqual(await feedIds(t, w.famA2.parent), []);
   assert.deepEqual(await feedIds(t, famA4.student), []);
   assert.deepEqual(await feedIds(t, guardian2), [id]);
@@ -756,6 +778,29 @@ test(['NF-1'], 'compose options list only the director\'s own sessions; staff an
   }
 });
 
+test(['AN-4'], 'the session picker lists sessions of current and upcoming terms only, each with its term', async () => {
+  const w = await world();
+  const { t } = w;
+  const spring26 = t.fx.term(w.A, { name: 'Spring 2026', start: '2026-01-05', end: '2026-05-29' });
+  const fall26 = t.fx.term(w.A, { name: 'Fall 2026' });
+  const spring27 = t.fx.term(w.A, { name: 'Spring 2027', start: '2027-01-04', end: '2027-05-28' });
+  const [old, now, next] = [spring26, fall26, spring27].map(term => t.fx.session(w.A, { term, name: 'Afternoon Study', weekdays: '1,3' }));
+  const a = await t.as(w.dirA).get(API + '/options');
+  assert.equal(a.status, 200);
+  assert.deepEqual(a.body.sessions.map(s => s.id), [now.id, next.id], 'the ended Spring 2026 session is left out');
+  assert.deepEqual(a.body.sessions.map(s => s.term_name), ['Fall 2026', 'Spring 2027']);
+  assert.ok(!a.body.sessions.some(s => s.id === old.id));
+
+  // A term is over once the location's own date passes its end: at 10 pm Oct 14 in
+  // Irvine it is already Oct 15 in Toronto.
+  const endsA = t.fx.session(w.A, { term: t.fx.term(w.A, { name: 'Short term', start: '2026-09-01', end: '2026-10-14' }), name: 'Last day A' });
+  const endsB = t.fx.session(w.B, { term: t.fx.term(w.B, { name: 'Short term', start: '2026-09-01', end: '2026-10-14' }), name: 'Last day B' });
+  t.clock.set(at(LA, '2026-10-14', '22:00'));
+  const ids = (await t.as(w.hq).get(API + '/options')).body.sessions.map(s => s.id);
+  assert.ok(ids.includes(endsA.id), 'Irvine\'s term ends today there, so it is still listed');
+  assert.ok(!ids.includes(endsB.id), 'Toronto\'s term ended yesterday there');
+});
+
 test(['NF-1'], 'preview is refused for staff and families, and for another location\'s audience', async () => {
   const w = await world();
   const sB = w.t.fx.session(w.B);
@@ -1027,4 +1072,37 @@ test(['AN-6'], 'opening News marks its new posts read and the bell drops right a
   await tab.go('#/news');
   assert.ok(t.fx.notifications(w.famA.parent, 'announcement')[0].read_at, 'seeing it in News marks it read');
   assert.deepEqual(bellOf(tab), { label: 'Inbox, 0 unread', count: 0 });
+});
+
+// ---------------------------------------------------------------- the compose screen in a browser tab
+
+const optionTexts = sel => sel.findAll(n => n.tag === 'option' && n.getAttribute('value')).map(n => n.textContent);
+
+test(['AN-4'], 'the compose session picker tells same-named sessions apart by term and leaves out ended terms', async () => {
+  const w = await world();
+  const { t } = w;
+  for (const [name, start, end] of [['Spring 2026', '2026-01-05', '2026-05-29'], ['Fall 2026', '2026-08-17', '2026-12-18'], ['Spring 2027', '2027-01-04', '2027-05-28']]) {
+    t.fx.session(w.A, { term: t.fx.term(w.A, { name, start, end }), name: 'Afternoon Study', weekdays: '1,3' });
+  }
+  const tab = alertTab(t);
+  tab.signIn(w.dirA);
+  await tab.start();
+  await tab.go('#/news/new');
+  assert.deepEqual(optionTexts(tab.doc.getElementById('ann-session')), [
+    'Afternoon Study · Mon/Wed 1pm–4pm · Fall 2026 · 0 students enrolled',
+    'Afternoon Study · Mon/Wed 1pm–4pm · Spring 2027 · 0 students enrolled']);
+});
+
+test(['AN-2', 'AN-5'], 'HQ\'s alert screen lists a closed location, marked closed, and counts it in "All locations" (R5)', async () => {
+  const w = await world();
+  const { t } = w;
+  t.db.prepare('UPDATE locations SET active = 0 WHERE id = ?').run(w.B.id);
+  const tab = alertTab(t);
+  tab.signIn(w.hq);
+  await tab.start();
+  await tab.go('#/news/emergency');
+  const labels = tab.main().findAll(n => n.tag === 'label' && n.cls.includes('check')).map(n => n.textContent);
+  assert.ok(labels.includes('All locations (2)'), JSON.stringify(labels));
+  assert.ok(labels.includes('Toronto (closed)'), JSON.stringify(labels));
+  assert.ok(labels.includes('Irvine'), JSON.stringify(labels));
 });

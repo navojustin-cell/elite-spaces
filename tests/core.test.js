@@ -419,3 +419,27 @@ test(['CORE', 'NF-7'], 'sign-in: the logo is the page heading, and a scan link s
   assert.match(words(scan.main()), /^ELITE Spaces Sign in to finish checking in Your scan goes through as soon as you sign in\. /);
   assert.equal(scan.location.hash, '#/scan/1/abc123', 'the scan link is kept for after sign-in');
 });
+
+test('CORE', 'dev mode is off unless ELITE_DEV=1 is set explicitly (R9), and off means no dev endpoints', async () => {
+  const { devFromEnv } = load('src/app.js');
+  assert.equal(devFromEnv({}), false, 'no ELITE_DEV: dev mode off');
+  assert.equal(devFromEnv({ ELITE_DEV: '' }), false);
+  assert.equal(devFromEnv({ ELITE_DEV: '0' }), false);
+  assert.equal(devFromEnv({ ELITE_DEV: 'true' }), false, 'only ELITE_DEV=1 turns it on');
+  assert.equal(devFromEnv({ ELITE_DEV: '1' }), true);
+  // server.js decides dev mode through devFromEnv(process.env), not its own fail-open check.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /const DEV = devFromEnv\(process\.env\);/);
+  assert.doesNotMatch(server, /ELITE_DEV\s*!==/);
+
+  const t = await makeApp();
+  const hq = t.fx.hq();
+  assert.equal((await t.anon.get('/api/dev/accounts')).status, 404, 'signed out, no account list');
+  assert.equal((await t.anon.post('/api/dev/login-as', { userId: hq.id })).status, 404, 'signed out, no sign-in as HQ');
+  assert.equal((await t.as(hq).post('/api/dev/clock', { now: 0 })).status, 404);
+  assert.equal((await t.as(hq).post('/api/dev/run-jobs')).status, 404);
+  assert.equal((await t.as(hq).get('/api/auth/me')).body.dev, false);
+
+  const d = await makeApp({ dev: true });
+  assert.equal((await d.anon.get('/api/dev/accounts')).status, 200, 'with dev mode on, the demo helpers are there');
+});

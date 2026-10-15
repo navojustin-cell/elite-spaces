@@ -430,7 +430,10 @@ test(['AC-2', 'NF-1'], 'a parent in two families never carries one family\'s stu
   assert.equal((await t.as(y).post(A + '/invites/' + k4.invite.id + '/resend')).status, 403);
   const zInv = await inviteGuardian(t, z.parent, { name: 'Grandma Z', email: 'grandma@family.test' });
   assert.equal((await t.as(y).post(A + '/invites/' + zInv.invite.id + '/cancel')).status, 403);
-  assert.equal((await t.as(xy.parent).post(A + '/invites/' + zInv.invite.id + '/resend')).status, 200);
+  // S1/D-24: only the sender resends or cancels a guardian invite, not even a co-guardian
+  assert.equal((await t.as(xy.parent).post(A + '/invites/' + zInv.invite.id + '/resend')).status, 403);
+  assert.equal((await t.as(xy.parent).post(A + '/invites/' + zInv.invite.id + '/cancel')).status, 403);
+  assert.equal((await t.as(z.parent).post(A + '/invites/' + zInv.invite.id + '/resend')).status, 200);
 });
 
 test(['AC-2', 'AC-3'], 'a family gets one open invite per email: a second guardian or student invite to it is refused, and Resend is the way', async () => {
@@ -440,12 +443,14 @@ test(['AC-2', 'AC-3'], 'a family gets one open invite per email: a second guardi
   const g = await inviteGuardian(t, p, { name: 'Mark Johnson', email: 'mark@family.test' });
   const mark = (await t.anon.post(A + '/invites/accept', { code: g.code, password: 'markpass1' })).body.user;
   const kemi = await inviteGuardian(t, p, { name: 'Kemi Adeyemi', email: 'kemi@family.test' });
-  // the same email again, from the same parent or a co-guardian: refused, pointing at Resend
-  for (const who of [p, mark]) {
+  // the same email again, from the same parent or a co-guardian: refused. The sender is pointed at Resend;
+  // a co-guardian, who can't resend another guardian's invite (S1), is pointed at the sender
+  for (const [who, msg] of [[p, /^Kemi already has an invite at that email\. Use Resend/],
+    [mark, new RegExp(`^Kemi already has an invite from ${p.name.split(' ')[0]} at that email\\. Ask ${p.name.split(' ')[0]} to resend it if Kemi needs a new code\\.$`)]]) {
     const again = await t.as(who).post(A + '/guardians/invite', { name: 'Kemi A', email: 'KEMI@family.test' });
     assert.equal(again.status, 409, JSON.stringify(again.body));
     assert.equal(again.body.error, 'invite_pending');
-    assert.match(again.body.message, /^Kemi already has an invite at that email\. Use Resend/);
+    assert.match(again.body.message, msg);
   }
   assert.equal(t.db.prepare("SELECT COUNT(*) AS n FROM account_invites WHERE email = 'kemi@family.test'").get().n, 1);
   assert.deepEqual((await t.as(p).get(A + '/family')).body.invites.map(i => i.email), ['kemi@family.test']);
@@ -530,8 +535,10 @@ test(['AC-1', 'AC-3', 'NF-1'], 'the invite accept screen gives one neutral answe
   assert.doesNotMatch(JSON.stringify(answers[0].body), /already has|exists|taken|in use|staff|parent/i);
   assert.equal(userRow(t, inv.invite.user_id).password_hash, null);
   assert.equal((await t.anon.get(A + '/invites/' + inv.code)).status, 200);
-  // an invite whose email was set by the inviter: the same answer for a student invite and a guardian invite
-  const kid = await inviteStudent(t, p, { name: 'Bo Diaz', email: holders[1].email });
+  // an invite whose email was set by the inviter: the same answer for a student invite and a guardian invite.
+  // A student invite to an email in use is refused when it is made (S12), so here the email is taken afterwards.
+  const kid = await inviteStudent(t, p, { name: 'Bo Diaz', email: 'bo@kid.test' });
+  parentAt(t, loc, { email: 'bo@kid.test' });
   const grown = await inviteGuardian(t, p, { name: 'Mark Diaz', email: holders[2].email });
   const k = await t.anon.post(A + '/invites/accept', { code: kid.code, password: 'kidpass12' });
   const g = await t.anon.post(A + '/invites/accept', { code: grown.code, password: 'markpass1' });
@@ -915,4 +922,167 @@ test(['NF-1', 'AC-1'], 'changing your password needs your current one', async ()
   assert.equal((await t.as(p).post(A + '/password', { current_password: 'demo1234', new_password: 'brandnew1' })).status, 200);
   assert.equal((await login(t, p.email, 'brandnew1')).status, 200);
   assert.equal((await login(t, p.email, 'demo1234')).status, 401);
+});
+
+// ---------------------------------------------------------------- sweep 2026-10-14 (S1, S25, S12/S26, R10, R4)
+
+test(['AC-2', 'NF-1'], 'S1: only the guardian who sent a guardian invite can resend or cancel it, so a co-guardian never gets a code that reaches the other guardian\'s own students', async () => {
+  const t = await makeApp();
+  const auth = load('src/auth.js');
+  const loc = t.fx.location();
+  const yf = t.fx.family(loc);                     // Y and Yan
+  const xf = t.fx.family(loc);                     // X and Wes, X's own family
+  const y = yf.parent, x = xf.parent, wes = xf.student;
+  const g = await inviteGuardian(t, y, { name: 'X', email: x.email });
+  assert.equal((await t.as(x).post(A + '/invites/join', { code: g.code })).status, 200);
+  assert.equal(auth.canSeeStudent(t.ctx, y, wes.id), false);    // D-24: X's own student is not shared with Y
+  const zoe = await inviteGuardian(t, x, { name: 'Zoe New', email: 'zoe@example.com' });
+  const hash = () => t.db.prepare('SELECT code_hash FROM account_invites WHERE id = ?').get(zoe.invite.id).code_hash;
+  const before = hash();
+  // Y sees X's invite on the Family screen, but can neither take a new code for it nor cancel it
+  const yFam = await t.as(y).get(A + '/family');
+  assert.deepEqual(yFam.body.invites.map(i => [i.id, i.invited_by]), [[zoe.invite.id, x.id]]);
+  const re = await t.as(y).post(A + '/invites/' + zoe.invite.id + '/resend');
+  assert.equal(re.status, 403);
+  assert.equal(re.body.code, undefined);
+  assert.equal((await t.as(y).post(A + '/invites/' + zoe.invite.id + '/cancel')).status, 403);
+  assert.equal(hash(), before);
+  assert.equal(t.db.prepare('SELECT revoked_at FROM account_invites WHERE id = ?').get(zoe.invite.id).revoked_at, null);
+  // X, who sent it, still can; the guardian who accepts is linked to X's students and no one else's
+  const fresh = await t.as(x).post(A + '/invites/' + zoe.invite.id + '/resend');
+  assert.equal(fresh.status, 200);
+  const acc = await t.anon.post(A + '/invites/accept', { code: fresh.body.code, password: 'zoepass12' });
+  assert.equal(acc.status, 201);
+  assert.deepEqual(auth.linkedStudentIds(t.ctx, acc.body.user.id).sort(), auth.linkedStudentIds(t.ctx, x.id).sort());
+  // the same holds the other way: X can't resend or cancel an invite Y sends
+  const yInv = await inviteGuardian(t, y, { name: 'Gran', email: 'gran@example.com' });
+  assert.equal((await t.as(x).post(A + '/invites/' + yInv.invite.id + '/resend')).status, 403);
+  assert.equal((await t.as(x).post(A + '/invites/' + yInv.invite.id + '/cancel')).status, 403);
+  assert.equal((await t.as(y).post(A + '/invites/' + yInv.invite.id + '/cancel')).status, 200);
+});
+
+test(['AC-2'], 'S25: "joined your family" names only the inviter\'s students, never the joining guardian\'s own', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const a = parentAt(t, loc, { name: 'Amy Lee' });
+  for (const name of ['Cal Lee', 'Ann Lee', 'Ben Lee']) t.fx.link(a, t.fx.user('student', { location: loc, name }));
+  const b = parentAt(t, loc, { name: 'Bo Park' });
+  t.fx.link(b, t.fx.user('student', { location: loc, name: 'Zed Park' }));
+  const g = await inviteGuardian(t, a, { name: 'Bo Park', email: b.email });
+  assert.equal((await t.as(b).post(A + '/invites/join', { code: g.code })).status, 200);
+  const n = t.fx.notifications(a, 'account_guardian_joined');
+  assert.equal(n.length, 1);
+  assert.equal(n[0].title, 'Bo Park joined your family');
+  assert.equal(n[0].body, 'They now see the same records as you for Ann, Ben and Cal.');
+  assert.doesNotMatch(n[0].body, /Zed/);
+  // two students read "Ann and Ben"
+  const c = parentAt(t, loc);
+  for (const name of ['Ann Roe', 'Ben Roe']) t.fx.link(c, t.fx.user('student', { location: loc, name }));
+  const d = parentAt(t, loc);
+  t.fx.link(d, t.fx.user('student', { location: loc, name: 'Dee Roe' }));
+  const g2 = await inviteGuardian(t, c, { name: 'D', email: d.email });
+  assert.equal((await t.as(d).post(A + '/invites/join', { code: g2.code })).status, 200);
+  assert.equal(t.fx.notifications(c, 'account_guardian_joined')[0].body, 'They now see the same records as you for Ann and Ben.');
+});
+
+test(['AC-1', 'AC-3', 'NF-1'], 'S12/S26: a student invite to an email that already has an account is refused when it is made, with one neutral answer', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const p = parentAt(t, loc, { email: 'mom@example.com' });
+  const g = await inviteGuardian(t, p, { name: 'Dad', email: 'dad@example.com' });
+  const dad = (await t.anon.post(A + '/invites/accept', { code: g.code, password: 'dadpass12' })).body.user;
+  const kid = await approvedStudent(t, p, 'Leo Diaz', 'leo@kid.test');
+  const elsewhere = t.fx.family(t.fx.location());
+  const holders = ['MOM@example.com', dad.email, kid.email, t.fx.staff(loc).email, t.fx.staff(loc, { active: 0 }).email,
+    t.fx.hq().email, elsewhere.parent.email, elsewhere.student.email];
+  const students = () => t.db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'student'").get().n;
+  const invites = () => t.db.prepare('SELECT COUNT(*) AS n FROM account_invites').get().n;
+  const [n0, i0] = [students(), invites()];
+  const answers = [];
+  for (const [who, email] of holders.map(e => [p, e]).concat([[dad, 'mom@example.com']])) {
+    const r = await t.as(who).post(A + '/students/invite', { name: 'Ada Diaz', email });
+    answers.push({ status: r.status, body: r.body });
+  }
+  for (const a of answers) assert.deepEqual(a, answers[0]);
+  assert.deepEqual(answers[0], { status: 400, body: { error: 'email',
+    message: "That email can't be used for a new student account. Enter an email only your student uses, or leave it blank and add their phone: they choose an email when they accept." } });
+  assert.doesNotMatch(answers[0].body.message, /your own|staff|parent|guardian|already has|exists|taken/i);
+  assert.deepEqual([students(), invites()], [n0, i0]);
+  // an email a co-guardian's open guardian invite was sent to gets the same answer; once that invite is cancelled it is free
+  const gran = await inviteGuardian(t, dad, { name: 'Gran', email: 'gran@example.com' });
+  assert.deepEqual(await t.as(p).post(A + '/students/invite', { name: 'Ada Diaz', email: 'GRAN@example.com' })
+    .then(r => ({ status: r.status, body: r.body })), answers[0]);
+  assert.equal(students(), n0);
+  assert.equal((await t.as(dad).post(A + '/invites/' + gran.invite.id + '/cancel')).status, 200);
+  const granKid = await inviteStudent(t, p, { name: 'Gia Diaz', email: 'gran@example.com' });
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: granKid.code, password: 'kidpass12' })).status, 200);
+  // a free email, or a phone alone, still goes through and can be accepted
+  const ok = await inviteStudent(t, p, { name: 'Ada Diaz', email: 'ada@kid.test' });
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: ok.code, password: 'kidpass12' })).status, 200);
+  const byPhone = await inviteStudent(t, p, { name: 'Bo Diaz', phone: '555-0140' });
+  assert.equal((await t.anon.post(A + '/invites/accept', { code: byPhone.code, password: 'kidpass12', email: 'bo@kid.test' })).status, 200);
+});
+
+test(['NF-1', 'AC-1'], 'R10: changing a password signs out every other session of that account, and the current one stays signed in', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const f = t.fx.family(loc);
+  const other = t.fx.family(loc);
+  const phone = t.as(f.parent), tablet = t.as(f.parent), laptop = t.as(f.parent), theirs = t.as(other.parent);
+  for (const c of [phone, tablet, laptop, theirs]) assert.equal((await c.get(A + '/family')).status, 200);
+  // a refused change signs nobody out
+  assert.equal((await laptop.post(A + '/password', { current_password: 'wrong-one', new_password: 'newpass12345' })).status, 400);
+  assert.equal((await phone.get(A + '/family')).status, 200);
+  assert.equal((await laptop.post(A + '/password', { current_password: 'demo1234', new_password: 'newpass12345' })).status, 200);
+  for (const c of [phone, tablet]) {
+    const r = await c.get(A + '/family');
+    assert.equal(r.status, 401);
+    assert.equal(JSON.stringify(r.body).includes(f.student.name), false);
+  }
+  assert.equal((await laptop.get(A + '/family')).status, 200);
+  assert.equal((await theirs.get(A + '/family')).status, 200);
+  assert.equal([...t.ctx.sessions.values()].filter(id => id === f.parent.id).length, 1);
+  assert.equal((await login(t, f.parent.email, 'newpass12345')).status, 200);
+});
+
+test(['AC-5'], 'R4: location hours can\'t be changed so that an active session of a current or upcoming term falls outside them', async () => {
+  const t = await makeApp();
+  const a = t.fx.location({ name: 'Toronto', timezone: 'America/Toronto' }), b = t.fx.location();
+  const dir = t.fx.director(a), hq = t.fx.hq();
+  const fall = t.fx.term(a);                                                   // runs through Dec 18
+  t.fx.session(a, { term: fall, name: 'Morning Focus', start: '09:00', end: '11:30' });
+  t.fx.session(a, { term: fall, name: 'Afternoon Study', start: '13:00', end: '16:00' });
+  // none of these hold the hours back: a cancelled session, a term that has ended, another location
+  const late = t.fx.session(a, { term: fall, name: 'Late Club', start: '18:00', end: '21:00' });
+  t.db.prepare("UPDATE sessions SET status = 'cancelled' WHERE id = ?").run(late.id);
+  t.fx.session(a, { term: t.fx.term(a, { name: 'Summer', start: '2026-06-01', end: '2026-10-13' }), name: 'Early Bird', start: '07:00', end: '08:00' });
+  t.fx.session(b, { name: 'Dawn Patrol', start: '06:00', end: '22:00' });
+  const hours = () => { const r = t.db.prepare('SELECT open_time, close_time FROM locations WHERE id = ?').get(a.id); return [r.open_time, r.close_time]; };
+  const refuse = async (who, body, message) => {
+    const r = await t.as(who).patch(A + '/locations/' + a.id, body);
+    assert.equal(r.status, 409, JSON.stringify(body));
+    assert.equal(r.body.error, 'session_outside_hours');
+    assert.equal(r.body.message, message);
+    assert.deepEqual(hours(), ['09:00', '20:00']);
+  };
+  await refuse(dir, { close_time: '10:00' },
+    'Morning Focus runs 9:00 AM–11:30 AM, outside 9:00 AM–10:00 AM. Choose hours that cover it, or change that session first.');
+  await refuse(hq, { close_time: '15:00', geofence_m: 300 },
+    'Afternoon Study runs 1:00 PM–4:00 PM, outside 9:00 AM–3:00 PM. Choose hours that cover it, or change that session first.');
+  await refuse(dir, { open_time: '09:30' },
+    'Morning Focus runs 9:00 AM–11:30 AM, outside 9:30 AM–8:00 PM. Choose hours that cover it, or change that session first.');
+  assert.equal(t.db.prepare('SELECT geofence_m FROM locations WHERE id = ?').get(a.id).geofence_m, 150);
+  assert.equal(t.fx.audit('location.update').length, 0);
+  // hours that still cover every session are saved, edges included
+  const ok = await t.as(dir).patch(A + '/locations/' + a.id, { open_time: '09:00', close_time: '16:00' });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.deepEqual(hours(), ['09:00', '16:00']);
+  // a term that ends today still counts
+  t.fx.session(a, { term: t.fx.term(a, { name: 'Short', start: '2026-10-01', end: '2026-10-14' }), name: 'Last Day', start: '16:00', end: '17:00' });
+  assert.equal((await t.as(dir).patch(A + '/locations/' + a.id, { close_time: '17:00' })).status, 200);
+  const r = await t.as(dir).patch(A + '/locations/' + a.id, { close_time: '16:30' });
+  assert.equal(r.status, 409);
+  assert.match(r.body.message, /^Last Day runs 4:00 PM–5:00 PM/);
+  // a change that leaves the hours alone is never held back
+  assert.equal((await t.as(dir).patch(A + '/locations/' + a.id, { geofence_m: 200 })).status, 200);
 });

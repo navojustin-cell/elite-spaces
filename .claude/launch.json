@@ -1,6 +1,6 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "elite-spaces", "runtimeExecutable": "node", "runtimeArgs": ["--no-warnings", "server.js"], "port": 3100, "env": { "PORT": "3100" } }
+    { "name": "elite-spaces", "runtimeExecutable": "node", "runtimeArgs": ["--no-warnings", "server.js"], "port": 3100, "env": { "PORT": "3100", "ELITE_DEV": "1" } }
   ]
 }

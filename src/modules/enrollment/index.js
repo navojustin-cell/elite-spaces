@@ -51,5 +51,7 @@ module.exports = {
     return r;
   },
   // EN-5: seats freed by membership pauses or capacity raises are filled too.
-  jobs: [{ name: 'promote-waitlists', run: ctx => svc.promoteAll(ctx) }],
+  // A pending request whose session was cancelled, lost its day or whose term ended is closed with the real reason.
+  jobs: [{ name: 'promote-waitlists', run: ctx => svc.promoteAll(ctx) },
+    { name: 'close-gone-requests', run: ctx => svc.closeGoneRequests(ctx) }],
 };

@@ -15,18 +15,21 @@
 //   GET  /family                  my students (with link state), my co-guardians and their open invites
 //   POST /students/invite         { name, email?, phone? } -> pending student, pending links for me and my
 //                                 co-guardians (see coGuardians), one-time code; refused while one of my
-//                                 students already has an open invite to that email (use resend)
+//                                 students already has an open invite to that email (use resend), and refused
+//                                 with one neutral answer for an email that already belongs to an account
+//                                 or that an open guardian invite from me or a co-guardian was sent to
 //   POST /students/:id/approve    activate a student who accepted their invite
 //   POST /guardians/invite        { name, email } -> one-time code for a second guardian; refused for my own
 //                                 student's email, a co-guardian's, or while the family has an open invite to that email
 //   POST /invites/join            { code } -> an existing parent joins the family the invite came from
-//   POST /invites/:id/resend      new code and expiry; the old code stops working
+//   POST /invites/:id/resend      new code and expiry; the old code stops working. A guardian invite is resent
+//                                 or cancelled only by the parent who sent it (D-24, see managedInvite)
 //   POST /invites/:id/cancel      the code stops working; a pending student is removed. For a student who
 //                                 already accepted (a decline), the other parents are told and the
 //                                 "accepted your invite" inbox items stop asking for approval
 // Anyone signed in:
 //   GET  /me                      { temp_password } - still using a password someone else set?
-//   POST /password                { current_password, new_password }
+//   POST /password                { current_password, new_password }; signs out the account's other sessions (R10)
 
 const { tx } = require('../../db');
 const auth = require('../../auth');
@@ -95,8 +98,27 @@ function openInviteTo(db, parentId, kind, addr) {
 const inviteHolds = (db, addr, exceptId) => !!db.prepare(`SELECT 1 FROM account_invites
   WHERE email = ? AND id != ? AND accepted_at IS NULL AND revoked_at IS NULL`).get(addr, exceptId);
 
-const alreadyInvited = (row, now) => conflict('invite_pending',
-  `${u.firstName(row.name)} already has an invite at that email. Use ${row.expires_at <= now ? 'Send a new code' : 'Resend'} on that invite instead of sending another.`);
+// Only the sender can resend a guardian invite (see managedInvite), so a
+// co-guardian is pointed at the sender instead of at a Resend they can't use.
+function alreadyInvited(ctx, row, userId) {
+  const first = u.firstName(row.name);
+  if (row.kind === 'guardian' && row.invited_by !== userId) {
+    const sender = u.firstName((auth.getUser(ctx, row.invited_by) || {}).name);
+    return conflict('invite_pending', `${first} already has an invite from ${sender} at that email. Ask ${sender} to resend it if ${first} needs a new code.`);
+  }
+  return conflict('invite_pending',
+    `${first} already has an invite at that email. Use ${row.expires_at <= ctx.clock.now() ? 'Send a new code' : 'Resend'} on that invite instead of sending another.`);
+}
+
+// One answer when a parent invites a student at an email that already belongs
+// to an account (their own, a co-guardian's, anyone's) or that the family's own
+// open guardian invite was sent to: such an invite could never be accepted. It
+// never says whose account it is.
+const studentEmailInUse = () => bad('email',
+  "That email can't be used for a new student account. Enter an email only your student uses, or leave it blank and add their phone: they choose an email when they accept.");
+
+// "Ann", "Ann and Ben", "Ann, Ben and Cal".
+const andList = names => (names.length < 3 ? names.join(' and ') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]);
 
 // One answer for an email someone already uses, whoever that is, so an invite
 // code can't be used to find out which addresses have accounts.
@@ -119,13 +141,16 @@ function openInvite(ctx, code) {
 }
 
 // An invite the calling parent may resend or cancel: a student invite for a
-// student they are linked to, or a guardian invite sent by them or a co-guardian.
+// student they are linked to, or a guardian invite they sent themselves. A
+// guardian invite links the new guardian to its sender's students (D-24), so
+// only the sender may hold its code: a co-guardian who could resend it would
+// get a code that reaches students they must not see.
 function managedInvite(ctx, user, id) {
   const row = ctx.db.prepare('SELECT * FROM account_invites WHERE id = ? AND revoked_at IS NULL').get(Number(id) || 0);
   if (!row) throw notFound('That invite no longer exists.');
   const ours = row.kind === 'student'
     ? !!ctx.db.prepare('SELECT 1 FROM family_links WHERE parent_id = ? AND student_id = ?').get(user.id, row.user_id)
-    : coGuardians(ctx.db, user.id).includes(row.invited_by);
+    : row.invited_by === user.id;
   if (!ours) throw forbidden();
   return row;
 }
@@ -145,12 +170,14 @@ function joinFamily(ctx, inv, parentId) {
   return kids.length;
 }
 
+// Names only the inviter's students, the ones joinFamily shared: a guardian's
+// own students stay theirs (D-24), so the inviter must not learn of them here.
 function notifyJoined(ctx, inv, guardian) {
   const names = ctx.db.prepare(`SELECT s.name FROM family_links fl JOIN users s ON s.id = fl.student_id
-    WHERE fl.parent_id = ? AND s.active = 1 ORDER BY s.name`).all(guardian.id).map(r => u.firstName(r.name));
+    WHERE fl.parent_id = ? AND s.active = 1 ORDER BY s.name`).all(inv.invited_by).map(r => u.firstName(r.name));
   notify.send(ctx, [inv.invited_by], {
     kind: 'account_guardian_joined', title: `${guardian.name} joined your family`,
-    body: names.length ? `They now see the same records as you for ${names.join(' and ')}.` : 'They will see every student you add.',
+    body: names.length ? `They now see the same records as you for ${andList(names)}.` : 'They will see every student you add.',
     refType: 'user', refId: guardian.id,
   });
 }
@@ -288,7 +315,10 @@ function routes(r, ctx) {
     if (!addr && !phone) throw bad('contact', 'Add an email or a phone number so you can send the invite.');
     if (!req.user.location_id) throw bad('location', 'Your account has no home location yet. Ask the front desk to set it.');
     const twinStudent = openInviteTo(db, req.user.id, 'student', addr);
-    if (twinStudent) throw alreadyInvited(twinStudent, ctx.clock.now());
+    if (twinStudent) throw alreadyInvited(ctx, twinStudent, req.user.id);
+    if (addr && u.emailTaken(db, addr)) throw studentEmailInUse();
+    // The family's own open guardian invite holds that email: whichever is accepted second could never be.
+    if (openInviteTo(db, req.user.id, 'guardian', addr)) throw studentEmailInUse();
     const parents = activeParents(db, coGuardians(db, req.user.id));
     const out = tx(db, () => {
       const now = ctx.clock.now();
@@ -337,7 +367,7 @@ function routes(r, ctx) {
     const member = db.prepare(`SELECT name FROM users WHERE lower(email) = ? AND id IN (${fam.map(() => '?').join(',')})`).get(addr, ...fam);
     if (member) throw conflict('already_family', `${member.name} is already in your family.`);
     const twinGuardian = openInviteTo(db, req.user.id, 'guardian', addr);
-    if (twinGuardian) throw alreadyInvited(twinGuardian, ctx.clock.now());
+    if (twinGuardian) throw alreadyInvited(ctx, twinGuardian, req.user.id);
     res.status(201).json(createInvite(ctx, { kind: 'guardian', by: req.user.id, name, email: addr }));
   });
 
@@ -404,6 +434,8 @@ function routes(r, ctx) {
       db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(auth.hashPassword(pw), req.user.id);
       db.prepare('DELETE FROM account_temp_passwords WHERE user_id = ?').run(req.user.id);
     });
+    // R10: every other device signed in to this account is signed out; this one stays.
+    auth.endOtherSessions(ctx, req.user.id, auth.sessionToken(ctx, req));
     res.json({ ok: true });
   });
 }

@@ -369,7 +369,7 @@
       h('p', { class: 'muted small' }, "Your student sets their own password on their phone. They can't sign in until you approve them."),
       err,
       field("Student's full name", name),
-      field("Student's email", email, "They'll sign in with this. If you only have a phone number, they add an email when they accept."),
+      field("Student's email", email, "They'll sign in with this, so use an email only your student uses, not yours. If you only have a phone number, they add an email when they accept."),
       field("Student's mobile phone", phone, 'Optional if you added an email.'),
       h('div', { class: 'row' }, h('button', { class: 'btn btn-primary', type: 'submit' }, 'Create invite'),
         h('button', { class: 'btn btn-ghost', type: 'button', onclick: close }, 'Not now')));
@@ -401,7 +401,8 @@
       flash = { kind: 'share', res };
       App.refresh();
     }, x => {
-      const inv = x.code === 'invite_pending' && invites.find(i => i.email === email.value.trim().toLowerCase());
+      // Only the guardian who sent an invite can resend it.
+      const inv = x.code === 'invite_pending' && invites.find(i => i.email === email.value.trim().toLowerCase() && i.invited_by === App.me.user.id);
       return inv && resendOffer(inv, inv.name);
     });
     return form;
@@ -417,7 +418,7 @@
       h('button', { class: 'btn btn-primary', type: 'submit' }, 'Save new password'));
     onSubmit(form, err, async () => {
       await App.api.post(A + '/password', { current_password: cur.value, new_password: next.value });
-      App.toast('Your password is updated.');
+      App.toast('Your password is updated. Any other device signed in to your account was signed out.');
       onDone();
     });
     return form;
@@ -467,12 +468,16 @@
           h('div', { class: 'muted small' }, [g.email, g.phone].filter(Boolean).join(' · ')))));
       }
       for (const inv of data.invites) {
-        const actions = h('div', { class: 'row', style: 'margin-top:.5rem' },
-          h('button', { class: 'btn', type: 'button', onclick: e => resend(e.currentTarget, inv.id) }, inv.expired ? 'Send a new code' : 'Resend'),
-          h('button', { class: 'btn btn-ghost', type: 'button', onclick: e => confirmThen(e.currentTarget, actions, {
-            title: `Cancel the invite to ${inv.name}?`, body: 'The code stops working.',
-            confirmLabel: 'Cancel invite to ' + first(inv.name), cancelLabel: 'Keep invite',
-          }, () => cancelInvite(inv.id, 'Invite to ' + first(inv.name) + ' cancelled.')) }, 'Cancel invite'));
+        // Only the guardian who sent an invite can resend or cancel it; the others see who sent it.
+        const mine = inv.invited_by === App.me.user.id;
+        const sender = data.guardians.find(g => g.id === inv.invited_by);
+        const actions = !mine ? h('div', { class: 'muted small', style: 'margin-top:.35rem' }, 'Sent by ' + (sender ? first(sender.name) : 'another guardian'))
+          : h('div', { class: 'row', style: 'margin-top:.5rem' },
+            h('button', { class: 'btn', type: 'button', onclick: e => resend(e.currentTarget, inv.id) }, inv.expired ? 'Send a new code' : 'Resend'),
+            h('button', { class: 'btn btn-ghost', type: 'button', onclick: e => confirmThen(e.currentTarget, actions, {
+              title: `Cancel the invite to ${inv.name}?`, body: 'The code stops working.',
+              confirmLabel: 'Cancel invite to ' + first(inv.name), cancelLabel: 'Keep invite',
+            }, () => cancelInvite(inv.id, 'Invite to ' + first(inv.name) + ' cancelled.')) }, 'Cancel invite'));
         gList.append(h('li', null, avatar(inv.name), h('div', { class: 'grow' },
           h('div', { class: 'row between' }, h('strong', null, inv.name),
             inv.expired ? badge('badge-danger', 'Invite expired') : badge('', 'Invited ' + App.fmtDate(inv.created_at, { weekday: undefined }))),
@@ -776,7 +781,7 @@
     parts.push(
       field('Check-in radius (meters)', radius, 'Students must be this close to the building to check in. 150 m suits most buildings.'),
       field('New QR code each day at', rotate, "Yesterday's entrance code stops working at this time, local to the location."),
-      h('div', { class: 'grid' }, field('Opens at', open), field('Closes at', shut, 'Anyone still checked in is checked out automatically at closing time.')),
+      h('div', { class: 'grid' }, field('Opens at', open), field('Closes at', shut, 'Every session must fit inside these hours. Anyone still checked in is checked out automatically at closing time.')),
       h('div', { class: 'row' }, h('button', { class: 'btn btn-primary', type: 'submit' }, l ? 'Save changes' : 'Add location'),
         close && h('button', { class: 'btn btn-ghost', type: 'button', onclick: close }, 'Not now')));
     const form = h('form', full && l ? { class: 'ac-section' } : null, ...parts);

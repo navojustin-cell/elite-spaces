@@ -160,4 +160,48 @@ module.exports = [
     find: 'if (out.open_time >= out.close_time)', repl: 'if (false)' },
   { name: 'any time zone name is accepted', covers: ['AC-5'], file: U,
     find: 'if (!s || !IANAZone.isValidZone(s))', repl: 'if (!s)' },
+
+  // ---- sweep 2026-10-14
+  // S1: only the sender of a guardian invite resends or cancels it (D-24)
+  { name: 'a co-guardian can resend or cancel the other guardian\'s invite and take its code', covers: ['AC-2', 'NF-1'], file: F,
+    find: ': row.invited_by === user.id;', repl: ': coGuardians(ctx.db, user.id).includes(row.invited_by);' },
+  { name: 'a co-guardian is told to Resend a guardian invite only its sender can resend', covers: ['AC-2'], file: F,
+    find: "if (row.kind === 'guardian' && row.invited_by !== userId) {", repl: 'if (false) {' },
+  // S25: the joined notice names only the inviter's students
+  { name: 'the joined notice names the joining guardian\'s own students', covers: ['AC-2'], file: F,
+    find: "WHERE fl.parent_id = ? AND s.active = 1 ORDER BY s.name`).all(inv.invited_by)",
+    repl: "WHERE fl.parent_id = ? AND s.active = 1 ORDER BY s.name`).all(guardian.id)" },
+  { name: 'the joined notice reads "Ann and Ben and Cal"', covers: ['AC-2'], file: F,
+    find: '${andList(names)}', repl: "${names.join(' and ')}" },
+  // S12/S26: a student invite to an email in use is refused when it is made
+  { name: 'a student invite to an email that already has an account is sent', covers: ['AC-1', 'AC-3'], file: F,
+    find: 'if (addr && u.emailTaken(db, addr)) throw studentEmailInUse();', repl: '' },
+  { name: 'a student invite to the email of the family\'s open guardian invite is sent', covers: ['AC-2', 'AC-3'], file: F,
+    find: "if (openInviteTo(db, req.user.id, 'guardian', addr)) throw studentEmailInUse();", repl: '' },
+  { name: 'a cancelled guardian invite still holds its email from a student invite', covers: ['AC-3'], file: F,
+    find: "AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL\n    AND invited_by IN", repl: "AND email = ? AND accepted_at IS NULL\n    AND invited_by IN" },
+  // R10: a password change signs out the account's other sessions
+  { name: 'changing a password leaves other devices signed in', covers: ['NF-1', 'AC-1'], file: F,
+    find: 'auth.endOtherSessions(ctx, req.user.id, auth.sessionToken(ctx, req));', repl: '' },
+  { name: 'changing a password also signs out the device that changed it', covers: ['NF-1', 'AC-1'], file: 'src/auth.js',
+    find: 'if (uid === userId && token !== keepToken)', repl: 'if (uid === userId)' },
+  { name: 'changing a password signs out other accounts too', covers: ['NF-1', 'AC-1'], file: 'src/auth.js',
+    find: 'if (uid === userId && token !== keepToken)', repl: 'if (token !== keepToken)' },
+  // R4: location hours must cover every active session of a term that hasn't ended
+  { name: 'location hours can be changed to cut into a session', covers: ['AC-5'], file: O,
+    find: 'if (changes.open_time || changes.close_time) assertSessionsFit(ctx, cur.id, f);', repl: '' },
+  { name: 'a later opening time ignores sessions that start before it', covers: ['AC-5'], file: O,
+    find: '(s.start_time < ? OR s.end_time > ?)', repl: '(s.start_time < ? AND 0 OR s.end_time > ?)' },
+  { name: 'an earlier closing time ignores sessions that end after it', covers: ['AC-5'], file: O,
+    find: '(s.start_time < ? OR s.end_time > ?)', repl: '(s.start_time < ? OR s.end_time > ? AND 0)' },
+  { name: 'a cancelled session holds the hours back', covers: ['AC-5'], file: O,
+    find: "WHERE s.location_id = ? AND s.status = 'active' AND t.end_date", repl: 'WHERE s.location_id = ? AND t.end_date' },
+  { name: 'a session from an ended term holds the hours back', covers: ['AC-5'], file: O,
+    find: 'AND t.end_date >= ? AND (s.start_time', repl: 'AND ? IS NOT NULL AND (s.start_time' },
+  { name: 'a term ending today no longer holds the hours back', covers: ['AC-5'], file: O,
+    find: 'AND t.end_date >= ? AND (s.start_time', repl: 'AND t.end_date > ? AND (s.start_time' },
+  { name: 'another location\'s session holds the hours back', covers: ['AC-5', 'NF-1'], file: O,
+    find: "WHERE s.location_id = ? AND s.status = 'active'", repl: "WHERE ? IS NOT NULL AND s.status = 'active'" },
+  { name: 'the hours refusal does not name the session', covers: ['AC-5'], file: O,
+    find: '`${s.name} runs ${ampm(s.start_time)}', repl: '`A session runs ${ampm(s.start_time)}' },
 ];
