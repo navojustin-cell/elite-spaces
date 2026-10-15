@@ -231,7 +231,8 @@
       if (m.state === 'ending') notes.push('Ends ' + inDays(m.days_left) + '.');
       if (m.state === 'expired') notes.push('Ended on ' + fullDate(m.expires_on) + '.');
       notes.push(data.active_slots ? 'Holds ' + plural(data.active_slots, 'weekly session', 'weekly sessions') + '.' : 'No weekly sessions right now.');
-      if (data.paused_slots) notes.push(plural(data.paused_slots, 'session is', 'sessions are') + (m.renewal_needed && m.state !== 'ending'
+      if (data.paused_slots) notes.push(plural(data.paused_slots, 'session is', 'sessions are') + (m.state === 'upcoming'
+        ? ' paused until the membership starts.' : m.renewal_needed && m.state !== 'ending'
         ? ' paused until the membership is active again.' : ' paused because of the weekly limit. Raising the limit brings ' + (data.paused_slots === 1 ? 'it' : 'them') + ' back.'));
       now.append(h('p', { class: 'muted small', style: 'margin:.25rem 0 0' }, notes.join(' ')));
     }
@@ -263,7 +264,9 @@
     // Say what saving will do to the student's sessions before it happens (MB-5).
     const preview = () => {
       const st = form.querySelector('input[name="mb-status"]:checked').value;
-      const valid = st === 'active' && !!end.value && end.value >= data.today;
+      // D-32: a start date still ahead means not active yet; paused sessions come back on that day.
+      const later = st === 'active' && start.value > data.today;
+      const valid = st === 'active' && !!end.value && end.value >= data.today && !later;
       let label = m ? 'Save membership' : 'Set up membership';
       effect.replaceChildren();
       if (st === 'active' && end.value && end.value < data.today) {
@@ -276,8 +279,12 @@
           ', so the weekly limit can\'t go below ' + data.active_slots + '. A parent can drop sessions on Schedule first, then you can lower the limit.'));
       } else if (!valid && data.active_slots) {
         effect.append(h('div', { class: 'notice notice-warn' }, 'Saving pauses ' + name + '\'s ' +
-          plural(data.active_slots, 'weekly session', 'weekly sessions') + '. They\'re kept and come back when the membership is active again. The family gets a notification.'));
+          plural(data.active_slots, 'weekly session', 'weekly sessions') + '. They\'re kept and come back ' +
+          (later ? 'on ' + fullDate(start.value) + ', when the membership starts' : 'when the membership is active again') + '. The family gets a notification.'));
         label = 'Save and pause ' + plural(data.active_slots, 'session', 'sessions');
+      } else if (later && data.paused_slots) {
+        effect.append(h('div', { class: 'notice notice-warn' }, name + '\'s ' + plural(data.paused_slots, 'paused session stays', 'paused sessions stay') +
+          ' paused until the membership starts on ' + fullDate(start.value) + '. They come back that day, up to the weekly limit, and the family gets a notification then.'));
       } else if (valid && data.paused_slots) {
         // Sessions come back only up to the weekly limit (D-3); the rest stay paused and saved.
         const paused = data.paused_slots;

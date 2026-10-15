@@ -39,12 +39,30 @@ for (const f of mutFiles) {
 
 const testArgs = only.length ? only : [];
 
-function runSuite(root) {
+// A suite that never started (Windows can fail a spawn with UNKNOWN/EAGAIN under
+// load) is retried, and if it still won't start it is reported as an error: it
+// must never crash the whole run, and never count as a caught mutation.
+function runOnce(root) {
   return new Promise(resolve => {
-    execFile(process.execPath, ['--no-warnings', path.join(__dirname, 'run.js'), ...testArgs], {
-      env: Object.assign({}, process.env, { ELITE_ROOT: root, ELITE_QUIET: '1' }), timeout: 180000, maxBuffer: 16 << 20,
-    }, (err, stdout) => resolve({ code: err ? (err.code ?? 1) : 0, out: String(stdout || '') }));
+    try {
+      execFile(process.execPath, ['--no-warnings', path.join(__dirname, 'run.js'), ...testArgs], {
+        env: Object.assign({}, process.env, { ELITE_ROOT: root, ELITE_QUIET: '1' }), timeout: 180000, maxBuffer: 16 << 20,
+      }, (err, stdout) => {
+        if (err && String(err.syscall || '').startsWith('spawn')) return resolve({ spawnError: err.code || err.message });
+        resolve({ code: err ? (err.code ?? 1) : 0, out: String(stdout || '') });
+      });
+    } catch (err) { resolve({ spawnError: err.code || err.message }); }
   });
+}
+
+async function runSuite(root) {
+  let r;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    r = await runOnce(root);
+    if (!r.spawnError) return r;
+    await new Promise(res => setTimeout(res, 2000 * (attempt + 1)));
+  }
+  return r;
 }
 
 function copyTree(dst) {
@@ -58,7 +76,7 @@ function copyTree(dst) {
   // Baseline: the unmutated code must pass, or every "caught" below is meaningless.
   const base = await runSuite(ROOT);
   if (base.code !== 0) {
-    console.log('BASELINE FAILS - fix the tests before mutating.\n' + base.out.split('\n').slice(-3).join('\n'));
+    console.log('BASELINE FAILS - fix the tests before mutating.\n' + (base.spawnError ? 'could not start the suite: ' + base.spawnError : base.out.split('\n').slice(-3).join('\n')));
     process.exit(1);
   }
 
@@ -79,18 +97,18 @@ function copyTree(dst) {
       copyTree(dir);
       fs.writeFileSync(path.join(dir, m.file), src.replace(m.find, () => m.repl));
       const r = await runSuite(dir);
-      results[i] = { m, status: r.code === 0 ? 'MISSED' : 'caught' };
+      results[i] = r.spawnError ? { m, status: 'error', why: 'suite never started: ' + r.spawnError } : { m, status: r.code === 0 ? 'MISSED' : 'caught' };
     }
   }
   await Promise.all(Array.from({ length: workers }, (_, w) => worker(w)));
   fs.rmSync(WORK, { recursive: true, force: true });
 
-  let caught = 0, missed = 0, stale = 0;
+  let caught = 0, missed = 0, stale = 0, errors = 0;
   for (const r of results) {
-    if (r.status === 'caught') caught++; else if (r.status === 'MISSED') missed++; else stale++;
-    const tag = r.status === 'caught' ? '  caught' : r.status === 'MISSED' ? '  MISSED' : '  STALE ';
+    if (r.status === 'caught') caught++; else if (r.status === 'MISSED') missed++; else if (r.status === 'error') errors++; else stale++;
+    const tag = r.status === 'caught' ? '  caught' : r.status === 'MISSED' ? '  MISSED' : r.status === 'error' ? '  ERROR ' : '  STALE ';
     console.log(`${tag}  [${r.m.group}] ${(r.m.covers || []).join(',')}  ${r.m.name}${r.why ? '  (' + r.why + ')' : ''}`);
   }
-  console.log(`\nCAUGHT ${caught}  MISSED ${missed}  stale ${stale}  (${MUTATIONS.length} mutations)`);
-  process.exit(missed || stale ? 1 : 0);
+  console.log(`\nCAUGHT ${caught}  MISSED ${missed}  stale ${stale}  errors ${errors}  (${MUTATIONS.length} mutations)`);
+  process.exit(missed || stale || errors ? 1 : 0);
 })();

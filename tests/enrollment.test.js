@@ -1238,6 +1238,13 @@ test(['EN-4'], 'the membership line on Schedule says expired past the last day a
   assert.deepEqual(notes, ['Your membership starts on Nov 2, 2026. Sessions can be added from that day. You can still ask; your parent will see this too.']);
   assert.ok(words(tab.main()).includes('Membership starts Nov 2, 2026'));
   assert.ok(!/renew/i.test(words(tab.main())), 'nothing asks to renew a membership that has not started');
+  // Weeks before the start are not started (D-32); a paused week from the start on names the start date too.
+  for (let i = 0; i < 3; i++) {
+    byTag(tab.main(), 'button').find(b => b.getAttribute('aria-label') === 'Next week').click();
+    await tab.settle();
+  }
+  const nov4 = tab.main().findAll(n => n.tag === 'li').map(words).filter(w => /Nov 4/.test(w));
+  assert.deepEqual(nov4, ['Wed Nov 4 Afternoon Study 1pm–4pm · Membership starts Nov 2, 2026 Paused']);
   const parent = shellTab(t);
   await parent.open(early.parent, '#/schedule');
   assert.ok(words(parent.main()).includes("Paused sessions don't hold a seat. " + early.student.name.split(' ')[0] + "'s membership starts on Nov 2, 2026."));
@@ -1264,4 +1271,118 @@ test(['EN-3'], 'a request closed because its slot is gone shows as Closed with t
   const row = card.findAll(n => n.tag === 'li')[0];
   assert.match(words(row), /^Afternoon Study Fridays · 1pm–4pm Afternoon Study no longer meets on Fridays\. Closed$/);
   assert.ok(!/Declined/.test(words(card)));
+});
+
+// ---------------------------------------------------------------- D-28, D-34, D-32 on the Schedule
+
+// D-28: one visit through back-to-back sessions counts for every enrolled slot it overlaps at that
+// location, on the Schedule and the Home "This week" card, the rule attendance uses.
+test(['EN-7'], 'one visit through back-to-back sessions marks every enrolled slot it overlaps attended, never absent', async () => {
+  const { t, loc } = await world();
+  const f = t.fx.family(loc);
+  const early = t.fx.session(loc, { name: 'Early', weekdays: '3,5', start: '13:00', end: '16:00' });
+  const late = t.fx.session(loc, { name: 'Late', weekdays: '3,5', start: '16:00', end: '19:00' });
+  const arcadia = t.fx.location({ name: 'Arcadia' });
+  const away = t.fx.session(arcadia, { name: 'Arcadia Study', weekdays: '3', start: '16:00', end: '19:00' });
+  t.clock.set(at(LA, '2026-09-01', '09:00'));
+  t.fx.enroll(f.student, early, 3);
+  t.fx.enroll(f.student, early, 5);
+  t.fx.enroll(f.student, late, 3);
+  t.clock.set(at(LA, '2026-10-10', '09:00'));
+  t.fx.enroll(f.student, late, 5); // Late on Fridays only from Sat Oct 10
+  const stay = (d, wd, from, to, session = early, place = loc) => t.fx.visit(f.student, place, { session, weekday: wd, local_date: d,
+    check_in_at: at(LA, d, from), check_out_at: at(LA, d, to), checkout_method: 'scan' });
+  stay('2026-09-30', 3, '12:55', '16:00'); // out when Early ended: Late is not covered
+  stay('2026-09-30', 3, '16:30', '18:00', away, arcadia); // another location's visit never counts here
+  stay('2026-10-09', 5, '12:55', '18:55'); // through Late's hours, but before Late on Fridays was theirs
+  stay('2026-10-14', 3, '12:55', '18:55'); // one visit, Early then Late
+  t.clock.set(at(LA, '2026-10-14', '19:30'));
+  const s = await t.as(f.parent).get(`/api/enrollment/students/${f.student.id}/schedule?from=2026-09-28&to=2026-10-18`);
+  assert.equal(s.status, 200);
+  assert.deepEqual(s.body.occurrences.map(o => `${o.date} ${o.name} ${o.status}`), [
+    '2026-09-30 Early attended', '2026-09-30 Late absent',
+    '2026-10-02 Early absent',
+    '2026-10-07 Early absent', '2026-10-07 Late absent',
+    '2026-10-09 Early attended',
+    '2026-10-14 Early attended', '2026-10-14 Late attended',
+    '2026-10-16 Early upcoming', '2026-10-16 Late upcoming',
+  ]);
+  const both = s.body.occurrences.filter(o => o.date === '2026-10-14').map(o => [o.check_in_at, o.check_out_at]);
+  const stayed = [at(LA, '2026-10-14', '12:55'), at(LA, '2026-10-14', '18:55')];
+  assert.deepEqual(both, [stayed, stayed]);
+  // Home "This week" shows both as attended too.
+  const tab = shellTab(t);
+  await tab.open(f.parent, '#/home');
+  const card = tab.main().find(n => n.getAttribute('data-card') === 'enrollment-week');
+  assert.deepEqual(card.findAll(n => n.tag === 'li').map(words), [
+    'Today 1pm–4pm Early Attended', 'Today 4pm–7pm Late Attended', 'Fri 1pm–4pm Early Upcoming', 'Fri 4pm–7pm Late Upcoming',
+  ]);
+});
+
+// D-34: a session's time edit applies from the edit date on. Past weeks keep the hours they had, so
+// their status and times on the Schedule do not change.
+test(['EN-7'], "editing a session's times leaves past weeks on the Schedule with the hours they had and the same status", async () => {
+  const { t, loc, sess } = await world(); // Mon/Wed/Fri 13:00-16:00
+  const f = t.fx.family(loc);
+  t.clock.set(at(LA, '2026-09-01', '09:00'));
+  t.fx.enroll(f.student, sess, 3); // Wednesdays since September
+  t.clock.set(at(LA, '2026-10-05', '14:00')); // Mondays from partway through Oct 5, so Oct 5 was never theirs
+  t.fx.enroll(f.student, sess, 1);
+  // A staff check-in with no session on Wed Oct 7, 13:05-14:50; a linked visit on Mon Oct 12.
+  t.fx.visit(f.student, loc, { local_date: '2026-10-07', check_in_at: at(LA, '2026-10-07', '13:05'), check_out_at: at(LA, '2026-10-07', '14:50'),
+    checkin_method: 'staff', checkout_method: 'staff' });
+  t.fx.visit(f.student, loc, { session: sess, weekday: 1, local_date: '2026-10-12', check_in_at: at(LA, '2026-10-12', '13:00'),
+    check_out_at: at(LA, '2026-10-12', '16:00'), checkout_method: 'scan' });
+  t.clock.set(at(LA, '2026-10-13', '10:00'));
+  const weeks = async () => (await t.as(f.parent).get(`/api/enrollment/students/${f.student.id}/schedule?from=2026-09-28&to=2026-10-19`))
+    .body.occurrences.map(o => `${o.date} ${o.start_time}-${o.end_time} ${o.status}`);
+  assert.deepEqual(await weeks(), [
+    '2026-09-30 13:00-16:00 absent', '2026-10-07 13:00-16:00 attended', '2026-10-12 13:00-16:00 attended',
+    '2026-10-14 13:00-16:00 upcoming', '2026-10-19 13:00-16:00 upcoming',
+  ]);
+  // Tue Oct 13: the director moves it to 15:00-18:00; the sessions module keeps the old times through Oct 12 (R8).
+  t.db.prepare("UPDATE sessions SET start_time = '15:00', end_time = '18:00' WHERE id = ?").run(sess.id);
+  t.db.prepare("INSERT INTO session_times (session_id, until_date, start_time, end_time, changed_at) VALUES (?, '2026-10-12', '13:00', '16:00', ?)")
+    .run(sess.id, t.clock.now());
+  assert.deepEqual(await weeks(), [
+    '2026-09-30 13:00-16:00 absent', '2026-10-07 13:00-16:00 attended', '2026-10-12 13:00-16:00 attended',
+    '2026-10-14 15:00-18:00 upcoming', '2026-10-19 15:00-18:00 upcoming',
+  ]);
+  const s = await t.as(f.parent).get(`/api/enrollment/students/${f.student.id}/schedule?from=2026-09-30&to=2026-09-30`);
+  assert.deepEqual([s.body.occurrences[0].start_at, s.body.occurrences[0].end_at], [at(LA, '2026-09-30', '13:00'), at(LA, '2026-09-30', '16:00')]);
+});
+
+// D-32: before the membership's start date nothing is absent. The start date is the one in force
+// that week, so moving it forward leaves the weeks before the change as they were.
+test(['EN-7'], 'weeks before the membership starts show as not started, never absent, on the Schedule and Home', async () => {
+  const { t, loc, sess } = await world();
+  const f = t.fx.family(loc); // membership from Aug 1
+  t.clock.set(at(LA, '2026-09-01', '09:00'));
+  t.fx.enroll(f.student, sess, 1); // Mondays
+  const m = t.db.prepare('SELECT * FROM memberships WHERE student_id = ?').get(f.student.id);
+  // Wed Oct 14: staff move the start to Mon Nov 2, written to the audit log as D-26 says.
+  t.clock.set(at(LA, '2026-10-14', '10:00'));
+  const pick = r => ({ status: r.status, weekly_cap: r.weekly_cap, start_date: r.start_date, expires_on: r.expires_on });
+  t.db.prepare("UPDATE memberships SET start_date = '2026-11-02' WHERE id = ?").run(m.id);
+  t.db.prepare("INSERT INTO audit_log (action, target_type, target_id, location_id, detail, at) VALUES ('membership.update', 'membership', ?, ?, ?, ?)")
+    .run(m.id, loc.id, JSON.stringify({ student_id: f.student.id, before: pick(m), after: Object.assign(pick(m), { start_date: '2026-11-02' }) }), t.clock.now());
+  // A staff check-in with no session on Mon Oct 19: they came, so it is attended.
+  t.fx.visit(f.student, loc, { local_date: '2026-10-19', check_in_at: at(LA, '2026-10-19', '13:10'), check_out_at: at(LA, '2026-10-19', '15:00'),
+    checkin_method: 'staff', checkout_method: 'staff' });
+  t.clock.set(at(LA, '2026-11-04', '10:00'));
+  const s = await t.as(f.parent).get(`/api/enrollment/students/${f.student.id}/schedule?from=2026-10-05&to=2026-11-09`);
+  assert.deepEqual(s.body.occurrences.map(o => `${o.date} ${o.status} ${o.membership_starts}`), [
+    '2026-10-05 absent null', '2026-10-12 absent null', // missed under the membership in force then
+    '2026-10-19 attended null', '2026-10-26 not_started 2026-11-02',
+    '2026-11-02 absent null', '2026-11-09 upcoming null',
+  ]);
+  // Late October the family sees the week before the start as not started, never absent.
+  t.clock.set(at(LA, '2026-10-28', '10:00'));
+  const tab = shellTab(t);
+  await tab.open(f.parent, '#/home');
+  const card = tab.main().find(n => n.getAttribute('data-card') === 'enrollment-week');
+  assert.deepEqual(card.findAll(n => n.tag === 'li').map(words), ['Mon 1pm–4pm Afternoon Study Not started']);
+  await tab.go('#/schedule');
+  const rows = tab.main().findAll(n => n.tag === 'li').map(words).filter(w => /Oct 26/.test(w));
+  assert.deepEqual(rows, ['Mon Oct 26 Afternoon Study 1pm–4pm · Membership starts Nov 2, 2026 Not started']);
 });

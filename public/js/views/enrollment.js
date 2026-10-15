@@ -29,6 +29,7 @@
   const STATUS = {
     upcoming: ['badge-accent', 'Upcoming'], attended: ['badge-ok', 'Attended'], absent: ['', 'Absent'],
     closed: ['badge-warn', 'Center closed'], paused: ['badge-warn', 'Paused'],
+    not_started: ['', 'Not started'], // D-32: before the membership's start date, never absent
   };
   const badge = (cls, text) => h('span', { class: 'badge ' + cls }, text);
 
@@ -89,6 +90,7 @@
     for (const o of sched.occurrences) {
       const [cls, text] = STATUS[o.status] || ['', o.status];
       const detail = o.status === 'closed' && o.closure_reason ? 'Closed: ' + o.closure_reason
+        : o.status === 'not_started' ? 'Membership starts ' + longDay(o.membership_starts)
         : o.status === 'attended' && o.check_in_at ? 'Checked in ' + App.fmtTime(o.check_in_at, tz) + (o.check_out_at ? ', out ' + App.fmtTime(o.check_out_at, tz) : '')
         : o.status === 'paused' ? (o.end_at <= App.now() ? 'Membership was paused'
           : m && notStarted(m) ? 'Membership starts ' + longDay(m.start_date) : 'Paused until the membership is renewed') : null;

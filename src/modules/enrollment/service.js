@@ -12,6 +12,7 @@ const { tx } = require('../../db');
 const time = require('../../time');
 const auth = require('../../auth');
 const notify = require('../../notify');
+const sessionTimes = require('../sessions/times');
 const { bad, forbidden, notFound, conflict } = require('../../errors');
 
 const DAYS = ['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -508,11 +509,24 @@ function statusAt(e, changes, t) {
   return s;
 }
 
+// D-32: the membership record in force at instant t, rebuilt from its audit rows
+// (D-26) the way attendance rebuilds validity: before a change, the record it
+// replaced. null before the record existed, or with none on file.
+function membershipAt(ctx, studentId) {
+  const m = ctx.db.prepare('SELECT id, status, start_date, expires_on FROM memberships WHERE student_id = ?').get(studentId);
+  if (!m) return () => null;
+  const changes = ctx.db.prepare("SELECT at, detail FROM audit_log WHERE target_type = 'membership' AND target_id = ? ORDER BY at, id")
+    .all(m.id).map(r => Object.assign({ at: r.at }, JSON.parse(r.detail || '{}'))).filter(c => 'before' in c);
+  return t => { for (const c of changes) if (t < c.at) return c.before; return m; };
+}
+
 // EN-7: every weekly occurrence in [from, to] with its status. Absent is
 // computed here (D-15), never stored, and carries no penalty. Each week is
 // judged by the enrollment's status when it started: paused then is paused
 // (even if the membership has since been renewed), active then and missed is
-// absent (even if the spot is paused now).
+// absent (even if the spot is paused now). Each date uses the session times it
+// had that day (D-34), and a week before the membership's start date is
+// not_started, never absent (D-32).
 function schedule(ctx, student, q) {
   const loc = getLocation(ctx, student.location_id);
   const from = q.from || time.weekStart(today(ctx, loc));
@@ -532,6 +546,8 @@ function schedule(ctx, student, q) {
   const changes = new Map(enrollments.map(e => [e.id, []]));
   for (const c of ctx.db.prepare(`SELECT l.enrollment_id, l.from_status, l.to_status, l.at FROM enrollment_status_log l
     JOIN enrollments e ON e.id = l.enrollment_id WHERE e.student_id = ? ORDER BY l.at, l.id`).all(student.id)) changes.get(c.enrollment_id).push(c);
+  const hist = sessionTimes.history(ctx);
+  const membership = membershipAt(ctx, student.id);
   const out = [], seen = new Set();
   for (const e of enrollments) {
     const lo = from > e.term_start ? from : e.term_start;
@@ -539,23 +555,31 @@ function schedule(ctx, student, q) {
     if (lo > hi) continue;
     for (const d of time.datesBetween(lo, hi)) {
       if (time.weekdayOfDate(d) !== e.weekday) continue;
-      const start = time.toMs(loc, d, e.start_time), end = time.toMs(loc, d, e.end_time);
-      const v = visits.find(x => x.local_date === d && (x.session_id === e.session_id
-        || (x.session_id == null && x.check_in_at < end && (x.check_out_at == null || x.check_out_at > start))));
+      const hours = sessionTimes.timesOn(hist, e.session_id, d, e);
+      const start = time.toMs(loc, d, hours.start_time), end = time.toMs(loc, d, hours.end_time);
+      const during = x => x.check_in_at < end && (x.check_out_at == null || x.check_out_at > start);
+      const own = visits.find(x => x.local_date === d && (x.session_id === e.session_id
+        || (x.session_id == null && during(x))));
       // It counts if they came, or were enrolled from its start to its end.
-      const began = e.created_at <= start || !!v;
-      const lasted = e.ended_at == null || e.ended_at >= end || (!!v && e.ended_at > start);
+      const began = e.created_at <= start || !!own;
+      const lasted = e.ended_at == null || e.ended_at >= end || (!!own && e.ended_at > start);
       if (!began || !lasted) continue;
+      // D-28: one visit through back-to-back sessions counts for every enrolled slot
+      // it overlaps there, as attendance counts it.
+      const v = own || visits.find(x => x.local_date === d && x.session_id != null && x.location_id === e.location_id && during(x));
       // Cancelling a session ends its enrollments then (ended_at), so `lasted` stops
       // the weeks after it and the ones before stand. With no end on record there
       // is nothing to go on, so only weeks they came to are shown.
       if (e.session_status !== 'active' && e.ended_at == null && !v) continue;
       if (seen.has(d + ':' + e.session_id)) continue; // a slot dropped and taken again
       seen.add(d + ':' + e.session_id);
-      const status = v ? 'attended' : closures.has(d) ? 'closed' : statusAt(e, changes.get(e.id), start) === 'paused' ? 'paused' : now < end ? 'upcoming' : 'absent';
+      const m = membership(start);
+      const status = v ? 'attended' : closures.has(d) ? 'closed' : m && d < m.start_date ? 'not_started'
+        : statusAt(e, changes.get(e.id), start) === 'paused' ? 'paused' : now < end ? 'upcoming' : 'absent';
       out.push({
         date: d, weekday: e.weekday, session_id: e.session_id, enrollment_id: e.id, name: e.name,
-        start_time: e.start_time, end_time: e.end_time, start_at: start, end_at: end, status,
+        start_time: hours.start_time, end_time: hours.end_time, start_at: start, end_at: end, status,
+        membership_starts: status === 'not_started' ? m.start_date : null,
         closure_reason: closures.get(d) || null,
         check_in_at: v ? v.check_in_at : null, check_out_at: v ? v.check_out_at : null,
       });

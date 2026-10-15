@@ -12,3 +12,13 @@ CREATE TABLE IF NOT EXISTS membership_notices (
   sent_at     INTEGER NOT NULL,
   UNIQUE (student_id, expires_on, kind)
 );
+
+-- D-32: a membership saved with a start date still ahead. Its sessions stay
+-- paused until that date; the daily job then brings them back (D-16a) and
+-- removes the row, so it runs once. Any later save that makes the membership
+-- valid or ends it removes the row too.
+CREATE TABLE IF NOT EXISTS membership_starts (
+  student_id  INTEGER PRIMARY KEY REFERENCES users(id),
+  start_date  TEXT NOT NULL,
+  set_at      INTEGER NOT NULL
+);

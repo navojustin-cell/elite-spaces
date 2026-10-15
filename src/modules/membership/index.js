@@ -10,6 +10,7 @@
 //                      Audited with before/after (NF-2). Unknown fields, such as payment details,
 //                      are refused and never stored (D-22). Pauses or restores enrollments (MB-5).
 // Job: expiry - reminders 14 and 3 days ahead, and pausing once the last day has passed.
+// Job: starts - on a membership's start date, sessions paused until then come back (D-32).
 
 const express = require('express');
 const { DateTime } = require('luxon');
@@ -142,15 +143,18 @@ module.exports = {
           });
         }
         // MB-5 / D-16: no longer valid -> pause; valid again -> restore or front of the waitlist,
-        // up to the weekly cap (D-3); slots over the cap stay paused.
+        // up to the weekly cap (D-3); slots over the cap stay paused. D-32: before its start
+        // date it isn't valid yet, so slots stay paused (or are paused) until that day.
         let paused = 0, restored = { back: [], waitlisted: [], kept: [] };
         if (svc.isValid(after, today)) {
           restored = svc.restore(ctx, after, today, req.user.id);
           svc.notifyRestored(ctx, student, after, restored);
         } else {
           paused = svc.pause(ctx, student.id, today);
-          if (paused) svc.notifyPaused(ctx, student, after, paused);
+          if (paused) svc.notifyPaused(ctx, student, after, paused, today);
         }
+        // D-32: not started yet -> the daily job brings the sessions back on the start date.
+        svc.markStart(ctx, after, today);
         return { changed, paused, restored: restored.back.length, waitlisted: restored.waitlisted.length, kept_paused: restored.kept.length };
       });
       res.json(Object.assign(summary(ctx, student), result));
@@ -158,5 +162,5 @@ module.exports = {
 
     return r;
   },
-  jobs: [{ name: 'expiry', run: ctx => svc.runExpiry(ctx) }],
+  jobs: [{ name: 'expiry', run: ctx => svc.runExpiry(ctx) }, { name: 'starts', run: ctx => svc.runStarts(ctx) }],
 };

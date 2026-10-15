@@ -872,6 +872,112 @@ test(['MB-1', 'MB-3'], 'before its start date a membership reads as not started 
   assert.equal((await t.as(staff).get(url(c.student))).body.membership.state, 'inactive');
 });
 
+// D-32: sessions never come back before the membership starts; the daily job brings them back on that day.
+test(['MB-5', 'MB-1'], 'renewing with a start date still ahead keeps paused sessions paused until that day; the daily job brings them back then, under the weekly limit and seat rules, and tells the family then', async () => {
+  const t = await makeApp({ now: at(LA, '2026-10-05', '12:00') });
+  const loc = t.fx.location();
+  const staff = t.fx.staff(loc);
+  const { parent, student } = fam(t, loc, { membership: { cap: 3, start: '2026-08-01', expires: '2026-10-05' } });
+  const quiet = t.fx.session(loc, { name: 'Quiet Room', weekdays: '2', start: '16:30', end: '18:30', capacity: 1 });
+  const pm = t.fx.session(loc, { name: 'Afternoon Study', weekdays: '1,4', start: '13:00' });
+  const eTue = t.fx.enroll(student, quiet, 2), eMon = t.fx.enroll(student, pm, 1), eThu = t.fx.enroll(student, pm, 4);
+  const statuses = () => [eTue, eMon, eThu].map(e => enr(t, e).status);
+  const restoredNotes = u => kinds(t, u, 'membership_restored');
+
+  // The membership ended Mon Oct 5; that night the job paused all three slots, and Tuesday filled up since.
+  t.clock.set(at(LA, '2026-10-06', '00:05'));
+  t.jobs();
+  assert.deepEqual(statuses(), ['paused', 'paused', 'paused']);
+  t.fx.enroll(fam(t, loc, { name: 'Ana Ruiz' }).student, quiet, 2);
+
+  // Wed Oct 14: staff renew it from Mon Nov 2 with a weekly limit of 1. Nothing comes back yet.
+  t.clock.set(at(LA, '2026-10-14', '10:00'));
+  const r = await t.as(staff).put(url(student), body({ weekly_cap: 1, start_date: '2026-11-02', expires_on: '2027-06-30' }));
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.body.restored, r.body.waitlisted, r.body.kept_paused, r.body.paused], [0, 0, 0, 0]);
+  assert.deepEqual([r.body.membership.state, r.body.active_slots, r.body.paused_slots], ['upcoming', 0, 3]);
+  assert.deepEqual(statuses(), ['paused', 'paused', 'paused']);
+  assert.deepEqual(line(t, quiet, 2).map(w => w.student_id), []);
+  for (const u of [parent, student]) assert.equal(restoredNotes(u).length, 0);
+
+  // Daily runs before the start date change nothing, by Los Angeles' date (UTC is already Nov 2 that evening).
+  t.jobs();
+  t.clock.set(at(LA, '2026-11-01', '20:00'));
+  t.jobs();
+  assert.deepEqual(statuses(), ['paused', 'paused', 'paused']);
+  for (const u of [parent, student]) assert.equal(restoredNotes(u).length, 0);
+
+  // Mon Nov 2: the job brings Monday back (the limit is 1), puts Leo first in line for the full Tuesday,
+  // keeps Thursday paused and saved, and tells the family once.
+  t.clock.set(at(LA, '2026-11-02', '00:05'));
+  t.jobs(); t.jobs();
+  assert.deepEqual(statuses(), ['dropped', 'active', 'paused']);
+  assert.equal(enr(t, eTue).ended_at, t.clock.now());
+  assert.deepEqual(line(t, quiet, 2).map(w => [w.student_id, w.priority]), [[student.id, 1]]);
+  for (const u of [parent, student]) {
+    const n = restoredNotes(u);
+    assert.equal(n.length, 1);
+    assert.equal(n[0].title, "Leo's membership is active again");
+    assert.equal(n[0].body, 'Back on the schedule: Afternoon Study (Mon 1:00 PM). Full right now, so Leo is first on the waitlist for: Quiet Room (Tue 4:30 PM). ' +
+      "Still paused, because Leo's membership allows 1 weekly session: Afternoon Study (Thu 1:00 PM). It stays saved, and the front desk can bring it back if the weekly limit goes up.");
+  }
+
+  // It runs once: when Monday is dropped later, Thursday stays paused until staff raise the limit (D-16a).
+  t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(t.clock.now(), eMon.id);
+  t.clock.set(at(LA, '2026-11-03', '00:05'));
+  t.jobs();
+  assert.equal(enr(t, eThu).status, 'paused');
+  assert.equal(restoredNotes(parent).length, 1);
+});
+
+test(['MB-5', 'MB-2'], 'moving the start date ahead pauses the sessions a student holds until that day and says when they come back; a later save that starts it today brings them back at once, and the job adds nothing', async () => {
+  const t = await makeApp(); // Wed 2026-10-14 in Los Angeles
+  const loc = t.fx.location();
+  const staff = t.fx.staff(loc);
+  const sess = t.fx.session(loc, { weekdays: '1,3' });
+  const { parent, student } = fam(t, loc, { membership: { cap: 3, start: '2026-08-01' } });
+  const e1 = t.fx.enroll(student, sess, 1), e3 = t.fx.enroll(student, sess, 3);
+  const b = fam(t, loc, { name: 'Ana Ruiz', membership: { cap: 1, start: '2026-08-01' } });
+  const b1 = t.fx.enroll(b.student, sess, 1), b3 = t.fx.enroll(b.student, sess, 3); // two slots, held before the limit rule
+
+  const r = await t.as(staff).put(url(student), body({ start_date: '2026-10-26' }));
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.body.paused, r.body.restored, r.body.membership.state, r.body.active_slots, r.body.paused_slots], [2, 0, 'upcoming', 0, 2]);
+  assert.deepEqual([enr(t, e1).status, enr(t, e3).status], ['paused', 'paused']);
+  for (const u of [parent, student]) {
+    const n = kinds(t, u, 'membership_paused');
+    assert.equal(n.length, 1);
+    assert.equal(n[0].title, "Leo's weekly sessions are paused");
+    assert.equal(n[0].body, "Leo's membership starts Mon, Oct 26, 2026, so 2 weekly sessions are on hold until then. " +
+      "They are saved, and you'll get a notification on that day when they come back.");
+    assert.equal(kinds(t, u, 'membership_restored').length, 0);
+  }
+
+  // Ana's start moves ahead, then back to today: her sessions come back at once, up to her limit of 1.
+  assert.equal((await t.as(staff).put(url(b.student), body({ weekly_cap: 1, start_date: '2026-10-26' }))).body.paused, 2);
+  const now = await t.as(staff).put(url(b.student), body({ weekly_cap: 1, start_date: '2026-10-14' }));
+  assert.deepEqual([now.body.restored, now.body.kept_paused, now.body.membership.state], [1, 1, 'active']);
+  assert.deepEqual([enr(t, b1).status, enr(t, b3).status], ['active', 'paused']);
+  t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(t.clock.now(), b1.id); // a parent drops Monday
+
+  // The evening before (UTC is already Oct 26), nothing yet; on Mon Oct 26 Leo's sessions come back and the family is told.
+  t.clock.set(at(LA, '2026-10-25', '22:00'));
+  t.jobs();
+  assert.deepEqual([enr(t, e1).status, enr(t, e3).status], ['paused', 'paused']);
+  t.clock.set(at(LA, '2026-10-26', '06:00'));
+  t.jobs();
+  assert.deepEqual([enr(t, e1).status, enr(t, e3).status], ['active', 'active']);
+  for (const u of [parent, student]) {
+    const n = kinds(t, u, 'membership_restored');
+    assert.equal(n.length, 1);
+    assert.equal(n[0].title, "Leo's sessions are back on");
+    assert.equal(n[0].body, 'Back on the schedule: Afternoon Study (Mon 1:00 PM), Afternoon Study (Wed 1:00 PM).');
+  }
+  // Ana's membership started on the save, so the job leaves her kept slot alone (D-16a).
+  assert.equal(enr(t, b3).status, 'paused');
+  assert.equal(kinds(t, b.parent, 'membership_restored').length, 1);
+});
+
 // ---------------- the Members screen and the Home card in a browser tab ----------------
 
 // Just enough DOM for public/js/app.js and this module's view, as in core.test.js:
@@ -1025,4 +1131,42 @@ test(['MB-1', 'MB-3'], 'a membership that has not started shows "Starts <date>" 
   const card = async u => words((await openTab(t, u, '#/home')).getElementById('main').find(n => n.getAttribute('data-card') === 'membership'));
   assert.match(await card(parent), /Ben Okafor Starts Mon, Nov 2, 2026 Up to 2 sessions a week Valid through Wed, Jun 30, 2027 Ben's membership starts Mon, Nov 2, 2026\. Ben can enroll in sessions and check in from that day\.$/);
   assert.match(await card(student), /Your membership starts Mon, Nov 2, 2026\. You can enroll in sessions and check in from that day\.$/);
+});
+
+test(['MB-1', 'MB-5'], 'the edit screen says sessions come back on the start date, not on save: a start date ahead pauses held sessions until then, and paused ones stay paused until that day', async () => {
+  const t = await makeApp(); // Wed 2026-10-14
+  const loc = t.fx.location({ name: 'Irvine' });
+  const staff = t.fx.staff(loc);
+  const sess = t.fx.session(loc, { weekdays: '1,3' });
+  const held = fam(t, loc, { membership: { cap: 3, start: '2026-08-01' } });
+  [1, 3].forEach(d => t.fx.enroll(held.student, sess, d));
+  const lapsed = fam(t, loc, { name: 'Ana Ruiz', membership: { cap: 3, start: '2026-08-01', expires: '2026-10-05' } });
+  [1, 3].forEach(d => t.fx.enroll(lapsed.student, sess, d, { status: 'paused' }));
+  const open = async s => {
+    const main = (await openTab(t, staff, '#/members/' + s.id)).getElementById('main');
+    const start = main.find(n => n.id === 'mb-start'), end = main.find(n => n.id === 'mb-end');
+    const effect = () => words(main.find(n => n.getAttribute('aria-live') === 'polite'));
+    const save = () => words(main.find(n => n.tag === 'button' && n.getAttribute('type') === 'submit'));
+    return { main, start, end, effect, save };
+  };
+
+  const a = await open(held.student);
+  a.start.value = '2026-11-02';
+  a.start.dispatch('input');
+  assert.equal(a.effect(), "Saving pauses Leo's 2 weekly sessions. They're kept and come back on Mon, Nov 2, 2026, when the membership starts. The family gets a notification.");
+  assert.equal(a.save(), 'Save and pause 2 sessions');
+
+  const b = await open(lapsed.student);
+  b.end.value = '2027-06-30';
+  b.end.dispatch('input');
+  assert.match(b.effect(), /^Saving brings back Ana's 2 paused sessions\./);
+  b.start.value = '2026-11-02';
+  b.start.dispatch('input');
+  assert.equal(b.effect(), "Ana's 2 paused sessions stay paused until the membership starts on Mon, Nov 2, 2026. They come back that day, up to the weekly limit, and the family gets a notification then.");
+  assert.equal(b.save(), 'Save membership');
+
+  // Saved that way, Right now says why they are paused.
+  assert.equal((await t.as(staff).put(url(lapsed.student), body({ start_date: '2026-11-02', expires_on: '2027-06-30' }))).status, 200);
+  const now = (await open(lapsed.student)).main.find(n => n.cls.includes('card'));
+  assert.match(words(now), /No weekly sessions right now\. 2 sessions are paused until the membership starts\.$/);
 });

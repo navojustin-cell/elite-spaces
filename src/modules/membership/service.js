@@ -2,7 +2,8 @@
 // Membership rules shared by the routes and the daily job (MB-1, MB-4, MB-5, D-16).
 //
 // A membership is "valid" while its status is active and the location-local
-// date has not passed expires_on (the last valid day, inclusive). When it stops
+// date is from start_date through expires_on (the last valid day, inclusive;
+// D-32: before its start date it is not active yet). When it stops
 // being valid the student's active enrollments are paused, never deleted. When
 // it becomes valid again each paused enrollment comes back if its slot still
 // has a free seat; otherwise it is marked dropped and the student goes to the
@@ -44,7 +45,9 @@ function describe(m, today) {
   };
 }
 
-const isValid = (m, today) => !!m && m.status === 'active' && today <= m.expires_on;
+const isValid = (m, today) => !!m && m.status === 'active' && m.start_date <= today && today <= m.expires_on;
+// D-32: active and saved, but its start date is still ahead.
+const notStarted = (m, today) => !!m && m.status === 'active' && today < m.start_date;
 
 // Weekly slots held and paused in current and upcoming terms (`today` is location-local).
 function slotCounts(ctx, studentId, today) {
@@ -110,13 +113,18 @@ function restore(ctx, m, today, actorId) {
 // Parents and the student themselves.
 const familyOf = (ctx, studentId) => [...notify.parentsOf(ctx, studentId), studentId];
 
-function notifyPaused(ctx, student, m, count) {
+function notifyPaused(ctx, student, m, count, today) {
   const first = firstName(student.name);
+  const held = plural(count, 'weekly session is', 'weekly sessions are');
   notify.send(ctx, familyOf(ctx, student.id), {
     kind: 'membership_paused', refType: 'membership', refId: m.id,
     title: `${first}'s weekly sessions are paused`,
-    body: `${first}'s membership isn't active right now, so ${plural(count, 'weekly session is', 'weekly sessions are')} on hold. ` +
-      'They are saved and come back when the membership is renewed with the front desk.',
+    // D-32: a membership that starts later holds its sessions until that day, and the family hears again when they come back.
+    body: notStarted(m, today)
+      ? `${first}'s membership starts ${fmtDate(m.start_date)}, so ${held} on hold until then. ` +
+        "They are saved, and you'll get a notification on that day when they come back."
+      : `${first}'s membership isn't active right now, so ${held} on hold. ` +
+        'They are saved and come back when the membership is renewed with the front desk.',
   });
 }
 
@@ -178,7 +186,36 @@ function runExpiry(ctx) {
   }
 }
 
+// D-32: a save that leaves the membership not started yet marks its start date
+// for the daily job; any other save clears it, having paused or restored already.
+function markStart(ctx, m, today) {
+  if (notStarted(m, today)) {
+    ctx.db.prepare(`INSERT INTO membership_starts (student_id, start_date, set_at) VALUES (?,?,?)
+      ON CONFLICT(student_id) DO UPDATE SET start_date = excluded.start_date, set_at = excluded.set_at`).run(m.student_id, m.start_date, ctx.clock.now());
+  } else {
+    ctx.db.prepare('DELETE FROM membership_starts WHERE student_id = ?').run(m.student_id);
+  }
+}
+
+// Daily job (D-32, D-16a): on the start date, by the location's date, the
+// sessions paused until then come back up to the weekly cap (a full slot puts
+// the student first on its waitlist), and the family is told then. Once only:
+// the mark is taken in the same transaction.
+function runStarts(ctx) {
+  const rows = ctx.db.prepare(`SELECT m.*, u.name AS student_name, l.timezone
+    FROM membership_starts ms JOIN memberships m ON m.student_id = ms.student_id
+    JOIN users u ON u.id = m.student_id JOIN locations l ON l.id = u.location_id ORDER BY m.id`).all();
+  for (const m of rows) {
+    const today = todayAt(ctx, { timezone: m.timezone });
+    if (!isValid(m, today)) continue;
+    tx(ctx.db, () => {
+      if (!Number(ctx.db.prepare('DELETE FROM membership_starts WHERE student_id = ?').run(m.student_id).changes)) return;
+      notifyRestored(ctx, { id: m.student_id, name: m.student_name }, m, restore(ctx, m, today, null));
+    });
+  }
+}
+
 module.exports = {
   SOON_DAYS, describe, isValid, slotCounts, heldSlots, pause, restore, notifyPaused, notifyRestored, runExpiry,
-  studentLocation, todayAt,
+  markStart, runStarts, studentLocation, todayAt,
 };

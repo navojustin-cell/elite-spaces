@@ -489,6 +489,49 @@ test(['AT-2'], 'a slot with nothing in the status log that came back after a lap
   assert.deepEqual(r.body.absences.map(a => a.date), ['2026-10-05', '2026-10-07', '2026-10-14', '2026-10-16']);
 });
 
+// D-32: a membership is not active before its start date, so nothing before it is missed.
+test(['AT-2'], 'a membership renewed on Oct 14 to start Mon Nov 2: no absences before Nov 2, even for slots left active, and the weeks from Nov 2 count (D-32)', async () => {
+  const w = await world();
+  const { t, kid } = w;
+  const all = Object.values(w.slots);
+  t.fx.membership(kid, { expires: '2026-10-05' }); // the last valid day is Mon Oct 5
+  t.clock.set(at(LA, '2026-10-06', '00:05'));
+  setSlots(t, 'paused', all);
+  // Wed Oct 14 at 10am staff renew it from Mon Nov 2; the slots read active from then on
+  // (as a save before this rule left them), though the membership hasn't started.
+  staffSetsMembership(t, kid, { start_date: '2026-11-02', expires_on: '2027-06-30' }, at(LA, '2026-10-14', '10:00'));
+  setSlots(t, 'active', all);
+  t.clock.set(at(LA, '2026-11-06', '17:00'));
+  const url = `${A}/students/${kid.id}/log?from=2026-09-28&to=2026-11-06`;
+  const r = await t.as(w.parent).get(url);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-09-28', '2026-09-30', '2026-10-02', '2026-10-05', '2026-11-02', '2026-11-04', '2026-11-06']);
+  const rep = await t.as(t.fx.director(w.loc)).get(`${A}/report?from=2026-10-12&to=2026-10-30`);
+  assert.deepEqual(rep.body.absences, []);
+});
+
+test(['AT-2'], 'a membership set up with a start date after the slots were made counts no absences before that day, and counts the start date itself (D-32)', async () => {
+  const w = await world();
+  const { t, kid } = w;
+  t.fx.membership(kid, { start: '2026-10-12', expires: '2027-06-30' }); // no change logged: the record alone says when it starts
+  t.clock.set(at(LA, '2026-10-16', '17:00'));
+  const r = await t.as(w.parent).get(`${A}/students/${kid.id}/log?from=2026-09-28&to=2026-10-16`);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-10-12', '2026-10-14', '2026-10-16']);
+  assert.equal(r.body.totals.absences, 3);
+});
+
+test(['AT-2'], 'a start date moved ahead and then back: only the days it was really not started go uncounted (D-32)', async () => {
+  const w = await world();
+  const { t, kid } = w;
+  // Mon Oct 5 at 8am the start moves to Nov 2; Mon Oct 12 at 9am it moves back to Oct 12.
+  staffSetsMembership(t, kid, { start_date: '2026-11-02' }, at(LA, '2026-10-05', '08:00'));
+  staffSetsMembership(t, kid, { start_date: '2026-10-12' }, at(LA, '2026-10-12', '09:00'));
+  t.clock.set(at(LA, '2026-10-16', '17:00'));
+  const r = await t.as(w.parent).get(`${A}/students/${kid.id}/log?from=2026-09-28&to=2026-10-16`);
+  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-09-28', '2026-09-30', '2026-10-02', '2026-10-12', '2026-10-14', '2026-10-16']);
+});
+
 // D-26: the enrollment schedule judges each week by the slot's state when it began,
 // so a session that was under way when the slot was paused is absent if missed.
 test(['AT-2', 'AT-3', 'AT-4'], 'a membership set inactive at 2pm during a 1-4pm session she missed: that day is absent once the session ends, in history, files and reports (D-15, D-26)', async () => {

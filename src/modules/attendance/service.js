@@ -188,11 +188,12 @@ function visits(ctx, { studentId = null, locationId = null, sessionId = null, fr
 // student's membership wasn't valid, oldest first, rebuilt from the core tables:
 // the current record and, before it, each staff change, which the audit log keeps
 // with the record before and after (MB-2, NF-2). Valid means status active and
-// the date not past expires_on (the last valid day, inclusive), so an expiry
-// starts at midnight after expires_on and needs no log entry. `zone` is the
-// student's home location (D-1). No membership on file: nothing to go on.
+// the date from start_date through expires_on (the last valid day, inclusive),
+// so a start at midnight on start_date (D-32: nothing before it is missed) and an
+// expiry at midnight after expires_on need no log entry. `zone` is the student's
+// home location (D-1). No membership on file: nothing to go on.
 function pausedStretches(ctx, studentId, zone) {
-  const m = ctx.db.prepare('SELECT id, status, expires_on FROM memberships WHERE student_id = ?').get(studentId);
+  const m = ctx.db.prepare('SELECT id, status, start_date, expires_on FROM memberships WHERE student_id = ?').get(studentId);
   if (!m) return [];
   const changes = ctx.db.prepare("SELECT at, detail FROM audit_log WHERE target_type = 'membership' AND target_id = ? ORDER BY at, id")
     .all(m.id).map(r => Object.assign({ at: r.at }, JSON.parse(r.detail || '{}'))).filter(c => 'before' in c);
@@ -202,7 +203,10 @@ function pausedStretches(ctx, studentId, zone) {
   records.push([start, Infinity, m]);
   const out = [];
   for (const [a, b, rec] of records) {
-    const off = rec && rec.status === 'active' ? Math.max(a, time.toMs(zone, time.addDays(rec.expires_on, 1), '00:00')) : a;
+    if (!rec || rec.status !== 'active') { if (a < b) out.push([a, b]); continue; }
+    const on = rec.start_date ? Math.min(b, time.toMs(zone, rec.start_date, '00:00')) : a; // not started yet (D-32)
+    if (a < on) out.push([a, on]);
+    const off = Math.max(a, time.toMs(zone, time.addDays(rec.expires_on, 1), '00:00'));
     if (off < b) out.push([off, b]);
   }
   return out;
