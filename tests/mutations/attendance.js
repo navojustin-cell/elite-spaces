@@ -240,9 +240,9 @@ module.exports = [
     find: 'NO_ABSENCES[rep.timing]', repl: 'NO_ABSENCES.past' },
   // One hours format everywhere: two decimals, as the PDF and CSV print them.
   { name: 'show hours on screen with only the decimals they need, unlike the PDF and CSV', covers: ['AT-2', 'AT-4'], file: VIEW,
-    find: 'const hours = minutes => (minutes / 60).toFixed(2);', repl: 'const hours = minutes => String(Math.round((minutes / 60) * 100) / 100);' },
+    find: 'const hours = n => n.toFixed(2);', repl: 'const hours = n => String(n);' },
   { name: 'show per-student hours on screen in another format', covers: ['AT-4'], file: VIEW,
-    find: 'rep.by_student.map(s => [s.student_name, s.visits, hours(s.minutes), s.absences])',
+    find: 'rep.by_student.map(s => [s.student_name, s.visits, hours(s.hours), s.absences])',
     repl: 'rep.by_student.map(s => [s.student_name, s.visits, String(s.minutes / 60), s.absences])' },
 
   // ---- AT-4: where a report's range stands against today, by each location's date ----

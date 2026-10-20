@@ -1,8 +1,11 @@
 'use strict';
 // accounts: parent sign-up, student and guardian invites, parent approval,
 // staff and director accounts, locations, the staff roster, and scope (NF-1).
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
 const crypto = require('crypto');
-const { test, makeApp, assert, load, DEFAULT_NOW } = require('./lib');
+const { test, makeApp, assert, load, DEFAULT_NOW, ROOT } = require('./lib');
 
 const A = '/api/accounts';
 const DAY = 24 * 3600 * 1000;
@@ -1197,4 +1200,220 @@ test(['AC-5'], 'L44: no two locations share a name, ignoring case and spaces; a 
   assert.equal((await t.as(hq).patch(A + '/locations/' + irvine.id, { name: 'IRVINE', geofence_m: 300 })).status, 200);
   const names = (await t.as(hq).get(A + '/locations')).body.locations.map(l => l.name.toLowerCase());
   assert.deepEqual(names, [...new Set(names)]);
+});
+
+// ---------------------------------------------------------------- the accounts screens in a browser tab
+
+// Just enough DOM for public/js/app.js and the accounts view: one tree under
+// <html>, focus that is lost when its element leaves the page, and simple
+// selectors ('tag', '#id', '.class', '[attr]', '[attr=v]', descendants, commas).
+class El {
+  constructor(doc, tag, data = '') { Object.assign(this, { doc, tag, data, childNodes: [], attrs: new Map(), on: {}, parentNode: null }); }
+  get textContent() { return this.tag ? this.childNodes.map(c => c.textContent).join('') : this.data; }
+  set textContent(s) { this.replaceChildren(String(s)); }
+  setAttribute(k, v) { this.attrs.set(k, String(v)); }
+  getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
+  removeAttribute(k) { this.attrs.delete(k); }
+  get id() { return this.getAttribute('id') || ''; }
+  set id(v) { this.setAttribute('id', v); }
+  get cls() { return (this.getAttribute('class') || '').split(/\s+/).filter(Boolean); }
+  get disabled() { return this.attrs.has('disabled'); }
+  set disabled(v) { if (v) this.attrs.set('disabled', ''); else this.attrs.delete('disabled'); }
+  get value() { return this.typed ?? this.getAttribute('value') ?? ''; }
+  set value(v) { this.typed = String(v); }
+  get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === this.doc.documentElement; }
+  get firstChild() { return this.childNodes[0] || null; }
+  addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
+  dispatch(type, props) {
+    const ev = Object.assign({ type, target: this, stopped: false, preventDefault() {}, stopPropagation() { this.stopped = true; } }, props);
+    for (let n = this; n && !ev.stopped; n = n.parentNode) { ev.currentTarget = n; for (const fn of n.on[type] || []) fn(ev); }
+  }
+  click() { if (!this.disabled) this.dispatch('click'); }
+  focus() { this.doc.focused = this; }
+  adopt(kids) { return kids.map(k => { const n = k instanceof El ? k : new El(this.doc, null, String(k)); n.remove(); n.parentNode = this; return n; }); }
+  append(...kids) { this.childNodes.push(...this.adopt(kids)); }
+  appendChild(k) { this.append(k); return k; }
+  prepend(...kids) { this.childNodes.unshift(...this.adopt(kids)); }
+  after(...kids) { const p = this.parentNode, ns = p.adopt(kids); p.childNodes.splice(p.childNodes.indexOf(this) + 1, 0, ...ns); }
+  replaceChildren(...kids) { this.childNodes.forEach(c => { c.parentNode = null; }); this.childNodes = []; this.append(...kids); }
+  replaceWith(n) { const p = this.parentNode; n.remove(); p.childNodes[p.childNodes.indexOf(this)] = n; n.parentNode = p; this.parentNode = null; }
+  remove() { if (this.parentNode) this.parentNode.childNodes = this.parentNode.childNodes.filter(c => c !== this); this.parentNode = null; }
+  contains(n) { for (; n; n = n.parentNode) if (n === this) return true; return false; }
+  all() { return this.childNodes.flatMap(c => [c, ...c.all()]); }
+  find(pred) { return this.all().find(pred); }
+  findAll(pred) { return this.all().filter(pred); }
+  querySelectorAll(sel) {
+    const one = part => n => !!n.tag && (part.match(/[#.]?[\w-]+|\[[^\]]+\]/g) || []).every(p => {
+      if (p[0] === '#') return n.id === p.slice(1);
+      if (p[0] === '.') return n.cls.includes(p.slice(1));
+      if (p[0] === '[') { const [k, v] = p.slice(1, -1).split('='); return v === undefined ? n.attrs.has(k) : n.getAttribute(k) === v.replace(/^"|"$/g, ''); }
+      return n.tag === p;
+    });
+    const chain = (roots, parts) => (parts.length ? chain(roots.flatMap(r => r.findAll(one(parts[0]))), parts.slice(1)) : roots);
+    const hits = new Set(sel.split(',').flatMap(s => chain([this], s.trim().split(/\s+(?![^[]*\])/))));
+    return this.all().filter(n => hits.has(n));
+  }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+}
+
+// One browser tab running the real shell and accounts view (read from ROOT, so the
+// mutation runner's copy is the one exercised) against the test server.
+function accountsTab(t) {
+  let cookie = '';
+  const pending = new Set();
+  const doc = { title: '', hidden: false, addEventListener() {} };
+  const el = (tag, id) => { const n = new El(doc, tag); if (id) n.setAttribute('id', id); return n; };
+  doc.documentElement = el('html');
+  doc.head = el('head');
+  doc.body = el('body');
+  const main = el('main', 'main');
+  doc.body.append(el('div', 'topbar'), el('div', 'devbar'), el('div', 'toasts'), main, el('nav', 'nav'));
+  doc.documentElement.append(doc.head, doc.body);
+  Object.assign(doc, {
+    createElement: tag => el(tag), createTextNode: s => new El(doc, null, String(s)),
+    getElementById: id => doc.documentElement.find(n => n.id === id) || null,
+    querySelector: sel => doc.documentElement.querySelector(sel),
+  });
+  Object.defineProperty(doc, 'activeElement', { get: () => (doc.focused && doc.focused.isConnected ? doc.focused : doc.body) });
+  const fetchAs = (url, opts = {}) => {
+    const p = fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie }) }))
+      .then(async r => new Response(await r.arrayBuffer(), { status: r.status, headers: r.headers }));
+    pending.add(p);
+    const done = () => pending.delete(p);
+    p.then(done, done);
+    return p;
+  };
+  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, URLSearchParams, console, navigator: {},
+    location: { hash: '', origin: 'http://elite.test' }, history: { replaceState() {} }, addEventListener() {},
+    setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
+  win.window = win;
+  vm.createContext(win);
+  for (const f of ['public/js/app.js', 'public/js/views/accounts.js']) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
+  const App = win.App;
+  const settle = async () => {
+    do {
+      await Promise.allSettled([...pending]);
+      for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+    } while (pending.size);
+  };
+  return {
+    App, doc, main, settle,
+    async signIn(user) {
+      const token = crypto.randomBytes(16).toString('hex');
+      t.ctx.sessions.set(token, user.id);
+      cookie = 'sid=' + token;
+      App.me = await App.api.get('/api/auth/me');
+    },
+    // Opens a route the way the shell does, so App.refresh() redraws the same screen.
+    async open(route) { win.location.hash = '#/' + route; App.refresh(); await settle(); return main; },
+    async card(id) { const box = el('div'); main.replaceChildren(box); await App.cards.find(c => c.id === id).render(box); await settle(); return box; },
+    // Taps `button`, then the confirm box's `confirmLabel`, and waits for the screen to redraw.
+    async confirm(button, confirmLabel) {
+      button.focus();
+      button.click();
+      const box = main.find(n => n.getAttribute('role') === 'alertdialog');
+      assert.ok(box, 'a confirm box opened');
+      const ok = box.find(n => n.tag === 'button' && n.textContent === confirmLabel);
+      assert.ok(ok, `the confirm button says "${confirmLabel}": ` + box.findAll(n => n.tag === 'button').map(b => b.textContent).join(' | '));
+      ok.click();
+      await settle();
+    },
+  };
+}
+const words = n => n.all().filter(c => !c.tag).map(c => c.data).join(' ').replace(/\s+/g, ' ').trim();
+const buttonsIn = root => root.findAll(n => n.tag === 'button').map(b => b.getAttribute('aria-label') || b.textContent);
+const buttonNamed = (root, label) => root.find(n => n.tag === 'button' && n.textContent === label);
+
+test(['AC-3', 'AC-2'], 'Family screen and Home card: Approve, Decline and Cancel buttons name the person, "your invite" only for the sender (L49, L50), and focus lands on the list heading after a Decline or Cancel', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine' });
+  const tara = parentAt(t, loc, { name: 'Tara Okafor' });
+  const g = await inviteGuardian(t, tara, { name: 'Kemi Okafor', email: 'kemi@family.test' });
+  const kemi = (await t.anon.post(A + '/invites/accept', { code: g.code, password: 'kemipass1' })).body.user;
+  const ben = await inviteStudent(t, tara, { name: 'Ben Okafor', email: 'ben@kid.test' });
+  const ada = await inviteStudent(t, kemi, { name: 'Ada Okafor', email: 'ada@kid.test' });
+  for (const inv of [ben, ada]) assert.equal((await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12' })).status, 200);
+  await inviteStudent(t, tara, { name: 'Cal Okafor', phone: '555-0177' });
+  await inviteGuardian(t, tara, { name: 'Gina Park', email: 'gina@family.test' });
+  const tab = accountsTab(t);
+  await tab.signIn(tara);
+
+  // Home: one Approve button per student, each naming that student, and whose invite it was.
+  const card = await tab.card('accounts-family');
+  assert.deepEqual(buttonsIn(card), ['Approve Ada', 'Approve Ben']);
+  assert.deepEqual(card.findAll(n => n.tag === 'li').map(words), [
+    "A Ada Okafor Accepted Kemi's invite · ada@kid.test Approve Ada",
+    'B Ben Okafor Accepted your invite · ben@kid.test Approve Ben',
+  ]);
+
+  // Family: the same wording, and every Decline or Cancel names the person.
+  const page = await tab.open('family');
+  assert.match(words(page), /Ada accepted Kemi's invite\. Approve them so they can sign in\./);
+  assert.match(words(page), /Ben accepted your invite\. Approve them so they can sign in\./);
+  assert.deepEqual(buttonsIn(page).filter(b => /^(Approve|Decline|Cancel|Resend)/.test(b)),
+    ['Approve Ada', 'Decline Ada', 'Approve Ben', 'Decline Ben', 'Resend', "Cancel Cal's invite", 'Resend', 'Cancel invite to Gina']);
+
+  // Decline Ada: the row is gone and focus is on the Students heading, not the top of the page.
+  await tab.confirm(buttonNamed(page, 'Decline Ada'), 'Decline Ada');
+  assert.ok(!buttonNamed(tab.main, 'Approve Ada'), 'Ada is gone');
+  assert.equal(tab.doc.activeElement, tab.doc.getElementById('ac-st'));
+  assert.equal(tab.doc.activeElement.getAttribute('tabindex'), '-1');
+
+  // Cancel Cal's invite: the same.
+  await tab.confirm(buttonNamed(tab.main, "Cancel Cal's invite"), "Cancel Cal's invite");
+  assert.ok(!buttonNamed(tab.main, "Cancel Cal's invite"));
+  assert.equal(tab.doc.activeElement, tab.doc.getElementById('ac-st'));
+
+  // Cancel the guardian invite: focus goes to the Guardians heading.
+  await tab.confirm(buttonNamed(tab.main, 'Cancel invite to Gina'), 'Cancel invite to Gina');
+  assert.ok(!buttonNamed(tab.main, 'Cancel invite to Gina'));
+  assert.equal(tab.doc.activeElement, tab.doc.getElementById('ac-gu'));
+  assert.equal(tab.doc.activeElement.getAttribute('tabindex'), '-1');
+});
+
+test(['AC-3', 'AC-4', 'AC-5'], 'Inbox: family account items open Family, a student\'s "You\'re all set" opens Home, and a new director\'s item opens Location settings', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine' });
+  const tara = parentAt(t, loc, { name: 'Tara Okafor' });
+  const g = await inviteGuardian(t, tara, { name: 'Kemi Okafor', email: 'kemi@family.test' });
+  const kemi = (await t.anon.post(A + '/invites/accept', { code: g.code, password: 'kemipass1' })).body.user;
+  const ben = await approvedStudent(t, tara, 'Ben Okafor', 'ben@kid.test');
+  const hq = t.fx.hq();
+  const amy = t.fx.staff(loc, { name: 'Amy Chen' });
+  assert.equal((await t.as(hq).post(A + '/directors/assign', { user_id: amy.id, location_id: loc.id })).status, 200);
+  const tab = accountsTab(t);
+  const inboxLinks = async who => {
+    await tab.signIn(who);
+    const page = await tab.open('inbox');
+    return page.findAll(n => n.tag === 'a' && n.find(c => c.tag === 'strong')).map(a => [a.find(c => c.tag === 'strong').textContent, a.getAttribute('href')]);
+  };
+  assert.deepEqual(await inboxLinks(tara), [['Ben accepted your invite', '#/family'], ['Kemi Okafor joined your family', '#/family']]);
+  assert.deepEqual(await inboxLinks(kemi), [['Tara approved Ben', '#/family'], ["Ben accepted Tara's invite", '#/family']]);
+  assert.deepEqual(await inboxLinks(ben), [["You're all set", '#/home']]);
+  assert.deepEqual(await inboxLinks(amy), [["You're now the director at Irvine", '#/people/location']]);
+});
+
+test(['AC-4', 'AC-6'], 'People: after a confirmed Deactivate, focus goes to the next person\'s row; the roster never marks a parent "(not approved yet)" (L51)', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine' });
+  const dir = t.fx.director(loc, { name: 'Dana Director' });
+  const [amy] = ['Amy Chen', 'Bob Diaz', 'Cara Eze'].map(name => t.fx.staff(loc, { name }));
+  const kemi = parentAt(t, loc, { name: 'Kemi Okafor' });
+  await inviteStudent(t, kemi, { name: 'Chidi Okafor', phone: '555-0199' });
+  const tab = accountsTab(t);
+  await tab.signIn(dir);
+
+  const page = await tab.open('people/staff');
+  const amyRow = page.find(n => n.tag === 'tr' && n.getAttribute('data-staff') === String(amy.id));
+  await tab.confirm(amyRow.find(n => n.getAttribute('aria-label') === 'Deactivate Amy Chen'), 'Deactivate Amy');
+  assert.equal(t.db.prepare('SELECT active FROM users WHERE id = ?').get(amy.id).active, 0);
+  const focused = tab.doc.activeElement;
+  assert.equal(focused.getAttribute('aria-label'), 'Reset password for Bob Diaz', 'focus is on the next row, not the top of the page');
+  assert.ok(tab.main.contains(focused));
+
+  // Families: the invited student's parent is just listed; the badge says what is pending.
+  const roster = await tab.open('people/families');
+  const row = roster.find(n => n.tag === 'tr' && /Chidi Okafor/.test(n.textContent));
+  assert.match(words(row), /^Chidi Okafor 555-0199 Invited, not set up yet Kemi Okafor/);
+  assert.doesNotMatch(words(row), /not approved/);
 });

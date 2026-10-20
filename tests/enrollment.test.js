@@ -1572,6 +1572,82 @@ test(['EN-3'], 'approving a request over the weekly cap says it could not be enr
   assert.ok(!/\byet\b/.test(words(row)));
 });
 
+// L29: a blocked approval doesn't vanish for the parents. They get an Inbox notice that opens it, and
+// Schedule and Home keep it, saying what is in the way now, until the student holds that slot.
+test(['EN-3', 'EN-4'], 'an approval blocked by the weekly cap stays on the parents\' Schedule, Home and Inbox until the student holds that slot', async () => {
+  const { t, loc, sess } = await world();
+  const f = t.fx.family(loc, { cap: 1 });
+  const leo = rename(t, f.student, 'Leo Garcia');
+  rename(t, f.parent, 'Maria Garcia');
+  const gus = t.fx.user('parent', { location: loc, name: 'Gus Garcia' });
+  t.fx.link(gus, leo);
+  const mon = t.fx.enroll(leo, sess, 1);
+  // An approval that enrolled is not listed with the blocked ones.
+  const small = t.fx.session(loc, { name: 'Quiet Room', weekdays: '2', start: '16:30', end: '18:30', capacity: 5 });
+  const sofia = t.fx.family(loc);
+  const ok = await t.as(sofia.student).post('/api/enrollment/requests', { sessionId: small.id, weekday: 2 });
+  assert.equal((await t.as(sofia.parent).post(`/api/enrollment/requests/${ok.body.request.id}/approve`)).body.outcome, 'enrolled');
+  t.fx.link(f.parent, sofia.student);
+
+  const rq = await t.as(leo).post('/api/enrollment/requests', { sessionId: sess.id, weekday: 3 });
+  assert.equal(rq.status, 201);
+  const id = rq.body.request.id;
+  const tab = shellTab(t);
+  await tab.open(f.parent, '#/schedule');
+  assert.equal(tab.main().find(n => n.id === 'en-blocked-h'), undefined, 'nothing is blocked before the approval');
+  byTag(tab.main(), 'button').find(b => b.getAttribute('aria-label') === "Approve Leo's request for Afternoon Study on Wednesdays").click();
+  await tab.settle();
+  assert.equal(tab.main().find(n => n.id === 'en-req-h'), undefined, 'nothing is left to decide');
+  const blocked = () => {
+    const h2 = tab.main().find(n => n.id === 'en-blocked-h');
+    return h2 ? [words(h2), ...h2.parentNode.findAll(n => n.tag === 'li').map(words)] : null;
+  };
+  const row = why => new RegExp("^Leo asked to join Afternoon Study Wednesdays · 1pm–4pm · approved by Maria .+ Leo wasn't enrolled\\. " +
+    why.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' Approved · not enrolled$');
+  const capWhy = 'Leo already has 1 weekly session, the most the membership allows. Drop one to add another.';
+  let shown = blocked();
+  assert.equal(shown && shown.length, 2, JSON.stringify(shown));
+  assert.equal(shown[0], 'Approved but not enrolled (1)');
+  assert.match(shown[1], row(capWhy));
+  assert.ok(!/\byet\b/.test(shown.join(' ')), shown.join(' '));
+
+  // Both parents get a notice naming who approved and why; the student is told separately in their own words.
+  for (const p of [f.parent, gus]) {
+    const n = t.fx.notifications(p, 'enrollment_request_blocked');
+    assert.deepEqual(n.map(x => [x.title, x.body, x.ref_type, x.ref_id]), [[
+      "Maria approved Leo's request for Afternoon Study, but Leo couldn't be enrolled",
+      'Wednesdays 1pm–4pm. ' + capWhy, 'enrollment_request', id]]);
+  }
+  assert.equal(t.fx.notifications(leo, 'enrollment_request_blocked').length, 0);
+  // The notice opens Schedule on Leo, where the approval is shown.
+  await tab.go('#/inbox');
+  const item = tab.main().findAll(n => n.tag === 'a').find(a => /approved Leo's request/.test(words(a)));
+  assert.equal(item.getAttribute('href'), '#/schedule/request/' + id);
+  await tab.go('#/schedule/request/' + id);
+  assert.match(blocked()[1], row(capWhy));
+  // Home keeps it too.
+  await tab.go('#/home');
+  assert.match(blocked()[1], row(capWhy));
+
+  // Dropping makes room but adds nothing (D-17): the row now says there is room.
+  assert.equal((await drop(t, f.parent, mon.id)).status, 200);
+  assert.equal(active(t, leo).length, 0);
+  await tab.go('#/schedule');
+  assert.match(blocked()[1], row(`There's room now. You can add it under "Add a session".`));
+  // With the slot full, it points at the waitlist instead.
+  t.db.prepare('UPDATE sessions SET capacity = 1 WHERE id = ?').run(sess.id);
+  const [filler] = fill(t, loc, sess, 3, 1);
+  await tab.go('#/home');
+  assert.match(blocked()[1], row('Afternoon Study is full right now. You can add Leo to its waitlist under "Add a session".'));
+  t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE student_id = ?").run(t.clock.now(), filler.student.id);
+  // Adding that slot settles it, and it leaves both screens.
+  assert.equal((await enroll(t, f.parent, leo, sess, 3)).status, 201);
+  await tab.go('#/home');
+  assert.equal(blocked(), null);
+  await tab.go('#/schedule');
+  assert.equal(blocked(), null);
+});
+
 // L35: enrollment and request notices open Schedule on the student they are about.
 test(['EN-2', 'EN-3', 'EN-5'], 'enrollment, waitlist and request notices in the Inbox open Schedule on the student they are about', async () => {
   const { t, loc, sess } = await world();

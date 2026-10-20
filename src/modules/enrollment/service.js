@@ -413,13 +413,25 @@ function decide(ctx, actor, id, approve) {
       kind: 'enrollment_request_approved', title: titles[out.outcome], body: bodies[out.outcome],
       refType: 'enrollment_request', refId: r.id,
     });
+    // The parents keep a record of a blocked approval too (L29): their Inbox, and
+    // Schedule until the student holds that slot. An enrolled one is told by notifyEnrolled.
+    if (out.outcome === 'blocked') {
+      notify.send(ctx, notify.parentsOf(ctx, r.student_id), {
+        kind: 'enrollment_request_blocked',
+        title: `${by} approved ${firstName(student)}'s request for ${session.name}, but ${firstName(student)} couldn't be enrolled`,
+        body: `${when(session, r.weekday)}. ${out.message}`,
+        refType: 'enrollment_request', refId: r.id,
+      });
+    }
     return Object.assign({ request: getRequest(ctx, r.id) }, out);
   });
 }
 
 // Requests a parent (pending for linked students, plus the last 14 days of
 // decisions) or a student (their own) can see. Pending ones carry a pre-check
-// so the parent knows before approving whether it will go through.
+// so the parent knows before approving whether it will go through; an approved
+// one that was blocked carries the same check, so Schedule can say what is in
+// the way now (L29).
 function listRequests(ctx, user) {
   const ids = user.role === 'parent' ? auth.linkedStudentIds(ctx, user.id) : [user.id];
   if (!ids.length) return [];
@@ -433,7 +445,7 @@ function listRequests(ctx, user) {
     ORDER BY r.status = 'pending' DESC, r.created_at DESC, r.id DESC`).all(...ids, since);
   return rows.map(r => {
     const out = Object.assign({}, r, { timezone: getLocation(ctx, r.location_id).timezone });
-    if (r.status === 'pending') out.check = precheck(ctx, getStudent(ctx, r.student_id), r.session_id, r.weekday);
+    if (r.status === 'pending' || r.outcome === 'blocked') out.check =precheck(ctx, getStudent(ctx, r.student_id), r.session_id, r.weekday);
     return out;
   });
 }

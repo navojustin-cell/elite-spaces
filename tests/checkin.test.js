@@ -406,6 +406,9 @@ test(['CI-4'], 'a scan check-out names the session and the total time; a visit w
   assert.equal(leoOut.body.action, 'checkout');
   assert.equal(leoOut.body.session, null);
   assert.equal(leoOut.body.total_minutes, 40);
+  // the parent's check-out notice names the session when there is one, and none when there isn't
+  assert.equal(t.fx.notifications(t.fam.parent, 'checkout')[0].body, 'Afternoon Study. Total time 2h 45m.');
+  assert.equal(t.fx.notifications(leo.parent, 'checkout')[0].body, 'Total time 40m.');
 });
 
 // ---------------------------------------------------------------- CI-5 auto-checkout

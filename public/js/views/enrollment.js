@@ -230,6 +230,28 @@
       h('ul', { class: 'list en-list' }, pending.map(requestRow)));
   }
 
+  // L29: an approval the membership check blocked stays in view for the parents
+  // until the student holds that slot. Nothing retries it (D-17), so it says what
+  // is in the way now, or that there is room to add it by hand.
+  const blockedOf = requests => requests.filter(r => r.status === 'approved' && r.outcome === 'blocked');
+
+  function blockedCard(blocked) {
+    return h('section', { class: 'card', 'aria-labelledby': 'en-blocked-h' },
+      h('h2', { id: 'en-blocked-h' }, 'Approved but not enrolled (' + blocked.length + ')'),
+      h('ul', { class: 'list en-list' }, blocked.map(r => {
+        const name = first(r.student_name), check = r.check || { ok: true };
+        const why = !check.ok ? check.message
+          : check.full ? `${r.session_name} is full right now. You can add ${name} to its waitlist under "Add a session".`
+          : `There's room now. You can add it under "Add a session".`;
+        return h('li', null,
+          h('div', { class: 'grow' },
+            h('div', null, h('strong', null, `${name} asked to join ${r.session_name}`)),
+            h('div', { class: 'muted small' }, slotText(r) + ' · approved by ' + first(r.decided_by_name) + ' ' + App.fmtDateTime(r.decided_at, r.timezone)),
+            h('div', { class: 'notice notice-warn small', style: 'margin:.5rem 0 0' }, `${name} wasn't enrolled. ${why}`)),
+          badge('badge-warn', 'Approved · not enrolled'));
+      })));
+  }
+
   function studentTabs(students, sel, onPick) {
     if (students.length < 2) return null;
     const tabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Choose a student' });
@@ -255,6 +277,8 @@
       h('p', null, 'Weekly study sessions for your family. Each one repeats every week through the end of the term.'))));
     const pending = requests.filter(r => r.status === 'pending');
     if (pending.length) el.append(requestsCard(pending, 'Requests from your students'));
+    const blocked = blockedOf(requests);
+    if (blocked.length) el.append(blockedCard(blocked));
     if (!students.length) {
       el.append(h('div', { class: 'card empty' }, 'Once your student\'s account is linked to yours, you can pick their weekly sessions here.'));
       return;
@@ -400,6 +424,8 @@
       const { requests } = await App.api.get(API + '/requests');
       const pending = requests.filter(r => r.status === 'pending');
       if (pending.length) box.append(requestsCard(pending, 'Session requests'));
+      const blocked = blockedOf(requests);
+      if (blocked.length) box.append(blockedCard(blocked));
     },
   });
 

@@ -3,6 +3,7 @@
 const F = 'src/modules/accounts/family.js';
 const O = 'src/modules/accounts/ops.js';
 const U = 'src/modules/accounts/util.js';
+const V = 'public/js/views/accounts.js';
 
 module.exports = [
   // ---- AC-1 parent sign-up
@@ -240,5 +241,40 @@ module.exports = [
     find: 'WHERE lower(trim(name)) = lower(?) AND id != ?', repl: 'WHERE active = 1 AND lower(trim(name)) = lower(?) AND id != ?' },
   { name: 'a location can\'t be renamed to its own name in another case', covers: ['AC-5'], file: O,
     find: 'WHERE lower(trim(name)) = lower(?) AND id != ?', repl: 'WHERE lower(trim(name)) = lower(?) AND ? IS NOT NULL' },
+
+  // ---- the accounts screens (public/js/views/accounts.js)
+  // L49: the Home card's Approve buttons name the student
+  { name: 'the Home card\'s Approve buttons all just say Approve', covers: ['AC-3'], file: V,
+    find: "onclick: e => approve(e.currentTarget, s) }, 'Approve ' + first(s.name))", repl: "onclick: e => approve(e.currentTarget, s) }, 'Approve')" },
+  // L50: "your invite" only for the parent who sent it
+  { name: 'every parent reads "accepted your invite" on Family and Home', covers: ['AC-3', 'AC-2'], file: V,
+    find: "if (by === App.me.user.id) return 'your invite';", repl: "return 'your invite';" },
+  // ACC-POLISH: Decline and Cancel invite buttons name the person
+  { name: 'the Decline button does not name the student', covers: ['AC-3'], file: V,
+    find: "'ac-st')) }, 'Decline ' + name1));", repl: "'ac-st')) }, 'Decline'));" },
+  { name: 'the Cancel button on a student invite does not name the student', covers: ['AC-1'], file: V,
+    find: "'ac-st')) }, 'Cancel ' + name1 + \"'s invite\"));", repl: "'ac-st')) }, 'Cancel invite'));" },
+  { name: 'the Cancel button on a guardian invite does not name the guardian', covers: ['AC-2'], file: V,
+    find: "'ac-gu')) }, 'Cancel invite to ' + first(inv.name)));", repl: "'ac-gu')) }, 'Cancel invite'));" },
+  // ACC-POLISH: focus after a confirmed Decline, Cancel invite or Deactivate
+  { name: 'after a Decline or Cancel invite focus falls to the top of the page', covers: ['AC-3'], file: V,
+    find: '    if (head) head.focus();\n', repl: '' },
+  { name: 'a guardian invite\'s Cancel focuses the Students heading', covers: ['AC-2'], file: V,
+    find: "}, () => cancelInvite(inv.id, 'Invite to ' + first(inv.name) + ' cancelled.', 'ac-gu'))",
+    repl: "}, () => cancelInvite(inv.id, 'Invite to ' + first(inv.name) + ' cancelled.', 'ac-st'))" },
+  { name: 'after a Deactivate focus falls to the top of the page', covers: ['AC-4'], file: V,
+    find: '              focusStaffRow(next && next.id);\n', repl: '' },
+  { name: 'after a Deactivate focus stays on the deactivated person\'s row', covers: ['AC-4'], file: V,
+    find: 'const next = staff[staff.indexOf(s) + 1];', repl: 'const next = s;' },
+  // ACC-POLISH: Inbox links for the user and location ref types
+  { name: 'family account items in the Inbox open nothing', covers: ['AC-3'], file: V,
+    find: "App.inboxLink('user', n =>", repl: "App.inboxLink('user_x', n =>" },
+  { name: 'a student\'s "You\'re all set" opens nothing', covers: ['AC-3'], file: V,
+    find: "n.kind === 'account_approved' ? 'home' : null", repl: 'null' },
+  { name: 'a new director\'s Inbox item opens nothing', covers: ['AC-5'], file: V,
+    find: "  App.inboxLink('location', 'people/location');\n", repl: '' },
+  // L51: the roster doesn't mark a parent "(not approved yet)"
+  { name: 'the roster marks parents of an invited student as not approved', covers: ['AC-6'], file: V,
+    find: "h('div', null, p.name),", repl: "h('div', null, p.name, p.link_status === 'pending' ? ' (not approved yet)' : '')," },
 ];
 
