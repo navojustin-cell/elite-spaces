@@ -176,6 +176,45 @@ test(['NF-1', 'MB-2'], 'only staff at the student\'s location (or HQ) can change
   assert.equal((await t.as(staffA).put('/api/membership/student/99999', body())).status, 403);
 });
 
+test('MB-1', 'a weekly limit sent as an object, a list or anything but a number or digits is refused, never a server error (L56)', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const { student } = fam(t, loc);
+  const staff = t.fx.staff(loc);
+  const before = row(t, student);
+  // {toString: 1} made String() throw (a 500); [3] read as "3" and was saved.
+  for (const weekly_cap of [{ toString: 1 }, { valueOf: 3 }, [3], ['3'], true, null]) {
+    const r = await t.as(staff).put(url(student), body({ weekly_cap }));
+    assert.equal(r.status, 400, JSON.stringify(weekly_cap));
+    assert.equal(r.body.error, 'weekly_cap', JSON.stringify(weekly_cap));
+  }
+  assert.deepEqual(row(t, student), before);
+  assert.equal(t.fx.audit().length, 0);
+  // A number and a string of digits both still work.
+  assert.equal((await t.as(staff).put(url(student), body({ weekly_cap: '5' }))).status, 200);
+  assert.equal(row(t, student).weekly_cap, 5);
+});
+
+test(['NF-1', 'MB-2'], 'a retired student account (a cancelled invite) can\'t be given or changed a membership, even by id (L65)', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const staff = t.fx.staff(loc), hq = t.fx.hq();
+  const retired = t.fx.user('student', { location: loc, name: 'Retired Kid', active: 0 });
+  for (const u of [staff, hq]) {
+    const r = await t.as(u).put(url(retired), body());
+    assert.equal(r.status, 404, u.role);
+    assert.equal(r.body.message, 'No such student.');
+  }
+  assert.equal(row(t, retired), undefined);
+  // One retired after it got a membership: the record stays as it was.
+  const { student } = fam(t, loc);
+  t.db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(student.id);
+  const before = row(t, student);
+  assert.equal((await t.as(staff).put(url(student), body({ weekly_cap: 5 }))).status, 404);
+  assert.deepEqual(row(t, student), before);
+  assert.equal(t.fx.audit().length, 0);
+});
+
 // ---------------- MB-3: families can see it ----------------
 
 test('MB-3', 'parents see status, weekly limit and dates for each linked student; students see their own', async () => {
@@ -475,6 +514,31 @@ test('MB-5', 'a last day set in the past pauses at once; a last day of today kee
   assert.equal(k.body.membership.state, 'ending');
   assert.equal(enr(t, et).status, 'active');
   assert.equal(kinds(t, today.parent, 'membership_paused').length, 0);
+});
+
+test(['MB-5', 'MB-4'], 'a last day set in the past sends the family one notice, saying the sessions are on hold; the daily job adds no second one (L57)', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const staff = t.fx.staff(loc);
+  const sess = t.fx.session(loc);
+  const held = fam(t, loc), none = fam(t, loc, { name: 'Ana Ruiz' });
+  const e1 = t.fx.enroll(held.student, sess, 1), e3 = t.fx.enroll(held.student, sess, 3);
+  assert.equal((await t.as(staff).put(url(held.student), body({ expires_on: '2026-10-13' }))).body.paused, 2);
+  t.jobs(); t.jobs();
+  assert.deepEqual([enr(t, e1).status, enr(t, e3).status], ['paused', 'paused']);
+  for (const u of [held.parent, held.student]) {
+    const n = kinds(t, u, 'membership_paused');
+    assert.equal(n.length, 1);
+    assert.match(n[0].body, /2 weekly sessions are on hold\. They are saved/);
+    assert.equal(kinds(t, u, 'membership_expired').length, 0, 'no second notice that leaves out the paused sessions');
+  }
+  // With nothing to pause the save sends nothing, so the daily job's notice is the one the family gets.
+  await t.as(staff).put(url(none.student), body({ expires_on: '2026-10-13' }));
+  t.jobs(); t.jobs();
+  assert.equal(kinds(t, none.parent, 'membership_paused').length, 0);
+  const ended = kinds(t, none.parent, 'membership_expired');
+  assert.equal(ended.length, 1);
+  assert.match(ended[0].body, /^It ended on Tue, Oct 13, 2026\. Renew with the front desk/);
 });
 
 test(['MB-5', 'NF-2'], 'reactivating restores slots with a free seat; a full slot puts the student at the front of its waitlist', async () => {
@@ -1169,4 +1233,25 @@ test(['MB-1', 'MB-5'], 'the edit screen says sessions come back on the start dat
   assert.equal((await t.as(staff).put(url(lapsed.student), body({ start_date: '2026-11-02', expires_on: '2027-06-30' }))).status, 200);
   const now = (await open(lapsed.student)).main.find(n => n.cls.includes('card'));
   assert.match(words(now), /No weekly sessions right now\. 2 sessions are paused until the membership starts\.$/);
+});
+
+test(['MB-3', 'MB-5'], 'membership notices in the Inbox open Home (the membership card) for families and Members for staff (L35)', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine' });
+  const { parent, student } = fam(t, loc);
+  const staff = t.fx.staff(loc);
+  t.fx.enroll(student, t.fx.session(loc), 1);
+  assert.equal((await t.as(staff).put(url(student), body({ status: 'inactive' }))).body.paused, 1);
+  // Staff get none today; one that reaches them opens their own membership screen.
+  t.db.prepare("INSERT INTO notifications (user_id, kind, title, ref_type, ref_id, created_at) VALUES (?, 'membership_paused', ?, 'membership', ?, ?)")
+    .run(staff.id, "Leo's weekly sessions are paused", row(t, student).id, t.clock.now());
+  const links = async u => (await openTab(t, u, '#/inbox')).getElementById('main')
+    .findAll(n => n.tag === 'a' && n.cls.includes('inbox-link')).map(a => [words(a), a.getAttribute('href')]);
+  const item = /^(New )?Leo's weekly sessions are paused/;
+  for (const [u, href] of [[parent, '#/home'], [student, '#/home'], [staff, '#/members']]) {
+    const got = await links(u);
+    assert.equal(got.length, 1, u.role + ' ' + JSON.stringify(got));
+    assert.match(got[0][0], item);
+    assert.equal(got[0][1], href, u.role);
+  }
 });

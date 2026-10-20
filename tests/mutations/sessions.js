@@ -227,4 +227,26 @@ module.exports = [
     find: 'const ends = x => x.enrolled + (x.paused || 0);', repl: 'const ends = x => x.enrolled;' },
   { name: 'offer past dates in the closure form', covers: ['SC-3'], file: V,
     find: 'min: t.start_date > today ? t.start_date : today', repl: 'min: t.start_date' },
+
+  // ---- L36: raising capacity serves the waitlist at once (caught where enrollment is loaded) ----
+  { name: 'leave the waitlist waiting after capacity goes up', covers: ['SC-2', 'SC-4'], file: F,
+    find: 'if (next.capacity > before.capacity) promoteWaitlists(ctx);', repl: 'if (false) promoteWaitlists(ctx);' },
+  { name: 'run some other enrollment job instead of the waitlist one', covers: ['SC-2', 'SC-4'], file: F,
+    find: "j.name === 'promote-waitlists'", repl: "j.name === 'close-gone-requests'" },
+  // ---- L38: "notified" counts people, not notices ----
+  { name: 'count notices instead of people after a session edit', covers: ['SC-4'], file: F,
+    find: 'forEach(n => told.add(n.user_id))', repl: 'forEach(n => told.add(n.id))' },
+  // ---- L41, L39, L35: the screen ----
+  { name: 'leave the day out of a schedule button\'s name', covers: ['SC-4'], file: V,
+    find: "h('span', { class: 'sr-only' }, LONG[day] + ': '),", repl: '' },
+  { name: 'label the closure form\'s dismiss button Close, beside Close this day', covers: ['SC-3'], file: V,
+    find: "onclick: close }, 'Cancel')", repl: "onclick: close }, 'Close')" },
+  { name: 'leave closure and session notices untappable for families', covers: ['SC-3', 'SC-4'], file: V,
+    find: "App.inboxLink(refType, 'schedule');", repl: '' },
+  { name: 'leave closure and session notices untappable for staff', covers: ['SC-3', 'SC-4'], file: V,
+    find: "App.inboxLink(refType, 'sessions');", repl: '' },
+  { name: 'register only closure notices in the Inbox', covers: ['SC-4'], file: V,
+    find: "for (const refType of ['closure', 'session'])", repl: "for (const refType of ['closure'])" },
+  { name: 'register only session notices in the Inbox', covers: ['SC-3'], file: V,
+    find: "for (const refType of ['closure', 'session'])", repl: "for (const refType of ['session'])" },
 ];

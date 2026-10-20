@@ -61,6 +61,7 @@
     async render(el, params) {
       const isHq = App.role() === 'hq';
       let [date, locParam] = params;
+      if (date === 'today') date = undefined; // each location's own today (L46)
       let hqLocations = [];
       if (isHq) {
         const { locations } = await App.api.get('/api/locations');
@@ -94,7 +95,8 @@
       let locSelect = null;
       if (isHq) {
         locSelect = h('select', { id: 'dn-loc' }, hqLocations.map(l => h('option', { value: l.id, selected: l.id === data.location.id }, l.name)));
-        locSelect.addEventListener('change', () => { hqLocation = locSelect.value; App.go('daily-notes', data.date, locSelect.value); });
+        // A past day stays chosen; today becomes the new location's today, which may be another date (L46).
+        locSelect.addEventListener('change', () => { hqLocation = locSelect.value; App.go('daily-notes', isToday ? 'today' : data.date, locSelect.value); });
       }
       el.append(h('div', { class: 'row note-controls' },
         isHq && h('label', { class: 'field' }, h('span', null, 'Location'), locSelect),
@@ -158,7 +160,7 @@
           art.append(
             h('p', { class: 'muted small', style: 'margin:.6rem 0 0' }, 'Posted ' + (day ? day + ', ' : '') + App.fmtTime(n.posted_at, tz) + ' by ' + n.posted_by_name +
               (n.edited_at ? ' · Edited ' + App.fmtDateTime(n.edited_at, tz) + ' by ' + n.edited_by_name : '')),
-            h('div', { class: 'row note-actions' }, h('button', { class: 'btn', type: 'button', 'aria-label': 'Edit ' + s.name + "'s note",
+            h('div', { class: 'row note-actions' }, h('button', { class: 'btn', type: 'button', 'aria-label': 'Edit note for ' + s.name,
               onclick: () => { open.add(s.id); redraw(s); focusFirstChoice(s); } }, 'Edit note')));
           return art;
         }
@@ -166,7 +168,8 @@
         // The form. Ratings start blank (DN-4); posting needs every item rated.
         const ed = unsaved.get(key) || { ratings: Object.fromEntries(s.ratings.map(r => [r.item_id, r.rating])), comment: s.comment || '' };
         const keep = () => unsaved.set(key, ed);
-        // The hint keeps its space even when empty, so the button below never shifts as it changes.
+        // The hint sits below the buttons and keeps its space even when empty, so a longer hint
+        // (three lines on a 320px phone) never pushes Post note or Save changes as it changes.
         const hint = h('p', { class: 'muted small note-hint', 'aria-live': 'polite', style: 'margin:.25rem 0 0' });
         const postBtn = h('button', { class: 'btn btn-primary', type: 'button' }, posted ? 'Save changes' : 'Post note');
         const refresh = () => {
@@ -229,15 +232,15 @@
         // refuses post: true or false on a posted note, as only a stale screen sends those).
         postBtn.addEventListener('click', () => save(postBtn, posted ? undefined : true));
 
+        const actions = h('div', { class: 'row note-actions' },
+          posted
+            ? h('button', { class: 'btn', type: 'button', onclick: () => { unsaved.delete(key); open.delete(s.id); redraw(s); } }, 'Cancel')
+            : h('button', { class: 'btn', type: 'button', onclick: e => save(e.currentTarget, false) }, 'Save for later'),
+          postBtn);
         art.append(rates,
           h('label', { class: 'field', for: 'dn-c-' + s.id, style: 'margin:.75rem 0 0' },
             h('span', null, 'Comment ', h('span', { class: 'muted', style: 'font-weight:400' }, '(optional)')), comment),
-          hint,
-          h('div', { class: 'row note-actions' },
-            posted
-              ? h('button', { class: 'btn', type: 'button', onclick: () => { unsaved.delete(key); open.delete(s.id); redraw(s); } }, 'Cancel')
-              : h('button', { class: 'btn', type: 'button', onclick: e => save(e.currentTarget, false) }, 'Save for later'),
-            postBtn));
+          actions, hint);
         refresh();
         return art;
       }
@@ -364,7 +367,7 @@
           if (input.value.trim() === it.label) return App.toast('No change to save.');
           change(form.querySelector('button'), () => App.api.patch('/api/notes/items/' + it.id, { label: input.value }),
             'Renamed to "' + input.value.trim().replace(/\s+/g, ' ') + '".', 'nc-label-' + it.id);
-        } }, input, h('button', { class: 'btn', type: 'submit', 'aria-label': 'Save wording for item ' + (idx + 1) }, 'Rename'));
+        } }, input, h('button', { class: 'btn', type: 'submit', 'aria-label': 'Rename item ' + (idx + 1) }, 'Rename'));
         return h('li', { style: 'align-items:flex-start' },
           h('span', { class: 'avatar', 'aria-hidden': 'true' }, idx + 1),
           h('div', { class: 'note-item-body' }, form, h('div', { class: 'row' },

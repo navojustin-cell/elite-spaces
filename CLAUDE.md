@@ -18,6 +18,11 @@ npm start               # dev mode OFF: no demo sign-in, clock control or /api/d
 Dev mode is off unless `ELITE_DEV=1` is set explicitly. It adds a purple bar for setting the
 clock and running scheduled jobs, plus one-tap demo sign-in on the sign-in screen.
 The sign-in cookie is named per port (`sid_<PORT>`), so several local servers in one browser don't sign each other out.
+It is httpOnly, responses must never echo its token (L64), and it is Secure when the request came over HTTPS (`trust proxy` is on).
+
+Hosting: `render.yaml` + `.node-version` set up a Render web service with a disk; `docs/deploy.md` has the steps.
+`GET /healthz` answers `{ok:true}` without sign-in. A new database gets the schema only; `ELITE_SEED_DEMO=1`
+runs the demo seed, and only into a database with no accounts.
 
 ## The benchmark (the gauntlet's pass condition)
 ```
@@ -37,7 +42,7 @@ with every module loaded, including in `node tests/run.js integration`.
 
 | Path | Owner |
 |---|---|
-| `schema/000_core.sql`, `src/{app,auth,db,clock,time,notify,audit,errors}.js`, `src/modules/index.js`, `public/js/app.js`, `public/css/app.css`, `public/index.html`, `tests/{lib,run,mutate,coverage}.js`, `tests/integration.test.js`, `tests/mutations/{core,integration}.js`, `scripts/seed.js` | **foundation**: shared, change only when integrating |
+| `schema/000_core.sql`, `schema/005_push.sql`, `src/{app,auth,db,clock,time,notify,push,audit,errors}.js`, `server.js`, `public/sw.js`, `render.yaml`, `src/modules/index.js`, `public/js/app.js`, `public/css/app.css`, `public/index.html`, `tests/{lib,run,mutate,coverage}.js`, `tests/integration.test.js`, `tests/mutations/{core,integration}.js`, `scripts/seed.js` | **foundation**: shared, change only when integrating |
 | `src/modules/<m>/` (routes, services, jobs, optional `seed.js`) | module `<m>` |
 | `schema/NNN_<m>.sql` (additive only: new tables, `ALTER TABLE ... ADD COLUMN`) | module `<m>` |
 | `public/js/views/<m>.js` | module `<m>` |
@@ -71,6 +76,16 @@ Shell hooks for views (`public/js/app.js`):
   else `anchor`. Safari doesn't focus a tapped button, so pass the button as `anchor` or `opener`.
   Never use `window.confirm` or `alert`.
 - `App.toast(msg, 'error'?)` and `App.run(btn, fn)` (disables `btn`, shows errors as toasts).
+- A tapped push notification opens `#/inbox/<id>`, which goes on to that item's `App.inboxLink` route.
+- On the sign-in screen the tab title follows the first `h2` of a panel a module shows in place of the
+  sign-in form (hide the form with `style.display = 'none'`), else "Sign in".
+
+Web push (`src/push.js`): `notify.send()` also pushes each notification to the user's subscribed browsers,
+after the request finishes, never throwing into it. VAPID keys come from `VAPID_PUBLIC_KEY`,
+`VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, else are made once and kept in `settings`. Endpoints must be a known push
+service over https. Tests set `ctx.pushSender` to a fake and `await push.flush(ctx)`; nothing touches the network.
+Home shows parents and students a banner to turn notifications on (the iPhone Add to Home Screen steps in
+Safari); permission is asked only on a tap, "No thanks" is remembered per device, and it shows once a session.
 
 ## Rules
 - **Every behavior arrives with a test that fails when the behavior is reverted**, plus a mutation
@@ -83,7 +98,7 @@ Shell hooks for views (`public/js/app.js`):
 - Times: UTC ms in the DB. Location-local dates and times come from `src/time.js` and the location's
   `timezone`, never the server's zone.
 - Follow `docs/decisions.md`. A change that needs a different rule must ask first.
-- No payment data. No real push, email or SMS: notifications go to the in-app inbox.
+- No payment data. No email or SMS: notifications go to the in-app inbox, and as web push to devices that turned it on.
 - English only (PRD non-goal). WCAG 2.1 AA: labeled controls, 44px targets, contrast tokens from
   `app.css`, visible focus.
 - Never deploy, never push to a remote, and never touch real families' data.

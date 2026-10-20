@@ -64,9 +64,12 @@
       return (you ? "You're" : first(s.name) + ' is') + ` at ${s.location.name} since ${App.fmtTime(v.check_in_at, tz)}`
         + (v.session_name ? ` · ${v.session_name} until ${App.fmtTime(v.ends_at, tz)}` : '');
     }
-    const nextText = !n ? '' : (n.opens_at <= now && now <= n.end_at)
+    // "On now" only once the session has started; in the 30 minutes before (D-13) check-in is open but it hasn't begun.
+    const nextText = !n ? '' : (n.start_at <= now && now <= n.end_at)
       ? `${n.session_name} is on now, until ${App.fmtTime(n.end_at, tz)}`
-      : `Next session ${n.when} · ${n.session_name}`;
+      : (n.opens_at <= now && now < n.start_at)
+        ? `${n.session_name} starts at ${App.fmtTime(n.start_at, tz)} · check-in is open`
+        : `Next session ${n.when} · ${n.session_name}`;
     if (s.state === 'left') {
       const how = v.checkout_method === 'auto' ? ' (checked out automatically)' : v.checkout_method === 'staff' ? ' (checked out by staff)' : '';
       return `Left at ${App.fmtTime(v.check_out_at, tz)}${how}` + (nextText ? ' · ' + nextText : '');
@@ -126,11 +129,13 @@
     const camBox = h('div');
     const scanBtn = h('button', { class: 'btn btn-primary btn-lg btn-block ci-hideable', type: 'button', onclick: startCamera },
       h('span', { 'aria-hidden': 'true' }, '📷'), h('span', { class: 'ci-scan-label' }, 'Scan to check in'));
+    // Staff can check a student in or out by hand; the line follows the button (check out while here).
+    const helpLine = h('p', { class: 'muted small', style: 'margin:0' }, 'Having trouble? Ask staff at the front desk to check you in.');
     const devBtn = App.me && App.me.dev && h('button', { class: 'btn btn-block', type: 'button', onclick: simulate }, 'Simulate scan at my location (dev)');
     el.append(statusBox, result, camBox,
       h('div', { class: 'card' }, scanBtn,
         h('p', { class: 'muted small ci-help' }, "When you scan, we check that you're in the building. Your location isn't saved."),
-        h('p', { class: 'muted small', style: 'margin:0' }, 'Having trouble? Ask staff at the front desk to check you in.'),
+        helpLine,
         devBtn && h('div', { style: 'margin-top:.75rem' }, devBtn)));
 
     async function loadStatus() {
@@ -145,6 +150,7 @@
           h('div', { class: 'muted small' }, statusLine(status, true, now))),
         stateBadge(status)));
       scanBtn.querySelector('.ci-scan-label').textContent = status.state === 'here' ? 'Scan to check out' : 'Scan to check in';
+      helpLine.textContent = `Having trouble? Ask staff at the front desk to check you ${status.state === 'here' ? 'out' : 'in'}.`;
     }
 
     function busy(text) {
@@ -185,7 +191,7 @@
       code_expired: 'This code has expired', bad_code: "That code didn't work", wrong_location: 'This is a different location',
       outside_radius: "We couldn't confirm you're in the building", no_session: 'No session right now',
       membership_inactive: "Your membership isn't active", location_needed: 'We need your location',
-      location_closed: 'This location is closed',
+      location_closed: 'This location is closed', checked_out_auto: "You're already checked out",
     };
 
     // Send one scan. `pos` is reused when the student confirms a check-out, so they aren't asked twice.
@@ -432,8 +438,10 @@
         found.replaceChildren(...students.map(s => h('li', null,
           h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(s.name)),
           h('div', { class: 'grow' }, h('strong', null, s.name), h('div', { class: 'muted small' },
-            s.here ? `Here since ${App.fmtTime(s.since, tz)}` : s.session_now ? `Has ${s.session_now.name} now` : 'No session right now')),
-          s.here
+            s.here ? `Here since ${App.fmtTime(s.since, tz)}` : !s.approved ? 'Waiting for a parent to approve the account'
+              : s.session_now ? `Has ${s.session_now.name} now` : 'No session right now')),
+          // A student no parent has approved yet can't be checked in (D-20), so there is no button.
+          !s.here && !s.approved ? null : s.here
             ? h('button', { class: 'btn', type: 'button', 'aria-label': `Check out ${s.name}`, onclick: () => manualCheckout(s.visit_id, s.name, reload) }, 'Check out')
             : h('button', { class: 'btn', type: 'button', 'aria-label': `Check in ${s.name}`,
               onclick: () => manualCheckin(s, { override: !s.session_now || !s.membership_active, after: reload,

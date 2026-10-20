@@ -179,6 +179,8 @@
           for (const s of here) {
             const slot = s.slots.find(x => x.weekday === day) || { enrolled: 0, waiting: 0 };
             const kids = [
+              // L41: the day is part of the button's name, so Mon/Wed/Fri buttons don't all sound alike.
+              h('span', { class: 'sr-only' }, LONG[day] + ': '),
               h('strong', null, s.name),
               h('div', { class: 'muted small' }, span(s)),
               h('div', { class: 'sx-meta small' },
@@ -336,13 +338,21 @@
           h('p', { class: 'muted small' }, `Closures fall inside ${t.name} (${shortDate(t.start_date)} – ${shortDate(t.end_date, true)}), today or later.`),
           h('div', { class: 'sx-pair' }, field('Date', date), field('Reason (optional)', reason, 'Families see this.')),
           confirmHost,
-          h('div', { class: 'row' }, save, h('button', { class: 'btn', type: 'button', onclick: close }, 'Close'))));
+          // L39: 'Cancel', not 'Close', beside 'Close this day': this one only shuts the form.
+          h('div', { class: 'row' }, save, h('button', { class: 'btn', type: 'button', onclick: close }, 'Cancel'))));
       }
 
       await load();
       draw();
     },
   });
+
+  // L35: closure and session notices open the family's Schedule (enrollment's view),
+  // or this Sessions screen for staff; the first one the role can open wins.
+  for (const refType of ['closure', 'session']) {
+    App.inboxLink(refType, 'schedule');
+    App.inboxLink(refType, 'sessions');
+  }
 
   // ---------- Home card: today's sessions ----------
   App.card({

@@ -926,7 +926,7 @@ class El {
 
 // One browser tab running the real shell and sessions view (read from ROOT, so the
 // mutation runner's copy is the one exercised) against the test server.
-function sessionsTab(t, user) {
+function sessionsTab(t, user, extraViews = []) {
   const pending = new Set(), requests = [];
   const token = crypto.randomBytes(16).toString('hex');
   t.ctx.sessions.set(token, user.id);
@@ -958,7 +958,7 @@ function sessionsTab(t, user) {
     history: { replaceState() {} }, addEventListener() {}, setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
   win.window = win;
   vm.createContext(win);
-  for (const f of ['public/js/app.js', 'public/js/views/sessions.js']) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
+  for (const f of ['public/js/app.js', 'public/js/views/sessions.js', ...extraViews]) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
   win.App.me = { user: { id: user.id, role: user.role, name: user.name, location_id: user.location_id } };
   const settle = async () => {
     do {
@@ -969,6 +969,7 @@ function sessionsTab(t, user) {
   return {
     doc, main, requests, settle,
     async open() { const view = el('div'); main.replaceChildren(view); await win.App.views.find(v => v.id === 'sessions').render(view, []); await settle(); return view; },
+    async inbox() { const view = el('div'); main.replaceChildren(view); await win.App.views.find(v => v.id === 'inbox').render(view, []); await settle(); return view; },
   };
 }
 const words = n => n.all().filter(c => !c.tag).map(c => c.data).join(' ').replace(/\s+/g, ' ').trim();
@@ -1056,4 +1057,105 @@ test(['SC-3', 'SC-4', 'NF-7'], 'Sessions screen: every confirm puts the safe but
   btn(dialog(view), 'Cancel session').click();
   await tab.settle();
   assert.equal(row(w.t, s.id).status, 'cancelled');
+});
+
+// ---------------- Sweep fixes: L36, L38 (server) and L35, L39, L41 (screen) ----------------
+
+// L36 runs the enrollment module's waitlist job. A run scoped to sessions alone
+// does not load that module, so there the edit must simply leave the line alone;
+// the full run and any run that includes integration load it and check the fill.
+const enrollmentLoaded = !process.env.ELITE_MODULES || process.env.ELITE_MODULES.split(',').includes('enrollment');
+
+test(['SC-2', 'SC-4'], 'raising capacity fills the new seats from the waitlist at once, first in line first (L36)', async () => {
+  const w = await world();
+  const s = w.t.fx.session(w.a, { weekdays: '1,3', capacity: 1 });
+  const held = w.t.fx.family(w.a);
+  w.t.fx.enroll(held.student, s, 1);
+  const first = w.t.fx.family(w.a), second = w.t.fx.family(w.a), third = w.t.fx.family(w.a);
+  const lines = [first, second, third].map(f => waitlist(w.t, f.student, s, 1));
+
+  const r = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { capacity: 3 });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.notified, 2, 'the edit itself tells the family already enrolled');
+  const monday = r.body.session.slots.find(x => x.weekday === 1);
+  if (!enrollmentLoaded) {
+    assert.deepEqual(lines.map(id => waitRow(w.t, id).status), ['waiting', 'waiting', 'waiting']);
+    return;
+  }
+  // No job run: the Save itself served the line, and the reply shows it.
+  assert.deepEqual(lines.map(id => waitRow(w.t, id).status), ['enrolled', 'enrolled', 'waiting']);
+  assert.deepEqual([monday.enrolled, monday.waiting, monday.seats_left], [3, 1, 0]);
+  for (const f of [first, second]) {
+    assert.equal(count(w.t, "SELECT COUNT(*) AS n FROM enrollments WHERE student_id = ? AND session_id = ? AND weekday = 1 AND status = 'active'", f.student.id, s.id), 1);
+    assert.equal(sent(w.t, f.parent, 'waitlist_promoted'), 1);
+  }
+  assert.equal(sent(w.t, third.parent, 'waitlist_promoted'), 0);
+  const list = await w.t.as(w.dirA).get('/api/sessions');
+  assert.deepEqual(list.body.sessions[0].slots.map(x => [x.weekday, x.enrolled, x.waiting]), [[1, 3, 1], [3, 0, 0]]);
+});
+
+test(['SC-4'], 'one edit that tells a person twice counts them once in "notified" (L38)', async () => {
+  const w = await world();
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const both = w.t.fx.family(w.a); // Monday and Friday: told the day is gone and the name changed
+  w.t.fx.enroll(both.student, s, 1);
+  w.t.fx.enroll(both.student, s, 5);
+  const monOnly = w.t.fx.family(w.a); // Monday only: told the name changed
+  w.t.fx.enroll(monOnly.student, s, 1);
+  const before = count(w.t, 'SELECT COUNT(*) AS n FROM notifications');
+
+  const r = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { weekdays: [1, 3], name: 'Afternoon Study MW' });
+  assert.equal(r.status, 200);
+  assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM notifications') - before, 6, 'six notices went out');
+  assert.equal(r.body.notified, 4, 'to four people');
+  for (const u of [both.student, both.parent]) {
+    assert.equal(sent(w.t, u, 'session_day_removed'), 1);
+    assert.equal(sent(w.t, u, 'session_changed'), 1);
+  }
+});
+
+test(['SC-3', 'SC-4'], 'Sessions screen: schedule buttons name their day, the closure form is dismissed with Cancel, and closure and session notices open a screen from the Inbox (L35, L39, L41)', async () => {
+  const w = await world(); // Wed 14 Oct 2026
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const fam = w.t.fx.family(w.a);
+  w.t.fx.enroll(fam.student, s, 1);
+  const tab = sessionsTab(w.t, w.dirA);
+  const view = await tab.open();
+
+  // L41: each slot button carries its day for screen readers; what shows is unchanged.
+  const slots = view.findAll(n => n.tag === 'button' && n.cls.includes('sx-slot'));
+  assert.deepEqual(slots.map(b => b.textContent.split('1pm')[0]),
+    ['Monday: Afternoon Study', 'Wednesday: Afternoon Study', 'Friday: Afternoon Study']);
+  for (const b of slots) assert.ok(b.childNodes[0].cls.includes('sr-only'), 'the day is screen-reader text');
+
+  // L39: the closure form's dismiss button doesn't start with "Close" too.
+  btn(view, 'Add a closure').click();
+  const form = view.find(n => n.getAttribute('data-panel') === 'closure');
+  assert.deepEqual(labels(form), ['Close this day', 'Cancel']);
+  btn(form, 'Cancel').click();
+  assert.equal(view.find(n => n.getAttribute('data-panel') === 'closure'), undefined);
+  assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM closures'), 0);
+
+  // L35: a closure and a session change reach the family; both open the Schedule.
+  assert.equal((await w.t.as(w.dirA).post('/api/sessions/closures', { date: MON })).status, 201);
+  assert.equal((await w.t.as(w.dirA).put('/api/sessions/' + s.id, { name: 'Afternoon Study+' })).status, 200);
+  const hrefs = async user => {
+    const box = await sessionsTab(w.t, user, ['public/js/views/enrollment.js']).inbox();
+    return box.findAll(n => n.tag === 'li').map(li => {
+      const a = li.find(n => n.tag === 'a');
+      return [li.find(n => n.tag === 'strong').textContent, a ? a.getAttribute('href') : null];
+    });
+  };
+  assert.deepEqual(await hrefs(fam.parent), [
+    ['Afternoon Study at Irvine has changed', '#/schedule'],
+    ['Irvine is closed Mon, Nov 23', '#/schedule'],
+  ]);
+  // Staff open the Sessions screen instead.
+  const ins = w.t.db.prepare('INSERT INTO notifications (user_id, kind, title, ref_type, ref_id, priority, created_at) VALUES (?,?,?,?,?,?,?)');
+  ins.run(w.dirA.id, 'session_closure', 'Closure notice', 'closure', 1, 'normal', w.t.clock.now() - 1000);
+  ins.run(w.dirA.id, 'session_changed', 'Session notice', 'session', s.id, 'normal', w.t.clock.now() - 2000);
+  assert.deepEqual(await hrefs(w.dirA), [
+    ['Closure notice', '#/sessions'],
+    ['Session notice', '#/sessions'],
+  ]);
 });

@@ -3,14 +3,14 @@
 //
 // Routes, mounted at /api/announcements:
 //   GET    /feed        posts the caller is an audience of (NF-1), active emergency alerts,
-//                       the caller's scheduled posts (director: own, HQ: all) and their mute setting
+//                       the scheduled posts the caller keeps (HQ: all), their mute setting and my_locations
 //   GET    /options     compose helpers for directors/HQ: categories and the sessions they can target
 //   POST   /preview     who a post would reach, without sending it (the review step); a schedule
 //                       time is checked here too, so a past time is refused before Schedule post
 //   POST   /            post or schedule an announcement (director: own location; HQ: all or a set)
 //   POST   /emergency   send an emergency alert right now (director: own location; HQ: any)
-//   DELETE /:id         cancel a scheduled post (its sender, or HQ)
-//   GET    /:id/stats   delivered and read counts (its sender, or HQ)
+//   DELETE /:id         cancel a scheduled post (whoever keeps it: see keeps())
+//   GET    /:id/stats   delivered and read counts (whoever keeps it)
 //   POST   /:id/read    the caller has seen a post: records the read and marks their notification read
 //   PUT    /prefs       { muted } turns announcement notifications off or on for the caller
 // Job: publish-scheduled sends each due scheduled post exactly once.
@@ -172,8 +172,7 @@ function createPost(ctx, user, p) {
       VALUES (?,?,?,?,?,?,'scheduled',?,?,?)`).run(p.type, p.category, p.title, p.body, p.audience, p.sessionId, p.publishAt, user.id, now).lastInsertRowid);
     const addLoc = db.prepare('INSERT INTO announcement_locations (announcement_id, location_id) VALUES (?, ?)');
     for (const l of p.locationIds) addLoc.run(id, l);
-    const action = p.type === 'emergency' ? 'emergency.send' : p.publishAt > now ? 'announcement.schedule' : 'announcement.post';
-    audit.log(ctx, user, action, { targetType: 'announcement', targetId: id, locationId: p.locationIds.length === 1 ? p.locationIds[0] : null,
+    const action = p.type === 'emergency' ? 'emergency.send' : p.publishAt > now ? 'announcement.schedule' : 'announcement.post';    audit.log(ctx, user, action, { targetType: 'announcement', targetId: id, locationId: p.locationIds.length === 1 ? p.locationIds[0] : null,
       detail: { audience: p.audience, locations: p.locationIds, sessionId: p.sessionId } });
     return id;
   });
@@ -200,6 +199,8 @@ function publish(ctx, id) {
     const users = audienceUsers(ctx, { audience: a.audience, sessionId: a.session_id, locationIds });
     const addRecipient = db.prepare('INSERT OR IGNORE INTO announcement_recipients (announcement_id, user_id) VALUES (?, ?)');
     for (const u of users) addRecipient.run(id, u.id);
+    // A sender who had left before their scheduled post went out (L58): it goes out under its location's name.
+    if (!senderInPlace(ctx, a)) db.prepare('INSERT OR IGNORE INTO announcement_unsigned (announcement_id) VALUES (?)').run(id);
     const emergency = a.type === 'emergency';
     const ids = users.map(u => u.id);
     const muted = mutedIds(ctx);
@@ -252,7 +253,29 @@ function visible(ctx, user, where = '', args = [], limit = 100) {
     ORDER BY a.published_at DESC, a.id DESC LIMIT ?`).all(...s.args, ...args, limit);
 }
 
-const senderOrHq = (user, a) => user.role === 'hq' || a.created_by === user.id;
+const postLocationIds = (ctx, id) => ctx.db.prepare('SELECT location_id FROM announcement_locations WHERE announcement_id = ? ORDER BY location_id')
+  .all(id).map(r => r.location_id);
+
+// The sender still holds the place they posted from: an active HQ account, or an
+// active director at the post's location (not deactivated, made staff or moved).
+function senderInPlace(ctx, a) {
+  const s = auth.getUser(ctx, a.created_by);
+  if (!s || !s.active) return false;
+  return s.role === 'hq' || (s.role === 'director' && postLocationIds(ctx, a.id).includes(s.location_id));
+}
+
+// Who looks after a post: cancels it while it is scheduled and sees its numbers (L42, L58).
+// HQ always; its sender while still in place. Once a director sender has left, a
+// post to one location passes to that location's directors; anything HQ made stays with HQ.
+function keeps(ctx, user, a) {
+  if (user.role === 'hq') return true;
+  if (user.role !== 'director') return false;
+  if (a.created_by === user.id) return senderInPlace(ctx, a);
+  const sender = auth.getUser(ctx, a.created_by);
+  if (!sender || sender.role === 'hq' || senderInPlace(ctx, a)) return false;
+  const locs = postLocationIds(ctx, a.id);
+  return locs.length === 1 && locs[0] === user.location_id;
+}
 
 // Delivery and read counts (AN-6), each over the people the post was sent to:
 //   read       has seen it: in News, from the Inbox, or "I have read this" on the alert pop-up
@@ -289,6 +312,12 @@ function shape(ctx, user, a) {
   const own = user.role === 'hq' ? null : ownLocationIds(ctx, user);
   const shown = own ? locs.filter(l => own.has(l.id)) : locs;
   const sender = db.prepare('SELECT name, role FROM users WHERE id = ?').get(a.created_by) || { name: 'ELITE Spaces', role: null };
+  // Sent after its director had left (L58): no person's name, just the location.
+  if (db.prepare('SELECT 1 FROM announcement_unsigned WHERE announcement_id = ?').get(a.id)) sender.name = null;
+  // A scheduled time was entered as wall time at the post's first location by id
+  // (parsePublishAt), so its card shows it in that zone and names that place (L43).
+  const zone = a.status === 'scheduled' ? db.prepare(`SELECT l.name, l.timezone FROM announcement_locations al JOIN locations l ON l.id = al.location_id
+    WHERE al.announcement_id = ? ORDER BY l.id LIMIT 1`).get(a.id) : null;
   // With its term, so "Sent to" tells same-named sessions in different terms apart.
   const session = a.session_id ? db.prepare(`SELECT s.id, s.name, s.weekdays, s.start_time, s.end_time, t.name AS term_name
     FROM sessions s LEFT JOIN terms t ON t.id = s.term_id WHERE s.id = ?`).get(a.session_id) : null;
@@ -302,11 +331,12 @@ function shape(ctx, user, a) {
     title: a.title, body: a.body, audience: a.audience, status: a.status,
     publish_at: a.publish_at, published_at: a.published_at, created_at: a.created_at,
     session, locations: shown, location_count: locs.length,
-    tz: (shown[0] || locs[0] || {}).timezone || null,
+    tz: (zone || shown[0] || locs[0] || {}).timezone || null,
+    zone_name: zone ? zone.name : null,
     sender: { name: sender.name, role: sender.role },
     mine: a.created_by === user.id,
     unread: forMe && !seen && !(note && note.read_at),
-    stats: senderOrHq(user, a) ? stats(ctx, a.id) : null,
+    stats: keeps(ctx, user, a) ? stats(ctx, a.id) : null,
   };
 }
 
@@ -327,12 +357,18 @@ function router(ctx) {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
     const posts = visible(ctx, u, '', [], limit).map(a => shape(ctx, u, a));
     const active = visible(ctx, u, " AND a.type = 'emergency' AND a.published_at > ?", [ctx.clock.now() - EMERGENCY_ACTIVE_MS]).map(a => shape(ctx, u, a));
+    // The scheduled posts this person looks after (see keeps()).
     const scheduled = auth.atLeast(u, 'director')
-      ? db.prepare(`SELECT a.* FROM announcements a WHERE a.status = 'scheduled' AND (? = 'hq' OR a.created_by = ?)
-          ORDER BY a.publish_at, a.id`).all(u.role, u.id).map(a => shape(ctx, u, a))
+      ? db.prepare("SELECT a.* FROM announcements a WHERE a.status = 'scheduled' ORDER BY a.publish_at, a.id").all()
+        .filter(a => keeps(ctx, u, a)).map(a => shape(ctx, u, a))
       : [];
     const pref = db.prepare('SELECT muted FROM announcement_prefs WHERE user_id = ?').get(u.id);
-    res.json({ posts, active_emergencies: active, scheduled, muted: !!(pref && pref.muted) });
+    // Where this person's News comes from (L60): a parent hears from their home and
+    // each linked student's location. HQ: null, every location.
+    const mine = [...ownLocationIds(ctx, u)].filter(Boolean);
+    const myLocations = u.role === 'hq' ? null : db.prepare(`SELECT name FROM locations WHERE id IN (${mine.map(() => '?').join(',') || 'NULL'}) ORDER BY name`)
+      .all(...mine).map(l => l.name);
+    res.json({ posts, active_emergencies: active, scheduled, muted: !!(pref && pref.muted), my_locations: myLocations });
   });
 
   // Sessions to target: those of the current and upcoming terms only (a term is
@@ -403,7 +439,7 @@ function router(ctx) {
 
   r.delete('/:id', auth.requireRole('director'), (req, res) => {
     const a = getPost(ctx, req.params.id);
-    if (!senderOrHq(req.user, a)) throw forbidden('Only the person who scheduled this post, or HQ, can cancel it.');
+    if (!keeps(ctx, req.user, a)) throw forbidden('Only the person who scheduled this post, or HQ, can cancel it.');
     if (a.status !== 'scheduled') throw conflict('not_scheduled', 'This post has already gone out, so it can no longer be cancelled.');
     db.prepare("UPDATE announcements SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND status = 'scheduled'").run(ctx.clock.now(), a.id);
     audit.log(ctx, req.user, 'announcement.cancel', { targetType: 'announcement', targetId: a.id });
@@ -412,7 +448,7 @@ function router(ctx) {
 
   r.get('/:id/stats', auth.requireRole('director'), (req, res) => {
     const a = getPost(ctx, req.params.id);
-    if (!senderOrHq(req.user, a)) throw forbidden('Only the sender, or HQ, can see delivery numbers.');
+    if (!keeps(ctx, req.user, a)) throw forbidden('Only the sender, or HQ, can see delivery numbers.');
     res.json(stats(ctx, a.id));
   });
 

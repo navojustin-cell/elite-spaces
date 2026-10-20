@@ -65,6 +65,9 @@ function slotsOn(ctx, loc, date, studentId = null) {
     .map(r => Object.assign(r, { date, start_at: time.toMs(loc, date, r.start_time), end_at: time.toMs(loc, date, r.end_time) }));
 }
 
+// The closure on `date` at `loc` (SC-3, D-19), or undefined.
+const closureOn = (ctx, loc, date) => ctx.db.prepare('SELECT * FROM closures WHERE location_id = ? AND date = ?').get(loc.id, date);
+
 // The slot whose check-in window (30 minutes before start until the end) holds `ms`.
 function slotNow(ctx, loc, studentId, ms) {
   return slotsOn(ctx, loc, time.localDate(loc, ms), studentId)
@@ -177,6 +180,14 @@ function noSessionMessage(ctx, loc, studentId, ms) {
     + ' Staff can check you in if needed.';
 }
 
+// A scan on a closure day (SC-3, D-19): the center is closed, so it says so, with the reason,
+// instead of "no session right now", and doesn't offer a staff check-in.
+function closedMessage(ctx, loc, studentId, ms, closure) {
+  const next = nextSlot(ctx, loc, studentId, ms);
+  return `${loc.name} is closed today${closure.reason ? ` (${closure.reason})` : ''}, so there are no sessions.`
+    + (next ? ` Your next one is ${when(loc, next.start_at, ms)}.` : '');
+}
+
 // ---------- parent notifications (CI-6) ----------
 
 function tellParents(ctx, student, visit, msg) {
@@ -197,7 +208,9 @@ function announceCheckin(ctx, { student, loc, visit, slot, staff = null }) {
 
 function announceCheckout(ctx, { student, loc, visit, staff = null }) {
   const who = firstName(student.name), at = clockTime(loc, visit.check_out_at);
-  const total = 'Total time ' + duration(minutes(visit.check_in_at, visit.check_out_at)) + '.';
+  // Names the session the visit counted toward, as the check-in notice does.
+  const session = visitSession(ctx, loc, visit);
+  const total = (session ? session.name + '. ' : '') + 'Total time ' + duration(minutes(visit.check_in_at, visit.check_out_at)) + '.';
   tellParents(ctx, student, visit, {
     kind: 'checkout',
     title: staff ? `${who} was checked out by staff at ${loc.name} · ${at}` : `${who} checked out of ${loc.name} · ${at}`,
@@ -239,9 +252,10 @@ function building(ctx, loc, ms) {
     return inNow ? Object.assign(row(v), { session_name: inNow.name, ends_at: inNow.end_at }) : row(v);
   });
   const hereIds = new Set(here.map(v => v.student_id));
-  // Left = students who have gone; someone who came back in shows only under Here.
-  const left = visits.filter(v => v.check_out_at != null && !hereIds.has(v.student_id)).map(row)
-    .sort((a, b) => b.check_out_at - a.check_out_at);
+  // Left = students who have gone, once each at their latest check-out; someone who came back in shows only under Here.
+  const gone = new Set(hereIds);
+  const left = visits.filter(v => v.check_out_at != null).sort((a, b) => b.check_out_at - a.check_out_at)
+    .filter(v => !gone.has(v.student_id) && gone.add(v.student_id)).map(row);
   // A slot a visit today covers (linked or overlapping, D-15a and R2) is not expected; a
   // student still here covers every slot that hasn't ended.
   const visited = s => visits.some(v => visitCovers(v, s));
@@ -332,7 +346,7 @@ function autoCheckout(ctx) {
 
 module.exports = {
   EARLY_MS, FLAG_REASON, getLocation, getVisit, qrDay, currentCode, codeExpiresAt, checkCode,
-  slotsOn, slotNow, nextSlot, membershipOk, startsLater, stayAfter, stayEnd, visitCovers, openVisit, createVisit, closeVisit, lastCheckout, visitSession,
-  firstName, clockTime, minutes, duration, dayName, when, noSessionMessage, announceCheckin, announceCheckout,
+  closureOn, slotsOn, slotNow, nextSlot, membershipOk, startsLater, stayAfter, stayEnd, visitCovers, openVisit, createVisit, closeVisit, lastCheckout, visitSession,
+  firstName, clockTime, minutes, duration, dayName, when, noSessionMessage, closedMessage, announceCheckin, announceCheckout,
   publicLocation, building, status, autoCheckout,
 };

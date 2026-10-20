@@ -49,6 +49,20 @@ function cleanLabel(raw) {
   return label;
 }
 
+// Item names are unique, ignoring case, across items in use and retired ones, so
+// staff never see two identical rating rows and a restore can't make one (L45).
+// `except` is the item being renamed or restored; `among` limits the check to
+// items in use (a restore).
+function assertNewLabel(db, label, except, among = 'all') {
+  const key = label.toLowerCase();
+  const same = db.prepare('SELECT id, label, active FROM note_items WHERE id != ? ORDER BY active DESC, id').all(except || 0)
+    .find(i => i.label.toLowerCase() === key && (among === 'all' || i.active));
+  if (!same) return;
+  throw conflict('duplicate_label', same.active
+    ? `"${same.label}" is already on the checklist. Give the item a different name.`
+    : `"${same.label}" is a retired item. Restore it instead of adding it again.`);
+}
+
 // The checklist new notes use, in order. Retired items stay in the table
 // (active = 0) so posted notes and the audit log still make sense.
 const currentItems = db => db.prepare('SELECT id, label, position FROM note_items WHERE active = 1 ORDER BY position, id').all();
@@ -139,6 +153,7 @@ module.exports = {
 
     r.post('/items', auth.requireRole('hq'), (req, res) => {
       const label = cleanLabel((req.body || {}).label);
+      assertNewLabel(db, label);
       const now = ctx.clock.now();
       const id = tx(db, () => {
         const next = db.prepare('SELECT COALESCE(MAX(position), 0) + 1 AS p FROM note_items').get().p;
@@ -174,6 +189,8 @@ module.exports = {
       if (item.active && !active && db.prepare('SELECT SUM(active) AS n FROM note_items').get().n <= 1) {
         throw bad('last_item', 'Keep at least one item on the checklist.');
       }
+      if (label !== item.label) assertNewLabel(db, label, item.id);
+      else if (active && !item.active) assertNewLabel(db, label, item.id, 'active');
       tx(db, () => {
         db.prepare('UPDATE note_items SET label = ?, active = ?, updated_by = ?, updated_at = ? WHERE id = ?')
           .run(label, active, req.user.id, ctx.clock.now(), item.id);

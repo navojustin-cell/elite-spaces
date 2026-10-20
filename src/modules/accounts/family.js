@@ -5,7 +5,8 @@
 //
 // Public (no sign-in):
 //   GET  /public/locations        names of active locations, for the sign-up picker
-//   POST /signup                  { name, email, phone, password, location_id } -> parent account, signed in
+//   POST /signup                  { name, email, phone, password, location_id } -> parent account, signed in.
+//                                 An email already in use gets one neutral answer, whoever holds it (L53)
 //   GET  /invites/:code           what an invite is for (email masked)
 //   POST /invites/accept          { code, password, email?, name?, phone? }
 //                                 student: sets their password; the link stays pending until a parent approves.
@@ -18,7 +19,8 @@
 //                                 students already has an open invite to that email (use resend), and refused
 //                                 with one neutral answer for an email that already belongs to an account
 //                                 or that an open guardian invite from me or a co-guardian was sent to
-//   POST /students/:id/approve    activate a student who accepted their invite
+//   POST /students/:id/approve    activate a student who accepted their invite; the other parents are told, and
+//                                 the "accepted your invite" items stop asking for approval (L48)
 //   POST /guardians/invite        { name, email } -> one-time code for a second guardian; refused for my own
 //                                 student's email, a co-guardian's, or while the family has an open invite to that email
 //   POST /invites/join            { code } -> an existing parent joins the family the invite came from
@@ -125,6 +127,11 @@ const andList = names => (names.length < 3 ? names.join(' and ') : names.slice(0
 const emailUnavailable = fixed => conflict('email_unavailable', 'Already have an account? Sign in first, then open this invite again. '
   + (fixed ? 'If not, ask for a new invite to a different email.' : 'If not, use a different email.'));
 
+// Sign-up's answer for an email someone already uses: the same words whoever
+// holds it (a parent, a student, staff, HQ, a deactivated account), and never
+// "has an account", like the invite screen's (L53).
+const signupUnavailable = () => conflict('email_unavailable', 'Already have an account? Sign in instead. If not, use a different email.');
+
 const invalidInvite = () => new AppError(404, 'invite_invalid', "That invite code isn't valid. Check it and try again, or ask for a new invite.");
 
 // An invite that can still be used, found by its code.
@@ -196,10 +203,14 @@ function acceptStudent(ctx, row, body, pw) {
   });
   const parents = db.prepare("SELECT parent_id FROM family_links WHERE student_id = ? AND status = 'pending'").all(student.id).map(r => r.parent_id);
   const first = u.firstName(student.name);
-  notify.send(ctx, parents, {
-    kind: 'account_student_accepted', title: `${first} accepted your invite`,
-    body: `Approve ${first} in Family so they can sign in to ELITE Spaces.`, refType: 'user', refId: student.id,
-  });
+  // "your invite" only to the parent who sent it; a co-guardian reads whose it was (L50).
+  const sender = u.firstName((auth.getUser(ctx, row.invited_by) || {}).name);
+  for (const [to, whose] of [[parents.filter(id => id === row.invited_by), 'your'], [parents.filter(id => id !== row.invited_by), sender + "'s"]]) {
+    notify.send(ctx, to, {
+      kind: 'account_student_accepted', title: `${first} accepted ${whose} invite`,
+      body: `Approve ${first} in Family so they can sign in to ELITE Spaces.`, refType: 'user', refId: student.id,
+    });
+  }
   return { kind: 'student', status: 'awaiting_approval', name: student.name, email: addr };
 }
 
@@ -217,6 +228,14 @@ function acceptGuardian(ctx, row, by, body, pw) {
   const user = auth.getUser(ctx, id);
   notifyJoined(ctx, row, user);
   return { kind: 'guardian', user };
+}
+
+// Once a parent approves or declines a student, the "accepted your invite"
+// items about that student stop asking anyone to approve: `body` says what
+// happened, and they are marked read.
+function settleAccepted(db, studentId, body, now) {
+  db.prepare(`UPDATE notifications SET body = ?, read_at = COALESCE(read_at, ?)
+    WHERE kind = 'account_student_accepted' AND ref_type = 'user' AND ref_id = ?`).run(body, now, studentId);
 }
 
 // ---------- the parent's family screen ----------
@@ -265,11 +284,11 @@ function routes(r, ctx) {
     const pw = u.password(b.password);
     const loc = db.prepare('SELECT id FROM locations WHERE id = ? AND active = 1').get(Number(b.location_id) || 0);
     if (!loc) throw bad('location', 'Choose your home location.');
-    if (u.emailTaken(db, addr)) throw conflict('email_taken', 'That email already has an account. Sign in instead, or use a different email.');
+    if (u.emailTaken(db, addr)) throw signupUnavailable();
     const id = Number(db.prepare(`INSERT INTO users (role, name, email, phone, password_hash, location_id, created_at)
       VALUES ('parent',?,?,?,?,?,?)`).run(name, addr, phone, auth.hashPassword(pw), loc.id, ctx.clock.now()).lastInsertRowid);
-    const token = auth.startSession(ctx, res, id);
-    res.status(201).json({ user: auth.getUser(ctx, id), token });
+    auth.startSession(ctx, res, id);
+    res.status(201).json({ user: auth.getUser(ctx, id) });
   });
 
   r.get('/invites/:code', (req, res) => {
@@ -288,7 +307,7 @@ function routes(r, ctx) {
     const pw = u.password(b.password);
     if (row.kind === 'student') return res.json(acceptStudent(ctx, row, b, pw));
     const out = acceptGuardian(ctx, row, by, b, pw);
-    out.token = auth.startSession(ctx, res, out.user.id);
+    auth.startSession(ctx, res, out.user.id);
     res.status(201).json(out);
   });
 
@@ -344,10 +363,21 @@ function routes(r, ctx) {
       throw conflict('not_accepted', `${first} hasn't accepted the invite yet. Share the invite code so they can set a password first.`);
     }
     const now = ctx.clock.now();
-    db.prepare("UPDATE family_links SET status = 'active', approved_at = ? WHERE student_id = ? AND status = 'pending'").run(now, sid);
+    // L48: the other parents waiting on this student are told who approved, and
+    // every "accepted your invite" item stops asking, as a decline does.
+    const coParents = activeParents(db, db.prepare("SELECT parent_id FROM family_links WHERE student_id = ? AND status = 'pending'")
+      .all(sid).map(r => r.parent_id).filter(pid => pid !== req.user.id));
+    tx(db, () => {
+      db.prepare("UPDATE family_links SET status = 'active', approved_at = ? WHERE student_id = ? AND status = 'pending'").run(now, sid);
+      settleAccepted(db, sid, `${req.user.name} approved ${first}, so there's nothing left to approve.`, now);
+    });
     notify.send(ctx, [sid], {
       kind: 'account_approved', title: "You're all set",
       body: `${u.firstName(req.user.name)} approved your account. Welcome to ELITE Spaces.`, refType: 'user', refId: sid,
+    });
+    notify.send(ctx, coParents, {
+      kind: 'account_student_approved', title: `${u.firstName(req.user.name)} approved ${first}`,
+      body: `${first} can sign in to ELITE Spaces now.`, refType: 'user', refId: sid,
     });
     res.json({ ok: true, student: { id: sid, name: student.name, state: 'active' } });
   });
@@ -402,10 +432,7 @@ function routes(r, ctx) {
         db.prepare('UPDATE users SET active = 0, email = NULL, password_hash = NULL WHERE id = ?').run(row.user_id);
       }
       if (declined) {
-        // The "accepted your invite" items stop asking anyone to approve.
-        db.prepare(`UPDATE notifications SET body = ?, read_at = COALESCE(read_at, ?)
-          WHERE kind = 'account_student_accepted' AND ref_type = 'user' AND ref_id = ?`)
-          .run(`${req.user.name} declined ${first}, so there's nothing to approve.`, now, row.user_id);
+        settleAccepted(db, row.user_id, `${req.user.name} declined ${first}, so there's nothing to approve.`, now);
       }
     });
     if (declined) {

@@ -9,6 +9,7 @@ const db = require('./db');
 const { createClock } = require('./clock');
 const auth = require('./auth');
 const notify = require('./notify');
+const push = require('./push');
 const { AppError, forbidden } = require('./errors');
 const MODULES = require('./modules');
 
@@ -19,19 +20,25 @@ function createApp({ dbFile = ':memory:', now = null, dev = false, cookieName = 
   const clock = createClock(now);
   const ctx = { db: db.open(dbFile, () => clock.now()), clock, sessions: new Map(), dev, cookieName };
   const app = express();
+  // Behind a hosting proxy (Render) that ends HTTPS: trust its X-Forwarded-Proto
+  // so req.secure is right and the sign-in cookie gets Secure (auth.startSession).
+  app.set('trust proxy', 1);
+  // Uptime check for the host: no sign-in, no database work.
+  app.get('/healthz', (_req, res) => res.json({ ok: true }));
   app.use(express.json({ limit: '256kb' }));
   app.use(auth.attachUser(ctx));
 
   // ---- auth ----
   app.post('/api/auth/login', (req, res) => {
     const { user } = auth.login(ctx, req.body.email, req.body.password);
-    const token = auth.startSession(ctx, res, user.id);
-    res.json({ user, token });
+    // The httpOnly cookie is the session; the token never goes in the body (L64).
+    auth.startSession(ctx, res, user.id);
+    res.json({ user });
   });
   app.post('/api/auth/logout', (req, res) => {
     const token = auth.sessionToken(ctx, req);
     if (token) ctx.sessions.delete(token);
-    res.clearCookie(ctx.cookieName).json({ ok: true });
+    res.clearCookie(ctx.cookieName, auth.cookieOptions(req)).json({ ok: true });
   });
   // clock_fixed: the dev clock is pinned, so the app should use `now` rather than its own clock.
   app.get('/api/auth/me', auth.requireRole(), (req, res) => {
@@ -57,6 +64,16 @@ function createApp({ dbFile = ':memory:', now = null, dev = false, cookieName = 
     const fn = (uid, row) => { if (uid === req.user.id) res.write('data: ' + JSON.stringify(row) + '\n\n'); };
     notify.listeners.add(fn);
     req.on('close', () => notify.listeners.delete(fn));
+  });
+
+  // ---- web push (src/push.js): each signed-in user manages only their own browsers ----
+  app.get('/api/push/key', auth.requireRole(), (_req, res) => res.json({ publicKey: push.vapid(ctx).publicKey }));
+  app.post('/api/push/subscribe', auth.requireRole(), (req, res) => {
+    push.subscribe(ctx, req.user.id, req.body);
+    res.json({ ok: true });
+  });
+  app.post('/api/push/unsubscribe', auth.requireRole(), (req, res) => {
+    res.json({ ok: true, removed: push.unsubscribe(ctx, req.user.id, req.body && req.body.endpoint) });
   });
 
   // ---- locations visible to the caller ----
@@ -118,4 +135,15 @@ function runJobs(ctx) {
 // unless ELITE_DEV=1 is set explicitly (R9). server.js reads it through here.
 const devFromEnv = env => env.ELITE_DEV === '1';
 
-module.exports = { createApp, runJobs, devFromEnv };
+// A new database gets the schema and nothing else. Demo data goes in only when
+// ELITE_SEED_DEMO=1 asks for it AND the database has no accounts yet, so the
+// seed (which starts from a blank file) can never wipe real data.
+function needsDemoSeed(dbFile, env) {
+  if (env.ELITE_SEED_DEMO !== '1') return false;
+  if (!dbFile || dbFile === ':memory:' || !require('fs').existsSync(dbFile)) return true;
+  const { DatabaseSync } = require('node:sqlite');
+  const d = new DatabaseSync(dbFile);
+  try { return !d.prepare('SELECT 1 FROM users LIMIT 1').get(); } catch (_) { return true; } finally { d.close(); }
+}
+
+module.exports = { createApp, runJobs, devFromEnv, needsDemoSeed };

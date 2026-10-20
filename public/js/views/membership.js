@@ -90,6 +90,10 @@
     render(el, params) { return params[0] ? renderEdit(el, Number(params[0])) : renderRoster(el); },
   });
 
+  // Membership notices in the Inbox open Members for staff and Home (the membership card) for families.
+  App.inboxLink('membership', 'members');
+  App.inboxLink('membership', 'home');
+
   // Screen state kept while moving between the roster and an edit screen.
   let filter = 'all', query = '', hqLocation = null;
 

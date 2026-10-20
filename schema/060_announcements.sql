@@ -61,3 +61,11 @@ CREATE TABLE IF NOT EXISTS announcement_prefs (
   muted         INTEGER NOT NULL DEFAULT 0,
   updated_at    INTEGER NOT NULL
 );
+
+-- A scheduled post whose sender had left before it went out (a director deactivated,
+-- made staff or moved to another location; an HQ account deactivated): it went out
+-- under its location's name, not theirs (HQ posts say ELITE HQ either way).
+-- One row per such post, written when it is published.
+CREATE TABLE IF NOT EXISTS announcement_unsigned (
+  announcement_id INTEGER PRIMARY KEY REFERENCES announcements(id)
+);

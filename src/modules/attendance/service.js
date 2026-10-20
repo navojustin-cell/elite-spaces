@@ -314,12 +314,17 @@ function absences(ctx, { studentId = null, locationId = null, sessionId = null, 
     || a.student_name.localeCompare(b.student_name));
 }
 
+// Decimal hours are rounded to hundredths once, per visit; every hours total is
+// the sum of the visit hours it covers, so a column of hours adds up to its total
+// in every file and screen (L61). Minutes stay exact. Counted in whole hundredths.
+const hundredths = minutes => (minutes == null ? 0 : Math.round((minutes / 60) * 100));
+
 function totals(vs, abs) {
   const minutes = vs.reduce((sum, v) => sum + (v.minutes || 0), 0);
   return {
     visits: vs.length,
     minutes,
-    hours: Math.round((minutes / 60) * 100) / 100,
+    hours: vs.reduce((sum, v) => sum + hundredths(v.minutes), 0) / 100,
     absences: abs.length,
     // Everyone the log covers, as by_student lists them: absences only counts too.
     students: new Set([...vs, ...abs].map(r => r.student_id)).size,
@@ -338,16 +343,16 @@ function log(ctx, filter) {
 function byStudent(vs, abs) {
   const rows = new Map();
   const row = (id, name, location) => {
-    if (!rows.has(id)) rows.set(id, { student_id: id, student_name: name, locations: new Set(), visits: 0, minutes: 0, absences: 0 });
+    if (!rows.has(id)) rows.set(id, { student_id: id, student_name: name, locations: new Set(), visits: 0, minutes: 0, hundredths: 0, absences: 0 });
     const r = rows.get(id);
     r.locations.add(location);
     return r;
   };
-  for (const v of vs) { const r = row(v.student_id, v.student_name, v.location_name); r.visits++; r.minutes += v.minutes || 0; }
+  for (const v of vs) { const r = row(v.student_id, v.student_name, v.location_name); r.visits++; r.minutes += v.minutes || 0; r.hundredths += hundredths(v.minutes); }
   for (const a of abs) row(a.student_id, a.student_name, a.location_name).absences++;
-  return [...rows.values()].map(({ locations, ...r }) => Object.assign(r, {
-    location_name: [...locations].sort((a, b) => a.localeCompare(b)).join(', '), hours: Math.round((r.minutes / 60) * 100) / 100 }))
+  return [...rows.values()].map(({ locations, hundredths: cents, ...r }) => Object.assign(r, {
+    location_name: [...locations].sort((a, b) => a.localeCompare(b)).join(', '), hours: cents / 100 }))
     .sort((a, b) => a.student_name.localeCompare(b.student_name) || a.student_id - b.student_id);
 }
 
-module.exports = { checkRange, rangeLabel, student, termsAt, period, presets, visits, absences, totals, log, byStudent };
+module.exports = { hundredths, checkRange, rangeLabel, student, termsAt, period, presets, visits, absences, totals, log, byStudent };

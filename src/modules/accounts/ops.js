@@ -10,7 +10,7 @@
 //   POST  /staff/:id/reactivate        same scope
 //   POST  /staff/:id/reset-password    same scope -> new temporary password (shown once)
 //   GET   /locations                   director+: my location (HQ: all), with its directors
-//   POST  /locations                   HQ: create a location
+//   POST  /locations                   HQ: create a location. Names are unique, ignoring case (L44)
 //   PATCH /locations/:id               HQ: any field; director: own location's radius, QR time and hours only (D-5).
 //                                      New hours must still cover every active session of a term that hasn't ended (R4)
 //   POST  /directors                   HQ: { name, email, phone?, location_id } -> director + temporary password
@@ -109,6 +109,13 @@ function locationFields(b, cur) {
   return out;
 }
 
+// L44: no two locations share a name, whatever the case (closed ones count:
+// HQ still lists them). `exceptId` is the location being renamed.
+function assertNameFree(db, name, exceptId = 0) {
+  const twin = db.prepare('SELECT name FROM locations WHERE lower(trim(name)) = lower(?) AND id != ?').get(name, exceptId);
+  if (twin) throw conflict('location_name_taken', `There's already a location named ${twin.name}. Choose a different name.`);
+}
+
 // 'HH:MM' -> '9:00 AM'.
 const ampm = hhmm => { const [h, m] = hhmm.split(':').map(Number); return `${(h + 11) % 12 + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
 
@@ -205,6 +212,7 @@ function routes(r, ctx) {
 
   r.post('/locations', auth.requireRole('hq'), (req, res) => {
     const f = locationFields(req.body || {}, null);
+    assertNameFree(db, f.name);
     const id = tx(db, () => {
       const id = Number(db.prepare(`INSERT INTO locations (name, timezone, address, lat, lng, geofence_m, qr_rotate_at, open_time, close_time, qr_secret, active, created_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(f.name, f.timezone, f.address, f.lat, f.lng, f.geofence_m, f.qr_rotate_at, f.open_time, f.close_time,
@@ -227,6 +235,7 @@ function routes(r, ctx) {
     const f = locationFields(b, cur);
     const changes = {};
     for (const k of [...DIRECTOR_FIELDS, ...HQ_FIELDS]) if (f[k] !== cur[k]) changes[k] = [cur[k], f[k]];
+    if (changes.name) assertNameFree(db, f.name, cur.id);
     if (changes.open_time || changes.close_time) assertSessionsFit(ctx, cur.id, f);
     if (Object.keys(changes).length) {
       tx(db, () => {

@@ -293,10 +293,22 @@
     const r = await App.run(btn, () => App.api.post(A + '/invites/' + id + '/resend'));
     if (r) { flash = { kind: 'share', res: r }; App.refresh(); }
   }
-  async function cancelInvite(id, done) {
+  // After a Decline or Cancel invite the row is gone: focus goes to that list's
+  // heading (`headingId`), not the top of the page.
+  async function cancelInvite(id, done, headingId) {
     await App.api.post(A + '/invites/' + id + '/cancel');
     App.toast(done);
-    App.refresh();
+    await App.refresh();
+    const head = document.getElementById(headingId);
+    if (head) head.focus();
+  }
+  // "your invite" only for the parent who sent it; a co-guardian reads whose it was (L50).
+  function whoseInvite(s, guardians) {
+    const by = s.invite && s.invite.invited_by;
+    if (!by) return 'the invite';
+    if (by === App.me.user.id) return 'your invite';
+    const g = (guardians || []).find(x => x.id === by);
+    return g ? first(g.name) + "'s invite" : 'the invite';
   }
   // A second invite to an email the family already invited is refused: offer
   // that invite's Resend right under the message.
@@ -329,7 +341,7 @@
         `When ${who} sets a password, you'll get a notification. Approve them here and they can sign in.`));
   }
 
-  function studentItem(s) {
+  function studentItem(s, guardians) {
     const actions = h('div', { class: 'row', style: 'margin-top:.5rem' });
     const name1 = first(s.name);
     const invId = s.invite && s.invite.id;
@@ -341,20 +353,20 @@
         h('button', { class: 'btn btn-ghost', type: 'button', onclick: e => confirmThen(e.currentTarget, actions, {
           title: `Decline ${name1}?`, body: "Their account won't be created and the invite stops working.",
           confirmLabel: 'Decline ' + name1, cancelLabel: 'Keep waiting',
-        }, () => cancelInvite(invId, name1 + ' was declined.')) }, 'Decline'));
+        }, () => cancelInvite(invId, name1 + ' was declined.', 'ac-st')) }, 'Decline ' + name1));
     } else if ((s.state === 'invited' || s.state === 'invite_expired') && invId) {
       actions.append(
         h('button', { class: 'btn', type: 'button', onclick: e => resend(e.currentTarget, invId) }, s.state === 'invite_expired' ? 'Send a new code' : 'Resend'),
         h('button', { class: 'btn btn-ghost', type: 'button', onclick: e => confirmThen(e.currentTarget, actions, {
           title: `Cancel ${name1}'s invite?`, body: `The code stops working and ${name1} won't be added.`,
           confirmLabel: `Cancel ${name1}'s invite`, cancelLabel: 'Keep invite',
-        }, () => cancelInvite(invId, 'Invite to ' + name1 + ' cancelled.')) }, 'Cancel invite'));
+        }, () => cancelInvite(invId, 'Invite to ' + name1 + ' cancelled.', 'ac-st')) }, 'Cancel ' + name1 + "'s invite"));
     }
     const contact = [s.email || (s.invite && s.invite.email), s.phone || (s.invite && s.invite.phone)].filter(Boolean).join(' · ') || null;
     return h('li', null, avatar(s.name), h('div', { class: 'grow' },
       h('div', { class: 'row between' }, h('strong', null, s.name), badge(state[0], state[1])),
       contact && h('div', { class: 'muted small' }, contact),
-      s.state === 'awaiting_approval' && h('p', { class: 'small', style: 'margin:.35rem 0 0' }, `${name1} accepted your invite. Approve them so they can sign in.`),
+      s.state === 'awaiting_approval' && h('p', { class: 'small', style: 'margin:.35rem 0 0' }, `${name1} accepted ${whoseInvite(s, guardians)}. Approve them so they can sign in.`),
       s.state === 'invite_expired' && h('p', { class: 'small', style: 'margin:.35rem 0 0' }, 'The code expired before it was used. Send a new one.'),
       actions.childNodes.length ? actions : null));
   }
@@ -450,9 +462,9 @@
       // Students
       const stSlot = h('div');
       const [inviteBtn] = slotButtons(stSlot, [['Invite a student', close => inviteStudentForm(close, data.students), 'btn-primary']]);
-      const stList = h('ul', { class: 'list' }, ...data.students.map(studentItem));
+      const stList = h('ul', { class: 'list' }, ...data.students.map(s => studentItem(s, data.guardians)));
       el.append(h('section', { class: 'card', 'aria-labelledby': 'ac-st' },
-        h('div', { class: 'row between' }, h('h2', { id: 'ac-st', style: 'margin:0' }, 'Students'), inviteBtn),
+        h('div', { class: 'row between' }, h('h2', { id: 'ac-st', tabindex: '-1', style: 'margin:0' }, 'Students'), inviteBtn),
         data.students.length ? stList
           : h('p', { class: 'muted', style: 'margin:.75rem 0 0' }, "No students yet. Invite your student by email or phone. They'll set their own password, and you approve them before they can sign in."),
         stSlot));
@@ -477,14 +489,14 @@
             h('button', { class: 'btn btn-ghost', type: 'button', onclick: e => confirmThen(e.currentTarget, actions, {
               title: `Cancel the invite to ${inv.name}?`, body: 'The code stops working.',
               confirmLabel: 'Cancel invite to ' + first(inv.name), cancelLabel: 'Keep invite',
-            }, () => cancelInvite(inv.id, 'Invite to ' + first(inv.name) + ' cancelled.')) }, 'Cancel invite'));
+            }, () => cancelInvite(inv.id, 'Invite to ' + first(inv.name) + ' cancelled.', 'ac-gu')) }, 'Cancel invite to ' + first(inv.name)));
         gList.append(h('li', null, avatar(inv.name), h('div', { class: 'grow' },
           h('div', { class: 'row between' }, h('strong', null, inv.name),
             inv.expired ? badge('badge-danger', 'Invite expired') : badge('', 'Invited ' + App.fmtDate(inv.created_at, { weekday: undefined }))),
           h('div', { class: 'muted small' }, inv.email), actions)));
       }
       el.append(h('section', { class: 'card', 'aria-labelledby': 'ac-gu' },
-        h('div', { class: 'row between' }, h('h2', { id: 'ac-gu', style: 'margin:0' }, 'Guardians'), gBtn),
+        h('div', { class: 'row between' }, h('h2', { id: 'ac-gu', tabindex: '-1', style: 'margin:0' }, 'Guardians'), gBtn),
         h('p', { class: 'muted small', style: 'margin:.35rem 0 0' }, 'Every guardian sees the same students, check-ins, notes and attendance, and gets the same notifications.'),
         gList, gSlot));
 
@@ -492,9 +504,10 @@
     },
   });
 
-  // Inbox items about the family (a student accepted or was declined, a guardian
-  // joined) open Family; a new director's opens their location settings.
-  App.inboxLink('user', n => /^account_(student|guardian)_/.test(n.kind) ? 'family' : null);
+  // Inbox items about the family (a student accepted, was approved or declined, a
+  // guardian joined) open Family; a student's "You're all set" opens Home; a new
+  // director's opens their location settings.
+  App.inboxLink('user', n => /^account_(student|guardian)_/.test(n.kind) ? 'family' : n.kind === 'account_approved' ? 'home' : null);
   App.inboxLink('location', 'people/location');
 
   // Home: students waiting for approval, or a first step for a brand-new family.
@@ -507,8 +520,8 @@
         box.append(h('section', { class: 'card', 'aria-labelledby': 'ac-wait' },
           h('h2', { id: 'ac-wait' }, waiting.length === 1 ? first(waiting[0].name) + ' is waiting for your approval' : 'Students are waiting for your approval'),
           h('ul', { class: 'list' }, ...waiting.map(s => h('li', null, avatar(s.name),
-            h('div', { class: 'grow' }, h('strong', null, s.name), h('div', { class: 'muted small' }, 'Accepted your invite' + (s.email ? ' · ' + s.email : ''))),
-            h('button', { class: 'btn btn-primary', type: 'button', onclick: e => approve(e.currentTarget, s) }, 'Approve'))))));
+            h('div', { class: 'grow' }, h('strong', null, s.name), h('div', { class: 'muted small' }, 'Accepted ' + whoseInvite(s, data.guardians) + (s.email ? ' · ' + s.email : ''))),
+            h('button', { class: 'btn btn-primary', type: 'button', onclick: e => approve(e.currentTarget, s) }, 'Approve ' + first(s.name)))))));
       } else if (!data.students.length) {
         box.append(h('section', { class: 'card', 'aria-labelledby': 'ac-first' },
           h('h2', { id: 'ac-first' }, 'Add your first student'),
@@ -605,7 +618,7 @@
           isHq && h('td', null, s.location_name),
           h('td', null, badge(st[0], st[1])),
           h('td', null, s.parents.length ? h('ul', { class: 'list' }, ...s.parents.map(p => h('li', { style: 'padding:.25rem 0;border:0;display:block' },
-            h('div', null, p.name, p.link_status === 'pending' ? h('span', { class: 'muted small' }, ' (not approved yet)') : null),
+            h('div', null, p.name),
             h('div', { class: 'small ac-contact' },
               p.phone && h('a', { href: 'tel:' + p.phone.replace(/[^\d+]/g, ''), 'aria-label': 'Call ' + p.name + ' at ' + p.phone }, p.phone),
               p.phone && p.email ? ' · ' : '',
@@ -649,6 +662,12 @@
     top.append(addBtn);
     panel.append(top, addSlot, shown, out);
 
+    // The redrawn table: focus that person's first action, else the table itself.
+    function focusStaffRow(id) {
+      const row = id && out.querySelector('tr[data-staff="' + id + '"]');
+      const target = (row && row.querySelector('button')) || out.querySelector('.table-wrap');
+      if (target) target.focus();
+    }
     async function load() {
       const { staff } = await App.api.get(A + '/staff' + (isHq && hqLoc ? '?location_id=' + hqLoc : ''));
       if (!staff.length) {
@@ -677,7 +696,13 @@
             row.append(h('button', { class: 'btn btn-ghost', type: 'button', 'aria-label': 'Deactivate ' + s.name, onclick: e => confirmThen(e.currentTarget, row, {
               title: `Deactivate ${s.name}?`, body: "They're signed out now and can't sign in until the account is reactivated.",
               confirmLabel: 'Deactivate ' + first(s.name), cancelLabel: 'Keep active',
-            }, async () => { await App.api.post(A + '/staff/' + s.id + '/deactivate'); App.toast(s.name + ' was deactivated.'); await load(); }) }, 'Deactivate'));
+            }, async () => {
+              await App.api.post(A + '/staff/' + s.id + '/deactivate');
+              App.toast(s.name + ' was deactivated.');
+              const next = staff[staff.indexOf(s) + 1];
+              await load();
+              focusStaffRow(next && next.id);
+            }) }, 'Deactivate'));
           } else {
             row.append(h('button', { class: 'btn', type: 'button', 'aria-label': 'Reactivate ' + s.name, onclick: async e => {
               const r = await App.run(e.currentTarget, () => App.api.post(A + '/staff/' + s.id + '/reactivate'));
@@ -686,7 +711,7 @@
           }
           cell.append(row);
         }
-        tbody.append(h('tr', null,
+        tbody.append(h('tr', { 'data-staff': s.id },
           h('td', null, h('strong', null, s.name), h('div', { class: 'muted small' }, [s.email, s.phone].filter(Boolean).join(' · '))),
           isHq && h('td', null, s.location_name || '—'),
           h('td', null, s.role === 'director' ? 'Director' : 'Staff'),

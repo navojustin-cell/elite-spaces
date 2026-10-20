@@ -43,8 +43,10 @@ test(['AC-1'], 'a parent signs up from the sign-in screen, picks a home location
   assert.equal(r.body.user.email, 'rosa@family.test');
   assert.equal(r.body.user.phone, '555-0142');
   assert.equal(r.body.user.location_id, loc.id);
-  assert.match(r.headers.get('set-cookie') || '', /sid=/);
-  const me = await fetch(t.base + '/api/auth/me', { headers: { cookie: 'sid=' + r.body.token } }).then(x => x.json());
+  const sid = (r.headers.get('set-cookie') || '').match(/^sid=([0-9a-f]{48});/);
+  assert.ok(sid, 'signed in by the httpOnly cookie');
+  assert.equal(r.body.token, undefined, 'the session token is never in the body (L64)');
+  const me = await fetch(t.base + '/api/auth/me', { headers: { cookie: 'sid=' + sid[1] } }).then(x => x.json());
   assert.equal(me.user.id, r.body.user.id);
   assert.equal((await login(t, 'ROSA@family.test', 'goodpass1')).status, 200);
   const fam = await t.as(r.body.user).get(A + '/family');
@@ -66,7 +68,7 @@ test(['AC-1', 'NF-1'], 'sign-up always makes a parent, and refuses taken emails,
   const staff = t.fx.staff(loc);
   const taken = await t.anon.post(A + '/signup', Object.assign({}, base, { email: staff.email.toUpperCase() }));
   assert.equal(taken.status, 409);
-  assert.equal(taken.body.error, 'email_taken');
+  assert.equal(taken.body.error, 'email_unavailable'); // one neutral answer (L53); see the L53/L62 test below
   const again = await t.anon.post(A + '/signup', Object.assign({}, base, { email: 'SAM@family.test' }));
   assert.equal(again.status, 409);
   const fresh = Object.assign({}, base, { email: 'new@family.test' });
@@ -276,6 +278,7 @@ test(['AC-2'], 'a second guardian joins by email invite and sees the same studen
   assert.equal(mark.name, 'Mark Johnson');
   assert.equal(mark.location_id, loc.id);
   assert.match(acc.headers.get('set-cookie') || '', /sid=/);
+  assert.deepEqual(Object.keys(acc.body).sort(), ['kind', 'user'], 'the session token is never in the body (L64)');
   for (const s of f.students) {
     assert.equal(auth.canSeeStudent(t.ctx, mark, s.id), true);
     assert.deepEqual(notify.parentsOf(t.ctx, s.id).sort(), [f.parent.id, mark.id].sort());
@@ -1085,4 +1088,113 @@ test(['AC-5'], 'R4: location hours can\'t be changed so that an active session o
   assert.match(r.body.message, /^Last Day runs 4:00 PM–5:00 PM/);
   // a change that leaves the hours alone is never held back
   assert.equal((await t.as(dir).patch(A + '/locations/' + a.id, { geofence_m: 200 })).status, 200);
+});
+
+// ---------------------------------------------------------------- sweep 2026-10-14, round 2
+
+test(['AC-1', 'NF-1'], 'L53/L62: sign-up gives one neutral answer for an email in use, whoever holds it, and never says it has an account', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const fam = t.fx.family(loc);
+  const holders = [fam.parent.email, fam.student.email, t.fx.staff(loc).email, t.fx.staff(loc, { active: 0 }).email,
+    t.fx.director(loc).email, t.fx.hq().email, fam.parent.email.toUpperCase(), ' ' + fam.student.email.toUpperCase() + ' '];
+  const users = () => t.db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+  const n0 = users();
+  const answers = [];
+  for (const email of holders) {
+    const r = await t.anon.post(A + '/signup', { name: 'Probe Person', email, phone: '555-0101', password: 'whatever123', location_id: loc.id });
+    answers.push({ status: r.status, body: r.body, cookie: r.headers.get('set-cookie') });
+  }
+  // a student's, a parent's, staff, a deactivated account, a director, HQ: the same status, words and headers
+  for (const a of answers) assert.deepEqual(a, answers[0]);
+  assert.deepEqual(answers[0], { status: 409, cookie: null, body: { error: 'email_unavailable',
+    message: 'Already have an account? Sign in instead. If not, use a different email.' } });
+  assert.doesNotMatch(JSON.stringify(answers[0].body), /already has|exists|taken|in use|staff|parent|student|director/i);
+  assert.equal(users(), n0);
+  // the same kind of answer the invite screen gives (email_unavailable), not a sign-up-only code
+  const inv = await inviteStudent(t, fam.parent, { name: 'Ana Diaz', phone: '555-0102' });
+  const viaInvite = await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12', email: fam.parent.email });
+  assert.deepEqual([viaInvite.status, viaInvite.body.error], [answers[0].status, answers[0].body.error]);
+  // a free email still signs up and signs in
+  const ok = await t.anon.post(A + '/signup', { name: 'New Parent', email: 'new@family.test', phone: '555-0103', password: 'whatever123', location_id: loc.id });
+  assert.equal(ok.status, 201);
+  assert.match(ok.headers.get('set-cookie') || '', /sid=/);
+});
+
+test(['AC-3', 'AC-2'], 'L48: approving a student tells the other guardians, and every "accepted your invite" item about that student stops asking', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const tara = parentAt(t, loc, { name: 'Tara Okafor' });
+  const g = await inviteGuardian(t, tara, { name: 'Kemi Okafor', email: 'kemi@family.test' });
+  const kemi = (await t.anon.post(A + '/invites/accept', { code: g.code, password: 'kemipass1' })).body.user;
+  const kids = {};
+  for (const [name, email] of [['Ada Okafor', 'ada@kid.test'], ['Ben Okafor', 'ben@kid.test'], ['Cal Okafor', 'cal@kid.test']]) {
+    const inv = await inviteStudent(t, tara, { name, email });
+    assert.equal((await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12' })).status, 200);
+    kids[name.split(' ')[0]] = inv.invite.user_id;
+  }
+  const accepted = (who, sid) => t.fx.notifications(who, 'account_student_accepted').find(n => n.ref_id === sid);
+  const approvedNotes = who => t.fx.notifications(who, 'account_student_approved').map(n => [n.title, n.body, n.ref_type, n.ref_id]);
+  assert.equal((await t.as(tara).post(A + '/students/' + kids.Ada + '/approve')).status, 200);
+  assert.equal((await t.as(kemi).post(A + '/students/' + kids.Ben + '/approve')).status, 200);
+  for (const who of [tara, kemi]) {
+    assert.equal(accepted(who, kids.Ada).body, "Tara Okafor approved Ada, so there's nothing left to approve.");
+    assert.equal(accepted(who, kids.Ada).read_at, DEFAULT_NOW);
+    assert.equal(accepted(who, kids.Ben).body, "Kemi Okafor approved Ben, so there's nothing left to approve.");
+    assert.equal(accepted(who, kids.Ben).read_at, DEFAULT_NOW);
+    // Cal still waits, and his item still asks
+    assert.equal(accepted(who, kids.Cal).body, 'Approve Cal in Family so they can sign in to ELITE Spaces.');
+    assert.equal(accepted(who, kids.Cal).read_at, null);
+  }
+  // the other guardian hears who approved; the one who approved does not
+  assert.deepEqual(approvedNotes(kemi), [['Tara approved Ada', 'Ada can sign in to ELITE Spaces now.', 'user', kids.Ada]]);
+  assert.deepEqual(approvedNotes(tara), [['Kemi approved Ben', 'Ben can sign in to ELITE Spaces now.', 'user', kids.Ben]]);
+});
+
+test(['AC-3', 'AC-2'], 'L50: only the parent who sent a student invite is told "accepted your invite"; a co-guardian reads whose invite it was', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const tara = parentAt(t, loc, { name: 'Tara Okafor' });
+  const g = await inviteGuardian(t, tara, { name: 'Kemi Okafor', email: 'kemi@family.test' });
+  const kemi = (await t.anon.post(A + '/invites/accept', { code: g.code, password: 'kemipass1' })).body.user;
+  const ben = await inviteStudent(t, tara, { name: 'Ben Okafor', email: 'ben@kid.test' });
+  const ada = await inviteStudent(t, kemi, { name: 'Ada Okafor', email: 'ada@kid.test' });
+  for (const inv of [ben, ada]) assert.equal((await t.anon.post(A + '/invites/accept', { code: inv.code, password: 'kidpass12' })).status, 200);
+  const titles = who => t.fx.notifications(who, 'account_student_accepted').map(n => [n.ref_id, n.title, n.body]);
+  assert.deepEqual(titles(tara), [
+    [ben.invite.user_id, 'Ben accepted your invite', 'Approve Ben in Family so they can sign in to ELITE Spaces.'],
+    [ada.invite.user_id, "Ada accepted Kemi's invite", 'Approve Ada in Family so they can sign in to ELITE Spaces.'],
+  ]);
+  assert.deepEqual(titles(kemi), [
+    [ben.invite.user_id, "Ben accepted Tara's invite", 'Approve Ben in Family so they can sign in to ELITE Spaces.'],
+    [ada.invite.user_id, 'Ada accepted your invite', 'Approve Ada in Family so they can sign in to ELITE Spaces.'],
+  ]);
+});
+
+test(['AC-5'], 'L44: no two locations share a name, ignoring case and spaces; a location can still be renamed in another case', async () => {
+  const t = await makeApp();
+  const hq = t.fx.hq();
+  const irvine = t.fx.location({ name: 'Irvine' });
+  const old = t.fx.location({ name: 'Old Town' });
+  t.db.prepare('UPDATE locations SET active = 0 WHERE id = ?').run(old.id);
+  const body = name => ({ name, timezone: 'America/Los_Angeles', lat: 33, lng: -117 });
+  for (const name of ['irvine ', 'Irvine', 'IRVINE', 'old town']) {
+    const r = await t.as(hq).post(A + '/locations', body(name));
+    assert.equal(r.status, 409, name);
+    assert.equal(r.body.error, 'location_name_taken', name);
+  }
+  assert.equal((await t.as(hq).post(A + '/locations', body('irvine '))).body.message, "There's already a location named Irvine. Choose a different name.");
+  assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM locations').get().n, 2);
+  const tustin = await t.as(hq).post(A + '/locations', body('Tustin'));
+  assert.equal(tustin.status, 201);
+  // renaming onto another location's name is refused too
+  const clash = await t.as(hq).patch(A + '/locations/' + tustin.body.location.id, { name: ' irvine' });
+  assert.equal(clash.status, 409);
+  assert.equal(clash.body.error, 'location_name_taken');
+  assert.equal(t.db.prepare('SELECT name FROM locations WHERE id = ?').get(tustin.body.location.id).name, 'Tustin');
+  // its own name, in any case, is fine, and so is a save that keeps the name
+  assert.equal((await t.as(hq).patch(A + '/locations/' + irvine.id, { name: 'IRVINE' })).body.location.name, 'IRVINE');
+  assert.equal((await t.as(hq).patch(A + '/locations/' + irvine.id, { name: 'IRVINE', geofence_m: 300 })).status, 200);
+  const names = (await t.as(hq).get(A + '/locations')).body.locations.map(l => l.name.toLowerCase());
+  assert.deepEqual(names, [...new Set(names)]);
 });

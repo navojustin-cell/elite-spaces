@@ -62,6 +62,10 @@
   const draftKey = () => 'elite.announcements.draft.' + App.me.user.id;
   const hiddenKey = () => 'elite.announcements.hidden.' + App.me.user.id;
 
+  // Where this person's News comes from, from the feed (L60): a parent with students
+  // at two locations hears from both. HQ gets the fallback.
+  const placeText = (f, fallback) => (f.my_locations && f.my_locations.length ? andList(f.my_locations) : fallback);
+
   function audienceText(p) {
     if (p.audience === 'session') return p.session ? 'Families in ' + sessionLabel(p.session) : 'Families in one session';
     return { families: 'All families', parents: 'Parents only', students: 'Students only', everyone: 'Everyone at the location' }[p.audience] || '';
@@ -74,9 +78,9 @@
   }
 
   // v1 has no reply thread, so every post tells families where to take questions.
-  function contactLine(p) {
+  function contactLine(p, family = isFamily()) {
     const l = p.locations[0];
-    if (!l || !isFamily()) return null;
+    if (!l || !family) return null;
     return h('p', { class: 'ann-meta' }, 'Questions? Ask the ' + l.name + ' front desk' + (l.address ? ' at ' + l.address : '') + '.');
   }
 
@@ -103,9 +107,19 @@
     return box;
   }
 
+  // Who an alert reached, for staff and HQ (L47): every location by name when this
+  // viewer knows them all, else how many.
+  function alertReach(p) {
+    if (p.location_count <= 1) return 'Sent to everyone at the location.';
+    return 'Sent to everyone at ' + (p.locations.length === p.location_count ? andList(p.locations.map(l => l.name)) : p.location_count + ' locations') + '.';
+  }
+
   // One post, as its readers see it. Emergency alerts are red, labeled and iconed (AN-5).
   // target: the post an Inbox item opened, focusable so the view can bring it into view.
-  function postCard(p, { pinned = false, onHide = null, target = false } = {}) {
+  // asFamily: draw the copy parents and students get, whoever is signed in (the review preview, L40).
+  function postCard(p, { pinned = false, onHide = null, target = false, asFamily = false } = {}) {
+    const family = asFamily || isFamily();
+    const ops = !asFamily && App.isOps();
     const meta = h('p', { class: 'ann-meta' }, fromText(p) + ' · ' + (p.when_text || App.fmtDateTime(p.published_at || p.publish_at, p.tz)));
     const at = target ? { tabindex: '-1', 'data-target': '' } : {};
     if (p.type === 'emergency') {
@@ -114,10 +128,11 @@
         h('h3', { style: 'margin:.2rem 0 0' }, p.title),
         h('p', { class: 'ann-body' }, p.body),
         meta,
-        contactLine(p),
-        App.isOps() && h('p', { class: 'ann-meta' }, 'Sent to everyone at the location. Nobody can mute emergency alerts.'),
+        contactLine(p, family),
+        ops && h('p', { class: 'ann-meta' }, alertReach(p) + ' Nobody can mute emergency alerts.'),
         p.stats && statsBlock(p),
-        onHide && h('div', { style: 'margin-top:.6rem' }, h('button', { class: 'btn', type: 'button', onclick: onHide, 'aria-label': 'Hide this alert from Home' }, 'Hide from Home')));
+        // The accessible name starts with the visible words, so voice control finds it (L59).
+        onHide && h('div', { style: 'margin-top:.6rem' }, h('button', { class: 'btn', type: 'button', onclick: onHide, 'aria-label': 'Hide from Home: ' + p.title }, 'Hide from Home')));
     }
     return h('article', Object.assign({ class: 'card', 'aria-label': p.title }, at),
       h('div', { class: 'ann-head' },
@@ -126,8 +141,8 @@
         h('h3', null, p.title)),
       h('p', { class: 'ann-body' }, p.body),
       meta,
-      App.isOps() && h('p', { class: 'ann-meta' }, 'Sent to: ' + audienceText(p)),
-      contactLine(p),
+      ops && h('p', { class: 'ann-meta' }, 'Sent to: ' + audienceText(p)),
+      contactLine(p, family),
       p.stats && statsBlock(p));
   }
 
@@ -135,7 +150,7 @@
   // focusId: the post an Inbox item opened (#/news/<id>).
   async function renderFeed(el, focusId = null) {
     const f = await App.api.get(API + '/feed' + (focusId ? '?limit=100' : ''));
-    const place = App.me.location ? App.me.location.name : 'every ELITE Spaces location';
+    const place = placeText(f, 'every ELITE Spaces location');
     el.append(h('div', { class: 'page-head' },
       h('div', null, h('h1', null, 'News'), h('p', null, isFamily() ? 'Announcements from ' + place + '.' : 'Announcements and alerts for ' + place + '.')),
       isComposer() && h('div', { class: 'ann-actions' },
@@ -159,7 +174,7 @@
         list.append(h('li', null,
           h('div', { class: 'grow' },
             h('strong', null, p.title),
-            h('div', { class: 'muted small' }, 'Goes out ' + App.fmtDateTime(p.publish_at, p.tz) + ' (' + (p.locations[0] ? p.locations[0].name + ' time' : 'local time') + ')'),
+            h('div', { class: 'muted small' }, 'Goes out ' + App.fmtDateTime(p.publish_at, p.tz) + ' (' + (p.zone_name || 'local') + ' time)'),
             h('div', { class: 'muted small' }, (p.category_label ? p.category_label + ' · ' : '') + audienceText(p) + (App.role() === 'hq' ? ' · ' + fromText(p) : ''))),
           cancel));
       }
@@ -172,7 +187,7 @@
     if (!posts.length && !pinnedIds.size) {
       feed.append(h('div', { class: 'card empty' }, isComposer()
         ? 'Nothing posted yet. Use New announcement to share events, workshops, holidays or session news with families.'
-        : 'No announcements yet. When ' + (App.me.location ? App.me.location.name : 'your location') + ' shares news, like events, workshops or closures, it will show up here.'));
+        : 'No announcements yet. When ' + placeText(f, 'your location') + ((f.my_locations || []).length > 1 ? ' share' : ' shares') + ' news, like events, workshops or closures, it will show up here.'));
     }
     for (const p of posts) feed.append(postCard(p, { target: p.id === focusId }));
     el.append(feed);
@@ -354,10 +369,16 @@
       const where = andList(pv.locations);
       const breakdown = andList([pv.parents && count(pv.parents, 'parent'), pv.students && count(pv.students, 'student'),
         pv.staff && count(pv.staff, 'staff member')].filter(Boolean));
+      // The preview is the copy families get (L40): each family sees its own location's
+      // name and front desk, so with several locations it shows the first by name.
+      // (A director's `locations` is just their own.)
+      const reached = locations.filter(l => (s ? l.id === s.location_id : !isHq || chosenLocIds().includes(l.id)))
+        .sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
+      const famLoc = reached[0] || { name: pv.locations[0] };
       const preview = {
         id: 0, type: emergency ? 'emergency' : 'announcement', title: b.title, body: b.body, audience: b.audience || 'everyone',
         category_label: emergency ? null : opts.categories[b.category], session: s || null, unread: false, stats: null,
-        sender: { name: App.me.user.name, role: App.role() }, locations: pv.locations.map(name => ({ name })), location_count: pv.locations.length,
+        sender: { name: App.me.user.name, role: App.role() }, locations: [famLoc], location_count: 1,
         published_at: App.now(), tz: (zoneLoc() || {}).timezone,
         when_text: b.publish_at ? wallTime(b.publish_at) : 'Just now',
       };
@@ -386,8 +407,9 @@
         !pv.recipients && h('div', { class: 'notice notice-warn' }, s ? 'Nobody is enrolled in this session right now.' : 'Nobody matches this audience right now.',
           b.publish_at ? ' Who gets it is checked again when it goes out.' : ''),
         b.publish_at && h('p', null, 'It will go out on ' + wallTime(b.publish_at) + ', ' + (zoneLoc() ? zoneLoc().name + ' time' : 'local time') + '.'),
-        h('h3', null, 'What people will see'),
-        postCard(preview),
+        h('h3', null, 'What families will see'),
+        reached.length > 1 && h('p', { class: 'muted small' }, 'As families at ' + famLoc.name + ' see it. Families at each location see their own location name and front desk.'),
+        postCard(preview, { asFamily: true }),
         h('div', { class: 'ann-actions' }, send, back),
       ].filter(Boolean));
       form.hidden = true;
@@ -399,8 +421,9 @@
     sync();
   }
 
-  // The News feed and the Home card on screen now, kept current by the live updates below.
-  let feedBox = null, homeBox = null;
+  // The News feed and the Home card on screen now, kept current by the live updates below,
+  // and the post Home's Latest news shows (null: none).
+  let feedBox = null, homeBox = null, homeLatest = null;
 
   App.register({
     id: 'news', title: 'News', icon: '📣', order: 50,
@@ -436,7 +459,8 @@
       el.append(banner);
     }
     const latest = f.posts.find(p => p.type !== 'emergency');
-    const where = App.me.location ? App.me.location.name : 'your locations';
+    homeLatest = latest ? latest.id : null;
+    const where = placeText(f, 'your locations');
     el.append(h('section', { class: 'card', 'aria-labelledby': 'home-news-h' },
       h('div', { class: 'row between' },
         h('h2', { id: 'home-news-h', style: 'margin:0' }, 'Latest news'),
@@ -492,6 +516,17 @@
     if (acknowledged.length) Promise.all(acknowledged.map(acknowledge)).then(() => { App.refreshBell(); return redrawLive(); });
     else if (arrived) redrawLive();
   }).observe(document.body, { childList: true });
+
+  // A normal announcement streams in as a toast only (app.js shows its title), so
+  // each new toast has Home check its Latest news, and redraw if a newer post is out.
+  const toasts = document.getElementById('toasts');
+  if (toasts) new MutationObserver(async records => {
+    if (!App.me || !homeBox || !homeBox.isConnected || !records.some(r => r.addedNodes.length)) return;
+    try {
+      const latest = (await App.api.get(API + '/feed?limit=10')).posts.find(p => p.type !== 'emergency');
+      if ((latest ? latest.id : null) !== homeLatest) await redrawLive();
+    } catch (_) { /* signed out or offline: keep what is on screen */ }
+  }).observe(toasts, { childList: true });
 
   // An announcement or alert in the Inbox opens that post in News.
   App.inboxLink('announcement', n => (n.ref_id ? 'news/' + n.ref_id : 'news'));

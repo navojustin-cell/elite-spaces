@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const PDFDocument = require('pdfkit');
+const { hundredths } = require('./service');
 const { DateTime } = require('luxon');
 
 // Every PDF is drawn in DejaVu Sans (fonts/LICENSE.txt), embedded in the file.
@@ -23,7 +24,10 @@ const STAFF_COLUMNS = [...FAMILY_COLUMNS, 'checked_in_by', 'checked_out_by', 'ne
 
 const METHOD = { scan: 'Scanned out', auto: 'Automatic (did not scan out)', staff: 'By staff' };
 
-const decimalHours = minutes => (minutes / 60).toFixed(2);
+// Hours as every file prints them: a visit's own rounded hours, or a total that
+// is the sum of those (service.totals, service.byStudent), so the columns add up.
+const decimalHours = hours => hours.toFixed(2);
+const visitHours = minutes => decimalHours(hundredths(minutes) / 100);
 const duration = m => (Math.floor(m / 60) ? Math.floor(m / 60) + 'h ' : '') + (m % 60) + 'm';
 const local = (ms, zone) => DateTime.fromMillis(ms, { zone, locale: 'en-US' });
 const clock = (ms, zone) => local(ms, zone).toFormat('h:mm a');
@@ -57,7 +61,7 @@ function csv(log, { staff = false, who = {}, range } = {}) {
   const rows = [];
   for (const v of log.visits) {
     rows.push({ date: v.date, at: v.check_in_local, cells: ['visit', v.date, v.student_name, v.location_name, v.session_name || '',
-      v.check_in_local, v.check_out_local || '', v.minutes ?? '', v.minutes == null ? '' : decimalHours(v.minutes),
+      v.check_in_local, v.check_out_local || '', v.minutes ?? '', v.minutes == null ? '' : visitHours(v.minutes),
       v.checkout_method || '', v.timezone,
       ...(staff ? [v.checked_in_by_name || '', v.checked_out_by_name || '', v.needs_review ? 'yes' : 'no'] : [])] });
   }
@@ -67,7 +71,7 @@ function csv(log, { staff = false, who = {}, range } = {}) {
   }
   rows.sort((x, y) => x.date.localeCompare(y.date) || x.at.localeCompare(y.at));
   const total = ['total', `${range.from} to ${range.to}`, who.student || '', who.location || '', who.session || '', '', '', log.totals.minutes,
-    decimalHours(log.totals.minutes), '', '', ...(staff ? ['', '', ''] : [])];
+    decimalHours(log.totals.hours), '', '', ...(staff ? ['', '', ''] : [])];
   const lines = [(staff ? STAFF_COLUMNS : FAMILY_COLUMNS).join(','), ...rows.map(r => r.cells.map(cell).join(',')), total.map(cell).join(',')];
   return '\uFEFF' + lines.join('\r\n') + '\r\n'; // BOM so Excel reads names with accents correctly
 }
@@ -192,7 +196,7 @@ const visitRow = (v, withStudent, withLocation) => [
 const absenceRow = (a, withStudent, withLocation) => [longDate(a.date), ...(withStudent ? [a.student_name] : []),
   ...(withLocation ? [a.location_name] : []), a.session_name, hhmm(a.start_time) + ' – ' + hhmm(a.end_time)];
 // The hours box: decimal hours large, hours and minutes in the label.
-const hoursBox = t => ['Total hours · ' + duration(t.minutes), decimalHours(t.minutes)];
+const hoursBox = t => ['Total hours · ' + duration(t.minutes), decimalHours(t.hours)];
 // "Oct 14, 2026, 10:30 PM PDT": a local time always names its zone.
 const stamp = (ms, zone) => local(ms, zone).toFormat('LLL d, yyyy, h:mm a ZZZZ');
 // Across every location there is no one local time, so each zone's is given with
@@ -250,7 +254,7 @@ function reportPdf({ filters, label, log, byStudent, now, locations = [] }) {
       { heading: 'By student', empty: 'No students in this report.',
         columns: [{ label: 'Student', w: all ? 0.26 : 0.46 }, ...(all ? [{ label: 'Location', w: 0.2 }] : []),
           { label: 'Visits', w: 0.18, align: 'right' }, { label: 'Hours', w: 0.18, align: 'right' }, { label: 'Absences', w: 0.18, align: 'right' }],
-        rows: byStudent.map(s => [s.student_name, ...(all ? [s.location_name] : []), s.visits, decimalHours(s.minutes), s.absences]) },
+        rows: byStudent.map(s => [s.student_name, ...(all ? [s.location_name] : []), s.visits, decimalHours(s.hours), s.absences]) },
       { heading: 'Visits', empty: `No visits ${between(filters.from, filters.to)}.`,
         columns: [{ label: 'Date', w: 0.15 }, { label: 'Student', w: 0.15 }, ...(all ? [{ label: 'Location', w: 0.1 }] : []),
           { label: 'Session', w: all ? 0.14 : 0.17 }, { label: 'In', w: 0.09 }, { label: 'Out', w: 0.09 }, { label: 'Total', w: 0.08 },

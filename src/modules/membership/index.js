@@ -34,7 +34,10 @@ function readBody(b) {
     throw bad('unknown_field', `ELITE Spaces doesn't store "${extra[0]}". A membership holds only its status, weekly limit and dates. Payment details stay in your billing system.`);
   }
   if (!['active', 'inactive'].includes(b.status)) throw bad('status', 'Choose Active or Inactive.');
-  const cap = /^\d+$/.test(String(b.weekly_cap)) ? Number(b.weekly_cap) : NaN;
+  // L56: only a number or a string of digits. String() of a parsed {toString: 1} throws (a 500),
+  // and String([3]) reads as "3".
+  const w = b.weekly_cap;
+  const cap = (typeof w === 'number' || typeof w === 'string') && /^\d+$/.test(String(w)) ? Number(w) : NaN;
   if (!(cap >= 1 && cap <= CAP_MAX)) throw bad('weekly_cap', `Set the weekly limit to a whole number from 1 to ${CAP_MAX}.`);
   if (!isDate(b.start_date)) throw bad('start_date', 'Choose a start date.');
   if (!isDate(b.expires_on)) throw bad('expires_on', 'Choose the last day of the membership.');
@@ -46,7 +49,7 @@ function readBody(b) {
 function loadStudent(ctx, user, rawId) {
   const id = Number(rawId);
   auth.assertSeeStudent(ctx, user, id);
-  const s = ctx.db.prepare("SELECT id, name, location_id FROM users WHERE id = ? AND role = 'student'").get(id);
+  const s = ctx.db.prepare("SELECT id, name, location_id, active FROM users WHERE id = ? AND role = 'student'").get(id);
   if (!s) throw notFound('No such student.');
   return s;
 }
@@ -116,6 +119,8 @@ module.exports = {
     // MB-2: staff create or update the record by hand. NF-2: every change is logged.
     r.put('/student/:id', auth.requireRole('staff'), (req, res) => {
       const student = loadStudent(ctx, req.user, req.params.id);
+      // L65: a retired account (such as a cancelled invite) is on no staff list and gets no membership.
+      if (!student.active) throw notFound('No such student.');
       const input = readBody(req.body);
       const result = tx(db, () => {
         const before = membershipOf(ctx, student.id);
@@ -151,7 +156,12 @@ module.exports = {
           svc.notifyRestored(ctx, student, after, restored);
         } else {
           paused = svc.pause(ctx, student.id, today);
-          if (paused) svc.notifyPaused(ctx, student, after, paused, today);
+          if (paused) {
+            svc.notifyPaused(ctx, student, after, paused, today);
+            // L57: a last day already past: this is the family's one notice that it ended, so the
+            // daily job doesn't send a second one that leaves out the paused sessions.
+            if (after.status === 'active' && after.expires_on < today) svc.claim(ctx, after, 'expired');
+          }
         }
         // D-32: not started yet -> the daily job brings the sessions back on the start date.
         svc.markStart(ctx, after, today);

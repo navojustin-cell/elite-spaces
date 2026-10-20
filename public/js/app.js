@@ -144,6 +144,8 @@
       el.append(h('div', { class: 'page-head' }, h('div', null,
         h('h1', null, (hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening') + ', ' + u.name.split(' ')[0]),
         h('p', null, App.fmtDate(App.now(), { weekday: 'long', month: 'long', day: 'numeric' })))));
+      const banner = notifyBanner();
+      if (banner) el.append(banner);
       const cards = App.cards.filter(c => App.allowed(c.roles));
       if (!cards.length) return el.append(h('div', { class: 'card empty' }, 'Nothing to show yet.'));
       // Cards render independently; one failing card must not blank the page.
@@ -181,8 +183,17 @@
   let inboxReads = null;
   App.register({
     id: 'inbox', title: 'Inbox', icon: '🔔', order: 90, nav: false,
-    async render(el) {
+    async render(el, params) {
       const { notifications } = await App.api.get('/api/notifications');
+      // #/inbox/<id> (a tapped push notification): go on to that item's own screen.
+      const target = params && params[0] && notifications.find(n => String(n.id) === params[0]);
+      const targetRoute = target && inboxRoute(target);
+      if (targetRoute) {
+        if (!target.read_at) await App.api.post('/api/notifications/' + target.id + '/read').catch(() => {});
+        history.replaceState(null, '', '#/' + targetRoute);
+        App.refresh();
+        return;
+      }
       const fresh = notifications.filter(n => !n.read_at);
       setBell(fresh.length);
       if (fresh.length) inboxReads = Promise.allSettled(fresh.map(n => App.api.post('/api/notifications/' + n.id + '/read')));
@@ -190,7 +201,8 @@
         fresh.length > 0 && h('button', { class: 'btn', type: 'button', onclick: e => App.run(e.currentTarget, async () => {
           await inboxReads;
           await App.api.post('/api/notifications/read-all');
-          App.refresh();
+          await App.refresh();
+          focusHeading(); // the button is gone: focus goes to the Inbox heading, not the top of the page
         }) }, 'Mark all read')));
       if (!notifications.length) return el.append(h('div', { class: 'card empty' }, 'Nothing yet. Check-ins, notes and announcements will show up here.'));
       el.append(h('ul', { class: 'list card' }, notifications.map(inboxItem)));
@@ -271,6 +283,90 @@
       h('button', { class: 'btn', onclick: close }, 'I have read this'));
     document.body.append(box);
     box.querySelector('button').focus();
+  }
+
+  // Moves focus to the page's heading (after the control that had it is gone).
+  function focusHeading() {
+    const head = document.getElementById('main').querySelector('h1');
+    if (head) { head.setAttribute('tabindex', '-1'); head.focus(); }
+  }
+
+  // ---------- web push (src/push.js, public/sw.js) ----------
+  // This browser's push subscription, saved on the server for whoever is signed
+  // in. Permission is never asked here: only a tap on the Home banner asks.
+  const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const keyBytes = s => { const b = atob((s + '='.repeat((4 - s.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(b, c => c.charCodeAt(0)); };
+  const swReady = () => Promise.race([navigator.serviceWorker.ready,
+    new Promise((_, no) => setTimeout(() => no(new Error("This browser couldn't start notifications. Try again from the installed app.")), 10000))]);
+  async function pushSubscribe() {
+    const reg = await swReady();
+    const key = keyBytes((await App.api.get('/api/push/key')).publicKey);
+    let sub = await reg.pushManager.getSubscription();
+    const old = sub && sub.options && sub.options.applicationServerKey && new Uint8Array(sub.options.applicationServerKey);
+    if (old && (old.length !== key.length || old.some((b, i) => b !== key[i]))) { await sub.unsubscribe(); sub = null; } // the server's key changed
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+    await App.api.post('/api/push/subscribe', sub.toJSON());
+  }
+  // Signing out: this device stops getting that account's notifications.
+  async function pushForget() {
+    try {
+      const reg = pushSupported() && await navigator.serviceWorker.getRegistration();
+      const sub = reg && await reg.pushManager.getSubscription();
+      if (sub) await App.api.post('/api/push/unsubscribe', { endpoint: sub.endpoint });
+    } catch (_) { /* best effort */ }
+  }
+
+  // ---------- notification onboarding (Home, family roles) ----------
+  // A banner that offers to turn on notifications. On an iPhone in Safari (not
+  // the installed app) it shows how to add the app to the Home Screen instead,
+  // because iPhone web push only works from the installed app. "No thanks"
+  // hides it on this device for good. Otherwise it shows in one session at most:
+  // once someone leaves Home it is gone until their next visit to the app.
+  const NOTIFY_DISMISSED = 'elite.notify.dismissed', NOTIFY_SESSION = 'elite.notify.shown';
+  const store = kind => ({
+    get: k => { try { return window[kind].getItem(k); } catch (_) { return null; } },
+    set: (k, v) => { try { window[kind].setItem(k, v); } catch (_) { /* storage blocked: this page load still remembers */ } },
+  });
+  const local = store('localStorage'), session = store('sessionStorage');
+  let bannerState = null; // null: not shown yet this session; 'showing': on Home now; 'done'
+  const isIPhone = () => { const ua = navigator.userAgent || ''; return /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1); };
+  const installed = () => navigator.standalone === true || !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  function notifyBanner() {
+    if (!['parent', 'student'].includes(App.role())) return null;
+    if (bannerState === 'done' || local.get(NOTIFY_DISMISSED) || session.get(NOTIFY_SESSION)) return null;
+    const walkthrough = isIPhone() && !installed();
+    if (!walkthrough && !(pushSupported() && Notification.permission === 'default')) return null;
+    bannerState = 'showing';
+    const box = h('section', { class: 'card notify-banner', 'aria-labelledby': 'notify-t' });
+    const finish = () => { local.set(NOTIFY_DISMISSED, '1'); bannerState = 'done'; };
+    const dismiss = () => { finish(); box.remove(); focusHeading(); };
+    if (walkthrough) {
+      box.append(h('h2', { id: 'notify-t' }, 'Get alerts on your iPhone'),
+        h('p', null, 'iPhone shows notifications only from the ELITE Spaces app on your Home Screen. To add it:'),
+        h('ol', { class: 'notify-steps' },
+          h('li', null, 'Tap the Share button (the square with an arrow) in Safari.'),
+          h('li', null, 'Choose Add to Home Screen, then tap Add.'),
+          h('li', null, 'Open ELITE Spaces from the new icon on your Home Screen and sign in.'),
+          h('li', null, 'Tap Turn on notifications.')),
+        h('div', { class: 'row' }, h('button', { type: 'button', class: 'btn', onclick: dismiss }, 'Got it, hide this')));
+      return box;
+    }
+    const on = h('button', { type: 'button', class: 'btn btn-primary', onclick: () => App.run(on, async () => {
+      const answer = await Notification.requestPermission();
+      finish(); // asked once on this device: never again
+      if (answer !== 'granted') {
+        box.replaceChildren(h('p', { role: 'status' }, "Notifications stay off. You can turn them on later in this browser's settings."));
+        return;
+      }
+      await pushSubscribe();
+      box.remove();
+      focusHeading();
+      App.toast('Notifications are on for this device.');
+    }) }, 'Turn on notifications');
+    box.append(h('h2', { id: 'notify-t' }, 'Get alerts on this device'),
+      h('p', null, 'Know right away about check-ins, daily notes and emergency alerts, even when the app is closed.'),
+      h('div', { class: 'row' }, on, h('button', { type: 'button', class: 'btn', onclick: dismiss }, 'No thanks')));
+    return box;
   }
 
   // ---------- chrome ----------
@@ -363,6 +459,7 @@
     let view = App.views.find(v => v.id === id && App.allowed(v.roles));
     if (!view) { view = navViews()[0] || App.views.find(v => v.id === 'inbox'); if (id !== view.id) { history.replaceState(null, '', '#/' + view.id); } }
     shown = view.id;
+    if (view.id !== 'home' && bannerState === 'showing') { bannerState = 'done'; session.set(NOTIFY_SESSION, '1'); }
     // Leaving the Inbox: once its items are read on the server, the bell drops to match.
     if (view.id !== 'inbox' && inboxReads) { const reads = inboxReads; inboxReads = null; reads.then(updateBell); }
     renderChrome(view.id);
@@ -413,11 +510,27 @@
       form);
     App.signInExtras.forEach(fn => { try { fn(wrap); } catch (_) {} });
     main.replaceChildren(wrap);
+    // The tab title names the screen: "Sign in", or the heading of the panel a
+    // module opened in its place (Create your family account, Open your invite...).
+    let demo = null;
+    const retitle = () => {
+      if (!wrap.isConnected) return false;
+      const head = form.style && form.style.display === 'none'
+        ? [...wrap.querySelectorAll('h2')].find(x => !form.contains(x) && !(demo && demo.contains(x))) : null;
+      const text = head ? head.textContent.trim() : '';
+      document.title = (text || 'Sign in') + ' · ELITE Spaces';
+      return true;
+    };
+    retitle();
+    if (window.MutationObserver) {
+      const watch = new MutationObserver(() => { if (!retitle()) watch.disconnect(); });
+      watch.observe(wrap, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['style', 'hidden'] });
+    }
     try {
       const { accounts } = await App.api.get('/api/dev/accounts');
       const groups = {};
       accounts.forEach(a => (groups[a.role] = groups[a.role] || []).push(a));
-      const box = h('div', { class: 'card demo-list' }, h('h2', null, 'Demo accounts'), h('p', { class: 'muted small' }, 'Dev mode: sign in as anyone with one tap.'));
+      const box = demo = h('div', { class: 'card demo-list' }, h('h2', null, 'Demo accounts'), h('p', { class: 'muted small' }, 'Dev mode: sign in as anyone with one tap.'));
       for (const [role, list] of Object.entries(groups)) {
         box.append(h('h3', { style: 'text-transform:capitalize;margin-top:.75rem' }, role === 'hq' ? 'HQ admin' : role));
         list.forEach(a => box.append(h('button', { class: 'btn', onclick: async () => { await App.api.post('/api/dev/login-as', { userId: a.id }); await boot(); } },
@@ -430,6 +543,7 @@
   App.signInExtras = [];
 
   async function signOut() {
+    await pushForget();
     await App.api.post('/api/auth/logout').catch(() => {});
     App.me = null;
     if (stream) stream.close();
@@ -441,7 +555,11 @@
     try { App.me = await App.api.get('/api/auth/me'); } catch (_) { App.me = null; }
     App.unread = 0; // a new sign-in never shows the last person's count
     render();
-    if (App.me) { updateBell(); listen(); }
+    if (App.me) {
+      updateBell(); listen();
+      // Notifications already allowed here: make sure this account gets them on this device.
+      if (pushSupported() && Notification.permission === 'granted') pushSubscribe().catch(() => {});
+    }
   }
   // Re-read the signed-in user and draw the app again, e.g. right after a module
   // signs someone in (family sign-up, accepting an invite). App.start() runs once.

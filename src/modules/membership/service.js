@@ -216,6 +216,6 @@ function runStarts(ctx) {
 }
 
 module.exports = {
-  SOON_DAYS, describe, isValid, slotCounts, heldSlots, pause, restore, notifyPaused, notifyRestored, runExpiry,
+  SOON_DAYS, describe, isValid, slotCounts, heldSlots, pause, restore, notifyPaused, notifyRestored, claim, runExpiry,
   markStart, runStarts, studentLocation, todayAt,
 };

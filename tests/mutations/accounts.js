@@ -11,10 +11,14 @@ module.exports = [
   { name: 'sign-up accepts a closed location', covers: ['AC-1'], file: F,
     find: "SELECT id FROM locations WHERE id = ? AND active = 1", repl: 'SELECT id FROM locations WHERE id = ?' },
   { name: 'sign-up lets two accounts share an email', covers: ['AC-1'], file: F,
-    find: "if (u.emailTaken(db, addr)) throw conflict('email_taken', 'That email already has an account. Sign in instead",
-    repl: "if (false) throw conflict('email_taken', 'That email already has an account. Sign in instead" },
+    find: 'if (u.emailTaken(db, addr)) throw signupUnavailable();', repl: 'if (false) throw signupUnavailable();' },
   { name: 'sign-up no longer asks for a phone number', covers: ['AC-1'], file: F,
     find: 'const phone = u.phone(b.phone, true);', repl: 'const phone = u.phone(b.phone);' },
+  { name: 'sign-up returns the session token in the body (L64)', covers: ['AC-1'], file: F,
+    find: '    auth.startSession(ctx, res, id);\n    res.status(201).json({ user: auth.getUser(ctx, id) });',
+    repl: '    const token = auth.startSession(ctx, res, id);\n    res.status(201).json({ user: auth.getUser(ctx, id), token });' },
+  { name: 'a guardian accepting an invite gets the session token in the body (L64)', covers: ['AC-2'], file: F,
+    find: '    auth.startSession(ctx, res, out.user.id);', repl: '    out.token = auth.startSession(ctx, res, out.user.id);' },
   { name: 'public location list leaks every column', covers: ['NF-1', 'AC-1'], file: F,
     find: 'SELECT id, name FROM locations WHERE active = 1 ORDER BY name', repl: 'SELECT * FROM locations WHERE active = 1 ORDER BY name' },
 
@@ -34,7 +38,7 @@ module.exports = [
   { name: 'cancelling leaves the pending student account open', covers: ['AC-3'], file: F,
     find: "db.prepare('UPDATE users SET active = 0, email = NULL, password_hash = NULL WHERE id = ?').run(row.user_id);", repl: '' },
   { name: 'parents are not told the student accepted', covers: ['AC-3'], file: F,
-    find: 'notify.send(ctx, parents, {', repl: 'notify.send(ctx, [], {' },
+    find: 'notify.send(ctx, to, {', repl: 'notify.send(ctx, [], {' },
   { name: 'approval does not wait for the student to accept', covers: ['AC-3'], file: F,
     find: 'if (!student.password_hash) {', repl: 'if (false) {' },
   { name: 'approval leaves the link pending', covers: ['AC-3'], file: F,
@@ -204,4 +208,37 @@ module.exports = [
     find: "WHERE s.location_id = ? AND s.status = 'active'", repl: "WHERE ? IS NOT NULL AND s.status = 'active'" },
   { name: 'the hours refusal does not name the session', covers: ['AC-5'], file: O,
     find: '`${s.name} runs ${ampm(s.start_time)}', repl: '`A session runs ${ampm(s.start_time)}' },
+
+  // ---- sweep 2026-10-14, round 2
+  // L53/L62: sign-up never says an email has an account, and answers the same whoever holds it
+  { name: 'sign-up says the email already has an account', covers: ['AC-1', 'NF-1'], file: F,
+    find: "const signupUnavailable = () => conflict('email_unavailable', 'Already have an account? Sign in instead. If not, use a different email.');",
+    repl: "const signupUnavailable = () => conflict('email_taken', 'That email already has an account. Sign in instead, or use a different email.');" },
+  { name: 'sign-up answers differently when staff hold the email', covers: ['AC-1', 'NF-1'], file: F,
+    find: 'if (u.emailTaken(db, addr)) throw signupUnavailable();',
+    repl: "if (db.prepare(\"SELECT 1 FROM users WHERE lower(email) = ? AND role = 'staff'\").get(addr)) throw conflict('email_unavailable', 'That is a staff email.');\n    if (u.emailTaken(db, addr)) throw signupUnavailable();" },
+  // L48: approving settles the "accepted your invite" items and tells the other guardians
+  { name: 'approving leaves the accepted items asking for approval', covers: ['AC-3'], file: F,
+    find: 'settleAccepted(db, sid, `${req.user.name} approved', repl: '(() => {})(db, sid, `${req.user.name} approved' },
+  { name: 'the other guardians are not told about an approval', covers: ['AC-3', 'AC-2'], file: F,
+    find: 'notify.send(ctx, coParents, {', repl: 'notify.send(ctx, [], {' },
+  { name: 'the parent who approved is told they approved', covers: ['AC-3'], file: F,
+    find: '.filter(pid => pid !== req.user.id));', repl: '.filter(pid => pid));' },
+  // L50: "your invite" only to the parent who sent it
+  { name: 'every parent is told "accepted your invite"', covers: ['AC-3', 'AC-2'], file: F,
+    find: "[parents.filter(id => id !== row.invited_by), sender + \"'s\"]", repl: "[parents.filter(id => id !== row.invited_by), 'your']" },
+  { name: 'the parent who sent the invite reads it as someone else\'s', covers: ['AC-3'], file: F,
+    find: "[[parents.filter(id => id === row.invited_by), 'your']", repl: "[[[], 'your']" },
+  // L44: location names are unique, ignoring case
+  { name: 'a new location can take an existing location\'s name', covers: ['AC-5'], file: O,
+    find: '    assertNameFree(db, f.name);\n', repl: '' },
+  { name: 'a location can be renamed to another location\'s name', covers: ['AC-5'], file: O,
+    find: 'if (changes.name) assertNameFree(db, f.name, cur.id);', repl: '' },
+  { name: 'location names are compared case by case', covers: ['AC-5'], file: O,
+    find: 'WHERE lower(trim(name)) = lower(?) AND id != ?', repl: 'WHERE trim(name) = ? AND id != ?' },
+  { name: 'a closed location\'s name is free to reuse', covers: ['AC-5'], file: O,
+    find: 'WHERE lower(trim(name)) = lower(?) AND id != ?', repl: 'WHERE active = 1 AND lower(trim(name)) = lower(?) AND id != ?' },
+  { name: 'a location can\'t be renamed to its own name in another case', covers: ['AC-5'], file: O,
+    find: 'WHERE lower(trim(name)) = lower(?) AND id != ?', repl: 'WHERE lower(trim(name)) = lower(?) AND ? IS NOT NULL' },
 ];
+

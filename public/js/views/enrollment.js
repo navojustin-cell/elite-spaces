@@ -207,7 +207,7 @@
       const slot = { session_id: r.session_id, weekday: r.weekday, name: r.session_name };
       const student = { id: r.student_id, name: r.student_name };
       if (await offerWaitlist(btn, out.message, student, slot)) await joinWaitlist(null, student, slot);
-    } else App.toast(`Approved, but ${name} couldn't be enrolled yet. ${out.message}`, 'error');
+    } else App.toast(`Approved, but ${name} couldn't be enrolled. ${out.message}`, 'error'); // nothing retries it (D-17, L29)
     App.refresh();
   }
 
@@ -217,7 +217,7 @@
       h('div', { class: 'grow' },
         h('div', null, h('strong', null, `${first(r.student_name)} asked to join ${r.session_name}`)),
         h('div', { class: 'muted small' }, slotText(r) + ' · asked ' + App.fmtDateTime(r.created_at, r.timezone)),
-        !check.ok && h('div', { class: 'notice notice-warn small', style: 'margin:.5rem 0 0' }, 'Approving won\'t enroll them yet: ' + check.message),
+        !check.ok && h('div', { class: 'notice notice-warn small', style: 'margin:.5rem 0 0' }, 'Approving won\'t enroll them: ' + check.message),
         check.ok && check.full && h('div', { class: 'notice small', style: 'margin:.5rem 0 0' }, check.message)),
       h('div', { class: 'en-actions' },
         h('button', { class: 'btn btn-primary', onclick: e => decide(e.currentTarget, r, true), 'aria-label': `Approve ${first(r.student_name)}'s request for ${r.session_name} on ${DAY[r.weekday]}s` }, 'Approve'),
@@ -246,6 +246,9 @@
 
   // ---------- parent screen ----------
 
+  // #/schedule/request/<id> or #/schedule/enrollment/<id>, from an Inbox item (L35).
+  const inboxRef = params => (params[0] === 'request' || params[0] === 'enrollment') ? { kind: params[0], id: Number(params[1]) } : null;
+
   async function renderParent(el, params) {
     const [{ students }, { requests }] = await Promise.all([App.api.get(API + '/students'), App.api.get(API + '/requests')]);
     el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Schedule'),
@@ -256,8 +259,11 @@
       el.append(h('div', { class: 'card empty' }, 'Once your student\'s account is linked to yours, you can pick their weekly sessions here.'));
       return;
     }
-    const sel = students.find(s => String(s.id) === params[0]) || students[0];
-    const from = params[1] || null;
+    const ref = inboxRef(params);
+    const pick = !ref ? params[0] : ref.kind === 'request' ? (requests.find(r => r.id === ref.id) || {}).student_id
+      : (students.find(s => s.enrollments.some(e => e.id === ref.id)) || {}).id;
+    const sel = students.find(s => String(s.id) === String(pick)) || students[0];
+    const from = ref ? null : params[1] || null;
     const [cat, sched] = await Promise.all([App.api.get(`${API}/students/${sel.id}/catalog`), App.api.get(scheduleUrl(sel.id, from))]);
     const tabs = studentTabs(students, sel, id => App.go('schedule', id));
     if (tabs) el.append(tabs);
@@ -266,7 +272,8 @@
     // Weekly sessions
     const mine = h('section', { class: 'card', 'aria-labelledby': 'en-mine-h' },
       h('h2', { id: 'en-mine-h' }, name + '\'s weekly sessions'), membershipLine(sel.membership));
-    if (!sel.enrollments.length) mine.append(h('p', { class: 'empty' }, 'No weekly sessions yet. Pick one under "Add a session" below.'));
+    // L52: point at "Add a session" only when its buttons work; otherwise its notice says why.
+    if (!sel.enrollments.length) mine.append(h('p', { class: 'empty' }, sel.membership.can_add ? 'No weekly sessions yet. Pick one under "Add a session" below.' : 'No weekly sessions yet.'));
     else mine.append(h('ul', { class: 'list en-list' }, sel.enrollments.map(e => h('li', null,
       h('div', { class: 'grow' }, h('div', null, h('strong', null, slotText(e))),
         h('div', { class: 'muted small' }, e.name + ' · ' + e.term_name + (e.session_status === 'cancelled' ? ' · cancelled by the center' : ''))),
@@ -320,7 +327,7 @@
   const REQ_STATE = {
     pending: () => ['badge-accent', 'Waiting for a parent'],
     declined: r => (r.decided_by ? ['', 'Declined'] : ['', 'Closed']), // no decider: the slot was gone
-    approved: r => r.outcome === 'enrolled' ? ['badge-ok', 'Approved · enrolled'] : r.outcome === 'full' ? ['badge-warn', 'Approved · session full'] : ['badge-warn', 'Approved · not enrolled yet'],
+    approved: r => r.outcome === 'enrolled' ? ['badge-ok', 'Approved · enrolled'] : r.outcome === 'full' ? ['badge-warn', 'Approved · session full'] : ['badge-warn', 'Approved · not enrolled'],
   };
 
   async function askToJoin(btn, s) {
@@ -331,7 +338,7 @@
   async function renderStudent(el, params) {
     const [{ students }, { requests }] = await Promise.all([App.api.get(API + '/students'), App.api.get(API + '/requests')]);
     const me = students[0];
-    const from = params[1] || null;
+    const from = inboxRef(params) ? null : params[1] || null;
     const [cat, sched] = await Promise.all([App.api.get(`${API}/students/${me.id}/catalog`), App.api.get(scheduleUrl(me.id, from))]);
     el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'My schedule'),
       h('p', null, `Your weekly sessions at ${me.location.name}.`))));
@@ -380,8 +387,10 @@
     id: 'schedule', title: 'Schedule', icon: '📅', roles: ['parent', 'student'], order: 20,
     render: (el, params) => (App.role() === 'parent' ? renderParent(el, params) : renderStudent(el, params)),
   });
-  // A student's request, and the parent's answer to it, open Schedule from the Inbox.
-  App.inboxLink('enrollment_request', 'schedule');
+  // Requests, answers, enrollments and waitlist promotions open Schedule from the
+  // Inbox on the student they are about (L35): #/schedule/request/<id>, #/schedule/enrollment/<id>.
+  App.inboxLink('enrollment_request', n => 'schedule/request/' + n.ref_id);
+  App.inboxLink('enrollment', n => 'schedule/enrollment/' + n.ref_id);
 
   // ---------- Home cards ----------
 
@@ -408,8 +417,8 @@
         const rows = w.occurrences;
         const today = todayIn(w.location.timezone);
         if (!rows.length) {
-          card.append(h('p', { class: 'muted small' }, App.role() === 'parent'
-            ? 'No sessions this week. Add one from Schedule.' : 'No sessions this week. Ask a parent for one from Schedule.'));
+          card.append(h('p', { class: 'muted small' }, App.role() !== 'parent' ? 'No sessions this week. Ask a parent for one from Schedule.'
+            : students[i].membership.can_add ? 'No sessions this week. Add one from Schedule.' : 'No sessions this week.')); // L52
           return;
         }
         card.append(h('ul', { class: 'list' }, rows.map(o => {

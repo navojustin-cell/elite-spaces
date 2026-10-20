@@ -1,7 +1,9 @@
 'use strict';
-// Notifications land in the in-app inbox (notifications table). v1 simulates
-// push: rows are marked delivered on insert and streamed to open clients over
-// SSE. Real web push is a deploy-time step (docs/decisions.md D-11).
+// Notifications land in the in-app inbox (notifications table), stream live to
+// open apps over SSE, and go out as web push to the user's subscribed browsers
+// (src/push.js, fire-and-forget; D-11).
+
+const push = require('./push');
 
 const listeners = new Set(); // (userId, row) => void, used by the SSE endpoint
 
@@ -16,6 +18,7 @@ function send(ctx, userIds, { kind, title, body, refType, refId, priority = 'nor
     return { id: Number(r.lastInsertRowid), user_id: uid, kind, title, body, ref_type: refType, ref_id: refId, priority, created_at: now };
   });
   for (const row of rows) for (const fn of listeners) { try { fn(row.user_id, row); } catch (_) { /* a dead stream must not block others */ } }
+  try { push.deliver(ctx, rows); } catch (_) { /* push never breaks the caller */ }
   return rows;
 }
 

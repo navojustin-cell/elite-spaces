@@ -76,13 +76,18 @@ function login(ctx, email, password) {
   return { user: getUser(ctx, row.id) };
 }
 
+// The sign-in cookie's options. Over HTTPS (req.secure, which trusts the
+// hosting proxy's X-Forwarded-Proto) it is Secure, so it never travels over plain HTTP.
+const cookieOptions = req => Object.assign({ httpOnly: true, sameSite: 'lax' }, req && req.secure ? { secure: true } : {});
+
 // Signs `userId` in on this response: a new session token in the sign-in
 // cookie (ctx.cookieName). Login, demo sign-in, family sign-up and invite
-// acceptance all use this one helper.
+// acceptance all use this one helper. The returned token is for the server
+// only; responses never echo it (L64).
 function startSession(ctx, res, userId) {
   const token = crypto.randomBytes(24).toString('hex');
   ctx.sessions.set(token, userId);
-  res.cookie(ctx.cookieName || 'sid', token, { httpOnly: true, sameSite: 'lax' });
+  res.cookie(ctx.cookieName || 'sid', token, cookieOptions(res.req));
   return token;
 }
 
@@ -129,6 +134,6 @@ function requireRole(...roles) {
 
 module.exports = {
   OPS_RANK, hashPassword, verifyPassword, atLeast, getUser, studentLinked, linkedStudentIds,
-  canManageLocation, canSeeStudent, assertSeeStudent, assertManageLocation, login, startSession, endOtherSessions, sessionToken,
+  canManageLocation, canSeeStudent, assertSeeStudent, assertManageLocation, login, startSession, cookieOptions, endOtherSessions, sessionToken,
   attachUser, requireRole,
 };

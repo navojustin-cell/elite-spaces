@@ -98,6 +98,19 @@ function eligibility(ctx, student, loc) {
   return Object.assign(out, { ok: true, code: 'ok', message: null });
 }
 
+// The same answer said to the student (L54): second person, and only what a
+// parent or the front desk can do about it, never "drop one" or "join the waitlist".
+function forStudent(check) {
+  const m = check.membership;
+  return {
+    no_membership: "You don't have a membership yet. A parent can set one up with the front desk.",
+    membership_inactive: "Your membership is inactive, so new sessions can't be added. A parent or the front desk can reactivate it.",
+    membership_not_started: m && `Your membership starts on ${longDate(m.start_date)}. A parent can add sessions from that day.`,
+    membership_expired: m && `Your membership expired on ${longDate(m.expires_on)}. Once it's renewed, a parent can add sessions again.`,
+    weekly_cap: `You already have ${check.used} weekly session${check.used === 1 ? '' : 's'}, the most your membership allows. A parent can drop one to make room, then add this one.`,
+  }[check.code];
+}
+
 // ---------- taking a seat ----------
 
 function seat(ctx, student, slot, source, actor) {
@@ -117,6 +130,10 @@ function seat(ctx, student, slot, source, actor) {
   // A request for a slot the student now holds is settled.
   ctx.db.prepare(`UPDATE enrollment_requests SET status = 'approved', outcome = 'enrolled', decided_by = ?, decided_at = ?
     WHERE student_id = ? AND session_id = ? AND weekday = ? AND status = 'pending'`).run(actor ? actor.id : null, now, student.id, session.id, weekday);
+  // One approved earlier that couldn't enroll them then (full, or blocked) now
+  // says enrolled, not "full, join the waitlist" (L30).
+  ctx.db.prepare(`UPDATE enrollment_requests SET outcome = 'enrolled', outcome_message = NULL
+    WHERE student_id = ? AND session_id = ? AND weekday = ? AND status = 'approved' AND outcome IN ('full','blocked')`).run(student.id, session.id, weekday);
   return ctx.db.prepare('SELECT * FROM enrollments WHERE id = ?').get(id);
 }
 
@@ -372,16 +389,25 @@ function decide(ctx, actor, id, approve) {
     ctx.db.prepare("UPDATE enrollment_requests SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?").run(actor.id, now, r.id);
     const slot = loadSlot(ctx, student, r.session_id, r.weekday);
     const out = attempt(ctx, actor, student, slot, 'request', notify.parentsOf(ctx, student.id));
-    ctx.db.prepare('UPDATE enrollment_requests SET outcome = ?, outcome_message = ? WHERE id = ?').run(out.outcome, out.message || null, r.id);
+    // out.message is the parent's (the reply); the student is told in their own
+    // words, never to drop or join a waitlist, which only a parent can do (L54).
+    const waiting = out.outcome === 'full' && waitingRow(ctx, student.id, session.id, r.weekday);
+    const fullTail = waiting
+      ? `You're number ${position(ctx, waiting)} on its waitlist and will be enrolled automatically when a seat opens.`
+      : 'A parent can add you to the waitlist.';
+    const toStudent = out.outcome === 'blocked' ? forStudent(eligibility(ctx, student, slot.loc))
+      : out.outcome === 'full' ? `${session.name} on ${DAYS[r.weekday]}s is full. ${fullTail}` : null;
+    ctx.db.prepare('UPDATE enrollment_requests SET outcome = ?, outcome_message = ? WHERE id = ?').run(out.outcome, toStudent, r.id);
+    // Nothing retries a blocked approval (D-17), so nothing says "yet" (L29).
     const titles = {
       enrolled: `${by} approved your request: you're enrolled in ${session.name}`,
-      blocked: `${by} approved your request, but you couldn't be enrolled yet`,
+      blocked: `${by} approved your request, but you couldn't be enrolled`,
       full: `${by} approved your request, but ${session.name} is full`,
     };
     const bodies = {
       enrolled: `${when(session, r.weekday)} at ${slot.loc.name}, every week through ${longDate(slot.term.end_date)}.`,
-      blocked: out.message,
-      full: `${when(session, r.weekday)}. A parent can add you to the waitlist.`,
+      blocked: toStudent,
+      full: `${when(session, r.weekday)}. ${fullTail}`,
     };
     notify.send(ctx, [student.id], {
       kind: 'enrollment_request_approved', title: titles[out.outcome], body: bodies[out.outcome],
@@ -574,8 +600,13 @@ function schedule(ctx, student, q) {
       if (seen.has(d + ':' + e.session_id)) continue; // a slot dropped and taken again
       seen.add(d + ':' + e.session_id);
       const m = membership(start);
+      // L33: a spot paused when this occurrence began but restored before it ends
+      // (a renewal mid-session) is on again: upcoming while it runs, check-in
+      // works. Once it has ended unattended it stays paused, never absent.
+      const ch = changes.get(e.id);
+      const held = statusAt(e, ch, start) === 'paused' && (now >= end || statusAt(e, ch, now) === 'paused');
       const status = v ? 'attended' : closures.has(d) ? 'closed' : m && d < m.start_date ? 'not_started'
-        : statusAt(e, changes.get(e.id), start) === 'paused' ? 'paused' : now < end ? 'upcoming' : 'absent';
+        : held ? 'paused' : now < end ? 'upcoming' : 'absent';
       out.push({
         date: d, weekday: e.weekday, session_id: e.session_id, enrollment_id: e.id, name: e.name,
         start_time: hours.start_time, end_time: hours.end_time, start_at: start, end_at: end, status,

@@ -6,7 +6,7 @@
 //                          (anyone whose home is that location; HQ any)
 //   GET    /today          ?location_id=  today's sessions at the location, in its own time zone (staff+)
 //   POST   /               create a session (director: own location; HQ: any)
-//   PUT    /:id            edit name, days, times, capacity; enrolled families are told
+//   PUT    /:id            edit name, days, times, capacity; enrolled families are told; more seats fill from the waitlist (L36)
 //   POST   /:id/cancel     cancel a session: its enrollments end, its waitlist clears, families are told
 //   POST   /terms          create a term
 //   PUT    /terms/:id      edit a term; families whose weekly sessions it cuts are told (R7)
@@ -206,6 +206,16 @@ function endSlots(ctx, sessionId, weekdays, now) {
   return [...affected];
 }
 
+// L36: run the enrollment module's own waitlist job (EN-5, D-18) through the module
+// list, so the line is served by enrollment's rules (membership, cap, order) and this
+// module never imports enrollment's code. Without enrollment loaded there is no job.
+// Required lazily: the module list is still loading when this file is.
+function promoteWaitlists(ctx) {
+  for (const m of require('../index')) {
+    for (const j of m.jobs || []) if (m.name === 'enrollment' && j.name === 'promote-waitlists') j.run(ctx);
+  }
+}
+
 function termCovering(ctx, locationId, date) {
   return ctx.db.prepare('SELECT id FROM terms WHERE location_id = ? AND ? BETWEEN start_date AND end_date').get(locationId, date);
 }
@@ -385,29 +395,33 @@ module.exports = {
           ctx.db.prepare('INSERT OR IGNORE INTO session_times (session_id, until_date, start_time, end_time, changed_at) VALUES (?,?,?,?,?)')
             .run(s.id, time.addDays(localToday(ctx, loc), -1), before.start_time, before.end_time, now);
         }
-        let notified = 0;
+        // "We let N people know" counts people: someone told twice by one edit counts once (L38).
+        const told = new Set();
+        const tell = (ids, msg) => notify.send(ctx, ids, msg).forEach(n => told.add(n.user_id));
         const ended = removed.length ? endSlots(ctx, s.id, removed, now) : [];
         if (ended.length) {
-          notified += notify.send(ctx, familyOf(ctx, ended), {
+          tell(familyOf(ctx, ended), {
             kind: 'session_day_removed', title: `${next.name} no longer meets on ${listLong(removed)}`,
             body: `${loc.name} took ${removed.map(d => DAY_LONG[d]).join(' and ')} off ${before.name} (${fmtSpan(before)}). Enrollments and waitlist spots for that day have ended. You can pick another session in the app.`,
             refType: 'session', refId: s.id,
-          }).length;
+          });
         }
         if (changed.length) {
           const lines = [];
           if (next.name !== before.name) lines.push(`It's now called ${next.name}.`);
           if (next.start_time !== before.start_time || next.end_time !== before.end_time) lines.push(`New time: ${fmtSpan(next)} (was ${fmtSpan(before)}).`);
           if (next.capacity !== before.capacity) lines.push(`Seats per day: ${next.capacity} (was ${before.capacity}).`);
-          notified += notify.send(ctx, familyOf(ctx, enrolledStudents(ctx, s.id)), {
+          tell(familyOf(ctx, enrolledStudents(ctx, s.id)), {
             kind: 'session_changed', title: `${before.name} at ${loc.name} has changed`,
             body: lines.join(' ') + ' Your enrollment stays the same.', refType: 'session', refId: s.id,
-          }).length;
+          });
         }
         audit.log(ctx, req.user, 'session.update', { targetType: 'session', targetId: s.id, locationId: s.location_id,
           detail: { before, after: next, removed_days: removed, ended: ended.length } });
-        return { ended: ended.length, notified };
+        return { ended: ended.length, notified: told.size };
       });
+      // L36: more seats fill from the waitlist now (EN-5, D-18), not at the next job run.
+      if (next.capacity > before.capacity) promoteWaitlists(ctx);
       res.json({ session: shape(ctx, ctx.db.prepare('SELECT * FROM sessions WHERE id = ?').get(s.id)), ended: out.ended, notified: out.notified });
     });
 

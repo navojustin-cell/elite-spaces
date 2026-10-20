@@ -2,6 +2,7 @@
 // Check-in mutations: each breaks one real rule; tests/checkin.test.js must catch it.
 const IDX = 'src/modules/checkin/index.js';
 const SVC = 'src/modules/checkin/service.js';
+const VIEW = 'public/js/views/checkin.js';
 
 module.exports = [
   // ---- CI-1 entrance code ----
@@ -47,7 +48,7 @@ module.exports = [
 
   // ---- CI-3 enrolled slot ----
   { name: 'check in without an enrolled slot', covers: ['CI-3'], file: IDX,
-    find: "if (!slot) throw refuse('no_session'", repl: "if (false) throw refuse('no_session'" },
+    find: 'if (!slot) {\n      // A scan to check out after', repl: 'if (false) {\n      // A scan to check out after' },
   { name: 'drop the 30-minute early window', covers: ['CI-3'], file: SVC,
     find: 'ms >= s.start_at - EARLY_MS && ms <= s.end_at', repl: 'ms >= s.start_at && ms <= s.end_at' },
   { name: 'open check-in an hour early', covers: ['CI-3'], file: SVC,
@@ -144,7 +145,7 @@ module.exports = [
   { name: 'everyone checked in today shows as here', covers: ['CI-7'], file: SVC,
     find: 'const here = visits.filter(v => v.check_out_at == null).map(v => {', repl: 'const here = visits.map(v => {' },
   { name: 'students back in the building also show as left', covers: ['CI-7'], file: SVC,
-    find: 'v.check_out_at != null && !hereIds.has(v.student_id)', repl: 'v.check_out_at != null' },
+    find: 'const gone = new Set(hereIds);', repl: 'const gone = new Set();' },
   { name: 'ended slots still show as expected', covers: ['CI-7'], file: SVC,
     find: 'if (s.end_at <= ms || listed.has(s.student_id)', repl: 'if (listed.has(s.student_id)' },
   { name: 'students already here show as expected', covers: ['CI-7'], file: SVC,
@@ -329,4 +330,48 @@ module.exports = [
   // R6: the card says when a membership that hasn't started begins
   { name: "the Home card isn't told a membership hasn't started", covers: ['CI-3'], file: SVC,
     find: 'starts_on: startsLater(ctx, student.id, today),', repl: 'starts_on: null,' },
+  // ---- Oct 14 sweep fixes ----
+  // L31: a scan on a closure day says the center is closed
+  { name: 'a closure day answers "no session right now"', covers: ['CI-3'], file: IDX,
+    find: "if (closure) throw refuse('no_session'", repl: "if (false) throw refuse('no_session'" },
+  { name: 'a closure on a later day makes today read as closed', covers: ['CI-3'], file: SVC,
+    find: "'SELECT * FROM closures WHERE location_id = ? AND date = ?'", repl: "'SELECT * FROM closures WHERE location_id = ? AND date >= ?'" },
+  { name: 'the closed message leaves out the reason', covers: ['CI-3'], file: SVC,
+    find: "closed today${closure.reason ? ` (${closure.reason})` : ''}", repl: 'closed today' },
+  { name: 'the closed message leaves out the next session', covers: ['CI-3'], file: SVC,
+    find: "+ (next ? ` Your next one is ${when(loc, next.start_at, ms)}.` : '');\n}", repl: ";\n}" },
+  // L32: a scan after the auto-checkout is not a check-in attempt
+  { name: 'a scan after the auto-checkout reads as a check-in attempt', covers: ['CI-4', 'CI-5'], file: IDX,
+    find: "if (last && last.checkout_method === 'auto') {", repl: 'if (false) {' },
+  { name: 'any earlier check-out reads as automatic', covers: ['CI-4', 'CI-5'], file: IDX,
+    find: "if (last && last.checkout_method === 'auto') {", repl: 'if (last) {' },
+  { name: 'the Check in screen has no title for an auto-checkout refusal', covers: ['CI-4', 'CI-5'], file: VIEW,
+    find: "checked_out_auto: \"You're already checked out\",", repl: '' },
+  { name: 'the help line always says check you in', covers: ['CI-4'], file: VIEW,
+    find: "check you ${status.state === 'here' ? 'out' : 'in'}", repl: 'check you in' },
+  // L34: "on now" only once the session has started
+  { name: 'the status line says on now from when check-in opens', covers: ['CI-3'], file: VIEW,
+    find: '(n.start_at <= now && now <= n.end_at)', repl: '(n.opens_at <= now && now <= n.end_at)' },
+  { name: 'the early window reads as the next session', covers: ['CI-3'], file: VIEW,
+    find: '(n.opens_at <= now && now < n.start_at)', repl: '(false)' },
+  // L37: Left today lists each student once, at their latest check-out
+  { name: 'Left today lists every visit', covers: ['CI-7'], file: SVC,
+    find: '.filter(v => !gone.has(v.student_id) && gone.add(v.student_id))', repl: '.filter(v => !hereIds.has(v.student_id))' },
+  { name: "Left today keeps a student's first visit", covers: ['CI-7'], file: SVC,
+    find: '.sort((a, b) => b.check_out_at - a.check_out_at)', repl: '.sort((a, b) => a.check_out_at - b.check_out_at)' },
+  // L63: no manual check-in before a parent approves the account
+  { name: 'staff check in a student no parent has approved', covers: ['CI-7', 'CI-6'], file: IDX,
+    find: 'if (!auth.studentLinked(ctx, student.id)) {', repl: 'if (false) {' },
+  { name: 'the search marks every student approved', covers: ['CI-7'], file: IDX,
+    find: 'approved: auth.studentLinked(ctx, s.id),', repl: 'approved: true,' },
+  { name: 'the search offers Check in for a student waiting for approval', covers: ['CI-7'], file: VIEW,
+    find: '!s.here && !s.approved ? null : s.here', repl: 's.here' },
+  // L65: a retired student is not found
+  { name: 'staff check in a retired student by id', covers: ['CI-7'], file: IDX,
+    find: "if (!student.active) throw notFound('No such student.');", repl: '' },
+  // the parent check-out notice names the session
+  { name: 'the check-out notice leaves out the session', covers: ['CI-6'], file: SVC,
+    find: "(session ? session.name + '. ' : '')", repl: "''" },
+  { name: 'the check-out notice names a session for a visit with none', covers: ['CI-6'], file: SVC,
+    find: "(session ? session.name + '. ' : '')", repl: "((session && session.name) || 'No session') + '. '" },
 ];

@@ -104,14 +104,15 @@ test('CORE', "the sign-in cookie carries the app's own name, so local servers on
   assert.equal(r.status, 200);
   const set = r.headers.get('set-cookie') || '';
   assert.match(set, /^sid_4199=[0-9a-f]{48};/);
-  assert.equal(set.match(/^sid_4199=([^;]+)/)[1], r.body.token);
+  const token = set.match(/^sid_4199=([^;]+)/)[1];
+  assert.equal(r.body.token, undefined, 'the session lives only in the httpOnly cookie, never in the body (L64)');
   const me = cookie => fetch(t.base + '/api/auth/me', { headers: { cookie } });
-  assert.equal((await me('sid_4199=' + r.body.token)).status, 200);
-  assert.equal((await me('sid=' + r.body.token)).status, 401, 'a cookie under another server\'s name is ignored');
-  const out = await fetch(t.base + '/api/auth/logout', { method: 'POST', headers: { cookie: 'sid_4199=' + r.body.token } });
+  assert.equal((await me('sid_4199=' + token)).status, 200);
+  assert.equal((await me('sid=' + token)).status, 401, 'a cookie under another server\'s name is ignored');
+  const out = await fetch(t.base + '/api/auth/logout', { method: 'POST', headers: { cookie: 'sid_4199=' + token } });
   assert.equal(out.status, 200);
   assert.match(out.headers.get('set-cookie') || '', /^sid_4199=;/);
-  assert.equal((await me('sid_4199=' + r.body.token)).status, 401, 'signing out ends the session');
+  assert.equal((await me('sid_4199=' + token)).status, 401, 'signing out ends the session');
 });
 
 test('CORE', '/api/auth/me says whether the clock is pinned, so the app knows whether to trust its own clock', async () => {
@@ -131,7 +132,9 @@ test('CORE', '/api/auth/me says whether the clock is pinned, so the app knows wh
 // events (which bubble) and isConnected work as in a browser, and a removed
 // element loses focus to <body>.
 class El {
-  constructor(doc, tag, data = '') { Object.assign(this, { doc, tag, data, childNodes: [], attrs: new Map(), on: {}, parentNode: null }); }
+  constructor(doc, tag, data = '') { Object.assign(this, { doc, tag, data, childNodes: [], attrs: new Map(), on: {}, parentNode: null, style: {} }); }
+  querySelectorAll(tag) { return this.findAll(n => n.tag === tag); }
+  querySelector(tag) { return this.find(n => n.tag === tag) || null; }
   get textContent() { return this.tag ? this.childNodes.map(c => c.textContent).join('') : this.data; }
   set textContent(s) { this.replaceChildren(String(s)); }
   setAttribute(k, v) { this.attrs.set(k, String(v)); }
@@ -163,7 +166,7 @@ class El {
 
 // One browser tab running the real shell (read from ROOT, so the mutation runner's
 // copy is the one exercised) against the test server, opened at address `hash`.
-function shellTab(t, hash = '') {
+function shellTab(t, hash = '', extras = {}) {
   let cookie = '';
   const pending = new Set(), streams = [];
   const track = p => { pending.add(p); const done = () => pending.delete(p); p.then(done, done); return p; };
@@ -202,10 +205,11 @@ function shellTab(t, hash = '') {
     return wait.then(() => send(url, opts));
   };
   const hold = match => { let release; held = { match, wait: new Promise(r => { release = r; }) }; return release; };
-  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, console, navigator: {}, location, EventSource,
+  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, console, navigator: {}, location, EventSource, atob,
     history: { replaceState(_s, _t, url) { location._hash = String(url).replace(/^[^#]*/, ''); } },
     addEventListener(type, fn) { (winOn[type] = winOn[type] || []).push(fn); },
     setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
+  Object.assign(win, extras);
   win.window = win;
   vm.createContext(win);
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/js/app.js'), 'utf8'), win, { filename: 'public/js/app.js' });
@@ -217,7 +221,7 @@ function shellTab(t, hash = '') {
     } while (pending.size);
   };
   return {
-    App: win.App, win, doc, location, streams, settle, el, hold,
+    App: win.App, win, doc, location, streams, settle, el, hold, track,
     main: () => doc.getElementById('main'),
     signIn(user) { const token = crypto.randomBytes(16).toString('hex'); t.ctx.sessions.set(token, user.id); cookie = 'sid=' + token; },
     async start() { win.App.start(); await settle(); },
@@ -442,4 +446,482 @@ test('CORE', 'dev mode is off unless ELITE_DEV=1 is set explicitly (R9), and off
 
   const d = await makeApp({ dev: true });
   assert.equal((await d.anon.get('/api/dev/accounts')).status, 200, 'with dev mode on, the demo helpers are there');
+});
+
+// ---------------------------------------------------------------- hosting (render.yaml, docs/deploy.md)
+
+test('CORE', 'GET /healthz answers 200 {ok:true} with no sign-in, for the host\'s health check', async () => {
+  const t = await makeApp();
+  const r = await t.anon.get('/healthz');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { ok: true });
+});
+
+test('CORE', 'the sign-in cookie is Secure when the request came over HTTPS through the host\'s proxy, and stays plain over local HTTP', async () => {
+  const t = await makeApp();
+  const p = t.fx.family(t.fx.location()).parent;
+  const login = proto => fetch(t.base + '/api/auth/login', { method: 'POST',
+    headers: Object.assign({ 'content-type': 'application/json' }, proto ? { 'x-forwarded-proto': proto } : {}),
+    body: JSON.stringify({ email: p.email, password: 'demo1234' }) });
+  const flags = r => (r.headers.get('set-cookie') || '').split(';').map(x => x.trim().toLowerCase());
+  const https = await login('https');
+  assert.equal(https.status, 200);
+  assert.ok(flags(https).includes('secure'), 'HTTPS: Secure');
+  assert.ok(flags(https).includes('httponly'));
+  assert.equal((await https.json()).token, undefined, 'no token in the body (L64)');
+  assert.ok(!flags(await login(null)).includes('secure'), 'plain local HTTP keeps working');
+  assert.ok(!flags(await login('http')).includes('secure'));
+});
+
+test('CORE', 'a first boot on an empty database makes the schema and nothing else; demo data only with ELITE_SEED_DEMO=1, and only into a database with no accounts', async () => {
+  const { createApp, needsDemoSeed } = load('src/app.js');
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'elite-boot-'));
+  const file = path.join(dir, 'fresh.db');
+  assert.equal(needsDemoSeed(file, {}), false, 'not asked for: never');
+  assert.equal(needsDemoSeed(file, { ELITE_SEED_DEMO: '1' }), true, 'asked for, and no database yet');
+  const { ctx } = createApp({ dbFile: file });
+  const count = tbl => ctx.db.prepare(`SELECT COUNT(*) AS n FROM ${tbl}`).get().n;
+  for (const tbl of ['users', 'locations', 'notifications', 'push_subscriptions', 'settings']) assert.equal(count(tbl), 0, tbl + ' starts empty');
+  assert.equal(needsDemoSeed(file, { ELITE_SEED_DEMO: '0' }), false);
+  assert.equal(needsDemoSeed(file, { ELITE_SEED_DEMO: '1' }), true, 'schema only, no accounts: the demo may go in');
+  ctx.db.prepare("INSERT INTO users (role, name, email, password_hash, created_at) VALUES ('hq', 'A', 'a@x.test', 'x', 0)").run();
+  assert.equal(needsDemoSeed(file, { ELITE_SEED_DEMO: '1' }), false, 'a database with accounts is never seeded over');
+  ctx.db.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+  // server.js seeds only through this check, before the app opens the database.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /if \(needsDemoSeed\(DB, process\.env\)\) \{/);
+  assert.ok(server.indexOf('needsDemoSeed(DB') < server.indexOf('createApp({'));
+});
+
+// ---------------------------------------------------------------- web push (src/push.js, public/sw.js)
+
+const EP = n => 'https://fcm.googleapis.com/fcm/send/device-' + n;
+const KEYS = { p256dh: 'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM', auth: 'tBHItJI5svbpez7KI4CCXg' };
+const SUB = n => ({ endpoint: EP(n), keys: KEYS });
+const subsOf = (t, u) => t.db.prepare('SELECT endpoint FROM push_subscriptions WHERE user_id = ? ORDER BY id').all(u.id).map(r => r.endpoint);
+// The push sender, faked through ctx so no test touches the network. fail: endpoint -> status code, or 'throw'.
+function fakePush(t, fail = {}) {
+  const sent = [];
+  t.ctx.pushSender = (sub, payload, options) => {
+    sent.push({ endpoint: sub.endpoint, keys: sub.keys, payload: JSON.parse(payload), options });
+    const f = fail[sub.endpoint];
+    if (f === 'throw') throw new Error('boom');
+    return f ? Promise.reject(Object.assign(new Error('push failed'), { statusCode: f })) : Promise.resolve({ statusCode: 201 });
+  };
+  return sent;
+}
+
+test(['CORE', 'NF-1'], 'push subscriptions: signed-in users only, each manages only their own, and only real push services over https, with keys', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const a = t.fx.family(loc).parent, b = t.fx.family(loc).parent;
+  assert.equal((await t.anon.get('/api/push/key')).status, 401);
+  assert.equal((await t.anon.post('/api/push/subscribe', SUB(1))).status, 401);
+  assert.equal((await t.anon.post('/api/push/unsubscribe', { endpoint: EP(1) })).status, 401);
+  assert.equal((await t.as(a).post('/api/push/subscribe', SUB(1))).status, 200);
+  assert.equal((await t.as(a).post('/api/push/subscribe', SUB(1))).status, 200, 'subscribing again is fine');
+  assert.deepEqual(subsOf(t, a), [EP(1)]);
+  const theirs = await t.as(b).post('/api/push/unsubscribe', { endpoint: EP(1) });
+  assert.deepEqual([theirs.status, theirs.body.removed], [200, 0], "nobody removes another user's subscription");
+  assert.deepEqual(subsOf(t, a), [EP(1)]);
+  for (const body of [
+    { endpoint: 'https://evil.test/collect', keys: KEYS },
+    { endpoint: 'https://fcm.googleapis.com.evil.test/x', keys: KEYS },
+    { endpoint: 'http://fcm.googleapis.com/fcm/send/x', keys: KEYS },
+    { endpoint: EP(2) },
+    { endpoint: EP(2), keys: { p256dh: 'not base64!', auth: KEYS.auth } },
+    {},
+  ]) {
+    const r = await t.as(b).post('/api/push/subscribe', body);
+    assert.deepEqual([r.status, r.body.error], [400, 'bad_subscription'], JSON.stringify(body));
+  }
+  assert.deepEqual(subsOf(t, b), []);
+  for (const ep of ['https://web.push.apple.com/abc', 'https://updates.push.services.mozilla.com/wpush/v2/abc', 'https://wns2-by3p.notify.windows.com/w/?token=abc']) {
+    assert.equal((await t.as(b).post('/api/push/subscribe', { endpoint: ep, keys: KEYS })).status, 200, ep);
+  }
+  const own = await t.as(a).post('/api/push/unsubscribe', { endpoint: EP(1) });
+  assert.equal(own.body.removed, 1);
+  assert.deepEqual(subsOf(t, a), []);
+  // The endpoint is the device: the same browser signed in as someone else moves to that account.
+  await t.as(a).post('/api/push/subscribe', SUB(3));
+  await t.as(b).post('/api/push/subscribe', SUB(3));
+  assert.deepEqual(subsOf(t, a), []);
+  assert.ok(subsOf(t, b).includes(EP(3)));
+});
+
+test('CORE', 'VAPID keys: from the environment when set; otherwise made once and kept in settings so a restart keeps them; only the public key is handed out', async () => {
+  const t = await makeApp();
+  const push = load('src/push.js');
+  const p = t.fx.family(t.fx.location()).parent;
+  const r = await t.as(p).get('/api/push/key');
+  assert.equal(r.status, 200);
+  const row = k => (t.db.prepare('SELECT value FROM settings WHERE key = ?').get(k) || {}).value;
+  assert.ok(row('vapid_public_key') && row('vapid_private_key'));
+  assert.equal(r.body.publicKey, row('vapid_public_key'));
+  assert.ok(!JSON.stringify(r.body).includes(row('vapid_private_key')), 'the private key never leaves the server');
+  const before = [row('vapid_public_key'), row('vapid_private_key')];
+  delete t.ctx.vapid; // a restart: same database, nothing in memory
+  const again = push.vapid(t.ctx, {});
+  assert.deepEqual([again.publicKey, again.privateKey], before);
+  assert.deepEqual([row('vapid_public_key'), row('vapid_private_key')], before);
+
+  const t2 = await makeApp();
+  const env = { VAPID_PUBLIC_KEY: 'PUB', VAPID_PRIVATE_KEY: 'PRIV', VAPID_SUBJECT: 'mailto:ops@elite.test' };
+  assert.deepEqual({ ...push.vapid(t2.ctx, env) }, { publicKey: 'PUB', privateKey: 'PRIV', subject: 'mailto:ops@elite.test' });
+  assert.equal(t2.db.prepare("SELECT COUNT(*) AS n FROM settings WHERE key LIKE 'vapid%'").get().n, 0, 'nothing generated when the environment has keys');
+});
+
+test(['CORE', 'NF-1'], "notify.send() also pushes each notification to that user's own browsers: a tag per notification, a link to it, normal urgency; emergencies are urgent and stay on screen", async () => {
+  const t = await makeApp();
+  const notify = load('src/notify.js'), push = load('src/push.js');
+  const loc = t.fx.location();
+  const f1 = t.fx.family(loc), f2 = t.fx.family(loc);
+  const sent = fakePush(t);
+  await t.as(f1.parent).post('/api/push/subscribe', SUB('a1'));
+  await t.as(f1.parent).post('/api/push/subscribe', SUB('a2')); // a second phone
+  await t.as(f1.student).post('/api/push/subscribe', SUB('s1'));
+  await t.as(f2.parent).post('/api/push/subscribe', SUB('b1'));
+  const off = t.fx.user('parent', { location: loc, active: 0 });
+  t.db.prepare('INSERT INTO push_subscriptions (user_id, endpoint, keys, created_at) VALUES (?,?,?,?)').run(off.id, EP('off'), JSON.stringify(KEYS), 0);
+
+  const [row] = notify.send(t.ctx, [f1.parent.id, off.id], { kind: 'checkin', title: 'Maya checked in', body: 'Irvine, 1:02 PM', refType: 'visit', refId: 9 });
+  assert.equal(sent.length, 0, 'nothing goes out inside the request that sent it');
+  await push.flush(t.ctx);
+  assert.deepEqual(sent.map(s => s.endpoint).sort(), [EP('a1'), EP('a2')], 'only that user\'s browsers, and never an inactive account\'s');
+  assert.deepEqual(sent[0].payload, { id: row.id, title: 'Maya checked in', body: 'Irvine, 1:02 PM', tag: 'n' + row.id,
+    url: '/#/inbox/' + row.id, emergency: false, requireInteraction: false });
+  assert.deepEqual(sent[0].keys, KEYS);
+  assert.equal(sent[0].options.urgency, 'normal');
+  const v = push.vapid(t.ctx);
+  assert.deepEqual(sent[0].options.vapidDetails, { subject: v.subject, publicKey: v.publicKey, privateKey: v.privateKey });
+
+  sent.length = 0;
+  const [alarm] = notify.send(t.ctx, [f2.parent.id], { kind: 'emergency', title: 'Building closed', body: 'Pick up by 3 PM.', refType: 'announcement', refId: 7, priority: 'emergency' });
+  await push.flush(t.ctx);
+  assert.deepEqual(sent.map(s => s.endpoint), [EP('b1')]);
+  assert.equal(sent[0].options.urgency, 'high');
+  assert.equal(sent[0].payload.requireInteraction, true);
+  assert.equal(sent[0].payload.tag, 'n' + alarm.id);
+});
+
+test('CORE', 'push failures never reach the caller: a gone subscription (404/410) is dropped, other errors keep it, and one broken send does not stop the rest', async () => {
+  const t = await makeApp();
+  const notify = load('src/notify.js'), push = load('src/push.js');
+  const p = t.fx.family(t.fx.location()).parent;
+  for (const n of ['gone', 'expired', 'down', 'throws', 'ok']) await t.as(p).post('/api/push/subscribe', SUB(n));
+  const sent = fakePush(t, { [EP('gone')]: 410, [EP('expired')]: 404, [EP('down')]: 500, [EP('throws')]: 'throw' });
+  const rows = notify.send(t.ctx, [p.id], { kind: 'x', title: 'Hi' });
+  assert.equal(rows.length, 1, 'send() returns as usual');
+  await push.flush(t.ctx);
+  assert.deepEqual(sent.map(s => s.endpoint), [EP('gone'), EP('expired'), EP('down'), EP('throws'), EP('ok')]);
+  assert.deepEqual(subsOf(t, p), [EP('down'), EP('throws'), EP('ok')]);
+});
+
+test('CORE', 'a notification whose write was rolled back is never pushed', async () => {
+  const t = await makeApp();
+  const notify = load('src/notify.js'), push = load('src/push.js'), db = load('src/db.js');
+  const p = t.fx.family(t.fx.location()).parent;
+  await t.as(p).post('/api/push/subscribe', SUB(1));
+  const sent = fakePush(t);
+  assert.throws(() => db.tx(t.db, () => { notify.send(t.ctx, [p.id], { kind: 'x', title: 'Never happened' }); throw new Error('rolled back'); }));
+  await push.flush(t.ctx);
+  assert.equal(t.fx.notifications(p).length, 0);
+  assert.equal(sent.length, 0);
+});
+
+test(['CORE', 'NF-8'], 'service worker: a push shows its title and body under its own tag (emergencies stay on screen), and a tap focuses the open app at that item or opens it there', async () => {
+  const on = {}, shown = [], opened = [], navigated = [];
+  let windows = [];
+  const self = {
+    addEventListener: (type, fn) => { on[type] = fn; }, location: { origin: 'https://app.test' }, skipWaiting() {},
+    registration: { showNotification: (title, o) => { shown.push(Object.assign({ title }, o)); return Promise.resolve(); } },
+    clients: { matchAll: async () => windows, openWindow: async url => { opened.push(url); }, claim: async () => {} },
+  };
+  const sw = { self, URL, caches: {}, fetch() {} };
+  vm.createContext(sw);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/sw.js'), 'utf8'), sw, { filename: 'public/sw.js' });
+  const run = async (type, ev) => { let p; on[type](Object.assign({ waitUntil: x => { p = x; } }, ev)); await p; };
+  const data = o => ({ json: () => o, text: () => JSON.stringify(o) });
+  await run('push', { data: data({ id: 5, title: 'Maya checked in', body: 'Irvine, 1:02 PM', tag: 'n5', url: '/#/inbox/5', emergency: false, requireInteraction: false }) });
+  await run('push', { data: data({ id: 6, title: 'Building closed', body: 'Pick up by 3 PM.', tag: 'n6', url: '/#/inbox/6', emergency: true, requireInteraction: true }) });
+  assert.deepEqual(shown.map(s => [s.title, s.body, s.tag, s.requireInteraction, s.data.url]), [
+    ['Maya checked in', 'Irvine, 1:02 PM', 'n5', false, '/#/inbox/5'],
+    ['Building closed', 'Pick up by 3 PM.', 'n6', true, '/#/inbox/6'],
+  ]);
+  const note = url => ({ data: { url }, close() { this.closed = true; } });
+  const n5 = note('/#/inbox/5');
+  await run('notificationclick', { notification: n5 });
+  assert.ok(n5.closed);
+  assert.deepEqual(opened, ['https://app.test/#/inbox/5'], 'no app open: open it at the item');
+  const app = { url: 'https://app.test/#/home', focus() { this.focused = true; return Promise.resolve(this); }, navigate(u) { navigated.push(u); return Promise.resolve(this); } };
+  windows = [app];
+  await run('notificationclick', { notification: note('/#/inbox/6') });
+  assert.ok(app.focused);
+  assert.deepEqual(navigated, ['https://app.test/#/inbox/6'], 'the open app moves to the item');
+  assert.equal(opened.length, 1, 'no second window');
+});
+
+// ---------------------------------------------------------------- the shell: push, onboarding, focus, titles
+
+const memStore = (m = new Map()) => ({ getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); } });
+const blockedStore = () => ({ getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } });
+// A browser that can do web push: Notification permission, a service worker
+// registration with a push manager, storage and the bits iPhone detection reads.
+function pushBrowser({ permission = 'default', answer = 'granted', ua = 'Mozilla/5.0 (Linux; Android 14) Chrome/130 Mobile', touch = 0,
+  standalone, displayStandalone = false, storage, session, push = true, existing = null } = {}) {
+  const calls = { ask: 0, subscribe: [], unsubscribed: 0 };
+  let current = null;
+  const sub = (n, key) => ({ endpoint: EP(n), options: { applicationServerKey: key ? key.buffer : null },
+    toJSON() { return { endpoint: this.endpoint, keys: KEYS }; },
+    async unsubscribe() { calls.unsubscribed++; if (current === this) current = null; return true; } });
+  if (existing) current = sub(existing.n, existing.key);
+  const reg = { pushManager: { getSubscription: async () => current,
+    subscribe: async o => { calls.subscribe.push(o); current = sub('tab', o.applicationServerKey); return current; } } };
+  const state = { permission };
+  const win = {
+    navigator: { userAgent: ua, standalone, maxTouchPoints: touch,
+      serviceWorker: { ready: Promise.resolve(reg), getRegistration: async () => reg, register: async () => reg } },
+    matchMedia: () => ({ matches: displayStandalone }),
+    localStorage: storage || memStore(), sessionStorage: session || memStore(),
+  };
+  if (push) {
+    Object.assign(win, { PushManager: function PushManager() {},
+      Notification: { get permission() { return state.permission; }, requestPermission: async () => { calls.ask++; state.permission = answer; return answer; } } });
+  }
+  return { win, calls };
+}
+const bannerOf = tab => tab.main().find(n => n.cls.includes('notify-banner')) || null;
+const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
+
+test(['CORE', 'NF-8'], 'notification onboarding: parents and students get a Home banner, permission is asked only on a tap and then this device is subscribed; staff get no banner', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const fam = t.fx.family(loc);
+  const b = pushBrowser();
+  const tab = shellTab(t, '', b.win);
+  tab.signIn(fam.parent);
+  await tab.start();
+  const box = bannerOf(tab);
+  assert.ok(box, 'the banner is on Home');
+  assert.equal(box.getAttribute('aria-labelledby'), 'notify-t');
+  assert.equal(words(byTag(box, 'h2')[0]), 'Get alerts on this device');
+  assert.deepEqual(byTag(box, 'button').map(words), ['Turn on notifications', 'No thanks']);
+  assert.equal(b.calls.ask, 0, 'nothing asks for permission before a tap');
+  byTag(box, 'button')[0].click();
+  await tab.settle();
+  assert.equal(b.calls.ask, 1);
+  assert.deepEqual(subsOf(t, fam.parent), [EP('tab')], 'this device now gets the parent\'s notifications');
+  const key = (t.db.prepare("SELECT value FROM settings WHERE key = 'vapid_public_key'").get() || {}).value;
+  assert.deepEqual([...b.calls.subscribe[0].applicationServerKey], [...Buffer.from(key, 'base64url')]);
+  assert.equal(b.calls.subscribe[0].userVisibleOnly, true);
+  assert.equal(bannerOf(tab), null);
+  assert.equal(tab.doc.activeElement.tag, 'h1', 'focus goes to the page heading, not the top of the page');
+  assert.deepEqual(tab.doc.getElementById('toasts').childNodes.map(words), ['Notifications are on for this device.']);
+
+  const st = shellTab(t, '', pushBrowser().win);
+  st.signIn(fam.student);
+  await st.start();
+  assert.ok(bannerOf(st), 'students get it too');
+  const sf = shellTab(t, '', pushBrowser().win);
+  sf.signIn(t.fx.staff(loc));
+  await sf.start();
+  assert.ok(byTag(sf.main(), 'h1').length, 'staff Home drew');
+  assert.equal(bannerOf(sf), null, 'staff do not');
+});
+
+test(['CORE', 'NF-8'], 'notification onboarding never nags: once per session, No thanks hides it on this device for good, a refusal is never asked again, and blocked storage still works', async () => {
+  const t = await makeApp();
+  const fam = t.fx.family(t.fx.location());
+  const open = async (storage, session, opts = {}) => {
+    const b = pushBrowser(Object.assign({ storage, session }, opts));
+    const tab = shellTab(t, '', b.win);
+    tab.signIn(fam.parent);
+    await tab.start();
+    return { tab, b };
+  };
+  const device = new Map(), s1 = new Map();
+  // Leaving Home ends it for this session, a reload in the same session too; a new session shows it again.
+  let { tab } = await open(memStore(device), memStore(s1));
+  assert.ok(bannerOf(tab));
+  await tab.go('#/inbox');
+  await tab.go('#/home');
+  assert.equal(bannerOf(tab), null, 'not again after leaving Home');
+  ({ tab } = await open(memStore(device), memStore(s1)));
+  assert.equal(bannerOf(tab), null, 'not again on a reload in the same session');
+  ({ tab } = await open(memStore(device), memStore()));
+  assert.ok(bannerOf(tab), 'a new session shows it again, since it was never dismissed');
+  byTag(bannerOf(tab), 'button').find(x => words(x) === 'No thanks').click();
+  await tab.settle();
+  assert.equal(bannerOf(tab), null);
+  assert.equal(tab.doc.activeElement.tag, 'h1');
+  ({ tab } = await open(memStore(device), memStore()));
+  assert.equal(bannerOf(tab), null, 'dismissed on this device: never again');
+
+  // A refusal: no subscription, and nobody asks again.
+  const device2 = new Map();
+  let b;
+  ({ tab, b } = await open(memStore(device2), memStore(), { answer: 'denied' }));
+  byTag(bannerOf(tab), 'button')[0].click();
+  await tab.settle();
+  assert.equal(b.calls.ask, 1);
+  assert.match(words(bannerOf(tab)), /Notifications stay off/);
+  assert.deepEqual(subsOf(t, fam.parent), []);
+  await tab.App.refresh();
+  await tab.settle();
+  assert.equal(bannerOf(tab), null, 'not offered again on the next draw');
+  ({ tab, b } = await open(memStore(device2), memStore(), { permission: 'default' }));
+  assert.equal(bannerOf(tab), null, 'nor in a later session');
+  assert.equal(b.calls.ask, 0);
+
+  // Storage blocked (private mode): Home still draws, and No thanks still hides it for this visit.
+  ({ tab } = await open(blockedStore(), blockedStore()));
+  assert.ok(byTag(tab.main(), 'h1').length);
+  assert.ok(bannerOf(tab));
+  byTag(bannerOf(tab), 'button').find(x => words(x) === 'No thanks').click();
+  await tab.settle();
+  await tab.go('#/inbox');
+  await tab.go('#/home');
+  assert.equal(bannerOf(tab), null);
+});
+
+test(['CORE', 'NF-8'], 'notification onboarding on an iPhone: Safari (not installed) shows the Add to Home Screen steps instead of asking; the installed app offers to turn notifications on', async () => {
+  const t = await makeApp();
+  const fam = t.fx.family(t.fx.location());
+  const open = async opts => { const b = pushBrowser(opts); const tab = shellTab(t, '', b.win); tab.signIn(fam.parent); await tab.start(); return { tab, b }; };
+  // iPhone Safari has no web push outside the installed app (an iPad reports itself as a Mac with touch).
+  for (const opts of [{ ua: IPHONE, push: false }, { ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/18.0 Safari/605.1.15', touch: 5, push: false }]) {
+    const { tab } = await open(opts);
+    const box = bannerOf(tab);
+    assert.ok(box, opts.ua);
+    assert.equal(words(byTag(box, 'h2')[0]), 'Get alerts on your iPhone');
+    assert.deepEqual(byTag(box, 'li').map(words), [
+      'Tap the Share button (the square with an arrow) in Safari.',
+      'Choose Add to Home Screen, then tap Add.',
+      'Open ELITE Spaces from the new icon on your Home Screen and sign in.',
+      'Tap Turn on notifications.',
+    ]);
+    assert.deepEqual(byTag(box, 'button').map(words), ['Got it, hide this']);
+    byTag(box, 'button')[0].click();
+    assert.equal(bannerOf(tab), null);
+  }
+  for (const opts of [{ ua: IPHONE, standalone: true }, { ua: IPHONE, displayStandalone: true }]) {
+    const { tab, b } = await open(opts);
+    assert.deepEqual(byTag(bannerOf(tab), 'button').map(words), ['Turn on notifications', 'No thanks'], JSON.stringify(opts));
+    assert.equal(b.calls.ask, 0);
+  }
+});
+
+test(['CORE', 'NF-8'], 'push on this device follows the account: notifications already allowed subscribe at sign-in without asking, a changed server key resubscribes, and signing out stops them', async () => {
+  const t = await makeApp();
+  const push = load('src/push.js');
+  const fam = t.fx.family(t.fx.location());
+  const b = pushBrowser({ permission: 'granted' });
+  const tab = shellTab(t, '', b.win);
+  tab.signIn(fam.parent);
+  await tab.start();
+  assert.equal(b.calls.ask, 0);
+  assert.deepEqual(subsOf(t, fam.parent), [EP('tab')]);
+  assert.equal(bannerOf(tab), null, 'already on: no banner');
+  const out = tab.doc.getElementById('topbar').find(n => n.tag === 'button' && /^Sign out/.test(n.getAttribute('aria-label') || ''));
+  out.click();
+  await tab.settle();
+  assert.deepEqual(subsOf(t, fam.parent), [], 'signed out: this device stops getting them');
+
+  const key = Uint8Array.from(Buffer.from(push.vapid(t.ctx).publicKey, 'base64url'));
+  const same = pushBrowser({ permission: 'granted', existing: { n: 'same', key } });
+  const tab2 = shellTab(t, '', same.win);
+  tab2.signIn(fam.parent);
+  await tab2.start();
+  assert.deepEqual(subsOf(t, fam.parent), [EP('same')], 'the existing subscription is reused');
+  assert.equal(same.calls.unsubscribed, 0);
+
+  const stale = pushBrowser({ permission: 'granted', existing: { n: 'old', key: new Uint8Array([4, 1, 2, 3]) } });
+  const tab3 = shellTab(t, '', stale.win);
+  tab3.signIn(fam.student);
+  await tab3.start();
+  assert.equal(stale.calls.unsubscribed, 1, 'made with another key: replaced');
+  assert.deepEqual(subsOf(t, fam.student), [EP('tab')]);
+});
+
+test(['CORE', 'NF-7'], 'Inbox: after Mark all read, focus goes to the Inbox heading, not the top of the page', async () => {
+  const w = await inboxWorld();
+  const { tab } = w;
+  await tab.start();
+  await tab.go('#/inbox');
+  byTag(tab.main(), 'button').find(b => b.textContent === 'Mark all read').click();
+  await tab.settle();
+  assert.equal(tab.doc.activeElement.tag, 'h1');
+  assert.equal(words(tab.doc.activeElement), 'Inbox');
+  assert.equal(tab.doc.activeElement.getAttribute('tabindex'), '-1');
+});
+
+test(['CORE', 'NF-8'], "a tapped push opens #/inbox/<id>: the Inbox sends it on to that item's screen and marks only it read; an item with no screen stays in the Inbox", async () => {
+  const w = await inboxWorld();
+  const { tab, t } = w;
+  await tab.start();
+  await tab.go('#/inbox/' + w.visit.id);
+  assert.equal(tab.location.hash, '#/news/42');
+  assert.equal(words(tab.main()), 'news');
+  assert.deepEqual(t.fx.notifications(w.fam.parent).filter(n => !n.read_at).map(n => n.id).sort((x, y) => x - y), [w.closure.id, w.alarm.id]);
+  await tab.go('#/inbox/' + w.closure.id); // the closure screen is staff-only here
+  assert.equal(tab.location.hash, '#/inbox/' + w.closure.id);
+  assert.equal(inboxItems(tab).length, 4);
+});
+
+test(['CORE'], 'Inbox links work for every ref type modules send, whichever registers first, the link or the view it opens (L35)', async () => {
+  const t = await makeApp();
+  const notify = load('src/notify.js');
+  const fam = t.fx.family(t.fx.location());
+  const tab = shellTab(t);
+  const App = tab.App;
+  const types = { visit: 'hours', closure: 'schedule', session: 'schedule', enrollment: n => 'schedule/' + n.ref_id,
+    enrollment_request: 'schedule', membership: 'family', announcement: n => 'news/' + n.ref_id,
+    daily_note: n => 'notes/note/' + n.ref_id, user: 'family', location: 'family' };
+  for (const [type, route] of Object.entries(types)) App.inboxLink(type, route);
+  for (const id of ['hours', 'schedule', 'family', 'news', 'notes']) App.register({ id, title: id, roles: ['parent'], render(el) { el.append(id); } });
+  Object.keys(types).forEach((type, i) => notify.send(t.ctx, [fam.parent.id], { kind: type, title: 'About ' + type, refType: type, refId: i + 1 }));
+  tab.signIn(fam.parent);
+  await tab.start();
+  await tab.go('#/inbox');
+  assert.deepEqual(Object.fromEntries(inboxItems(tab).map(i => [i.text.replace(/^New About /, ''), i.href])), {
+    visit: '#/hours', closure: '#/schedule', session: '#/schedule', enrollment: '#/schedule/4', enrollment_request: '#/schedule',
+    membership: '#/family', announcement: '#/news/7', daily_note: '#/notes/note/8', user: '#/family', location: '#/family',
+  });
+});
+
+test(['CORE', 'NF-7'], 'sign-in: the tab title names the screen, following a panel a module opens in place of the form (create an account, an invite code)', async () => {
+  const t = await makeApp({ dev: true });
+  const observers = [];
+  class MutationObserver { constructor(fn) { this.fn = fn; observers.push(this); } observe(target) { this.target = target; } disconnect() { this.off = true; } }
+  const tab = shellTab(t, '', { MutationObserver });
+  const changed = () => observers.filter(o => !o.off).forEach(o => o.fn([]));
+  let openPanel, back;
+  tab.App.signInExtras.push(wrap => {
+    const form = wrap.find(n => n.tag === 'form');
+    const panel = tab.el('div');
+    form.after(panel);
+    openPanel = heading => { form.style.display = 'none'; panel.replaceChildren(...(heading ? [tab.App.h('h2', null, heading)] : [])); };
+    back = () => { form.style.display = ''; panel.replaceChildren(); };
+  });
+  await tab.start();
+  assert.equal(tab.doc.title, 'Sign in · ELITE Spaces');
+  assert.ok(byTag(tab.main(), 'h2').some(n => words(n) === 'Demo accounts'));
+  openPanel(null);
+  changed();
+  assert.equal(tab.doc.title, 'Sign in · ELITE Spaces', 'a panel still loading keeps the title, never the demo list heading');
+  openPanel('Create your family account');
+  changed();
+  assert.equal(tab.doc.title, 'Create your family account · ELITE Spaces');
+  back();
+  changed();
+  assert.equal(tab.doc.title, 'Sign in · ELITE Spaces');
+  openPanel('Open your invite');
+  changed();
+  assert.equal(tab.doc.title, 'Open your invite · ELITE Spaces');
+  tab.signIn(t.fx.family(t.fx.location()).parent);
+  tab.App.boot();
+  await tab.settle();
+  changed();
+  assert.equal(tab.doc.title, 'Home · ELITE Spaces', 'once signed in, the sign-in screen no longer sets the title');
 });

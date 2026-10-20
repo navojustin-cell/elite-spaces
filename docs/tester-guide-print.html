@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ELITE Spaces Tester Guide</title>
+<style>
+:root { --ink:#1b1f27; --muted:#555c68; --line:#c9ccd2; --brand:#14213d; --soft:#f1f2f4; --paper:#ffffff; }
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 11pt/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 20pt; line-height: 1.2; margin: 0 0 8px; color: var(--brand); }
+h2 { font-size: 16pt; margin: 0 0 6px; color: var(--brand); border-bottom: 2px solid var(--brand); padding-bottom: 4px; }
+h3 { font-size: 11.5pt; margin: 14px 0 4px; text-transform: uppercase; letter-spacing: .04em; color: var(--brand); }
+p { margin: 0 0 8px; }
+ol, ul { margin: 0 0 8px; padding-left: 22px; }
+li { margin: 0 0 5px; }
+li > ul, li > ol { margin-top: 4px; }
+strong { font-weight: 700; }
+code { font-family: ui-monospace, Consolas, Menlo, monospace; font-size: 10pt; }
+.kicker { font-size: 9pt; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 0 0 4px; }
+section { margin-top: 28px; }
+table.fill { border-collapse: collapse; width: 100%; margin: 8px 0 12px; }
+table.fill th { text-align: left; font-weight: 600; width: 34%; padding: 8px 10px; border: 1px solid var(--line); background: var(--soft); }
+table.fill td { padding: 8px 10px; border: 1px solid var(--line); height: 2.2em; }
+pre.template { white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5pt/1.7 ui-monospace, Consolas, Menlo, monospace; background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin: 6px 0 8px; }
+@media screen and (max-width: 480px) { body { font-size: 15px; } table.fill th { width: 45%; } }
+@page { size: letter; margin: 0.6in 0.65in; }
+@media print {
+  main { max-width: none; padding: 0; }
+  body { font-size: 10.5pt; }
+  section.role { break-before: page; page-break-before: always; margin-top: 0; }
+  h2, h3 { break-after: avoid; page-break-after: avoid; }
+  li, pre, table { break-inside: avoid; page-break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1>ELITE Spaces internal test: tester guide</h1>
+<p>This is the first test of the ELITE Spaces app (PRD rollout step 1). It runs at one location, and staff play every part: students, parents, staff and the director. Everything you enter is test data.</p>
+<p>Find your role below. Each role has its own page: how to get in, what to try in order, and what to report.</p>
+<table class="fill"><tr><th>Test link</th><td></td></tr><tr><th>Test location</th><td></td></tr><tr><th>Test dates</th><td></td></tr><tr><th>Send reports to</th><td></td></tr></table>
+<section class="part">
+<h2>Before you start (everyone)</h2>
+<ul>
+<li><strong>Every account needs its own email address.</strong> If you play a parent and also have a staff account, use a different email for each. A student can't use the parent's email.
+</li>
+<li><strong>Use one phone per account if you can.</strong> Notifications go to whoever is signed in on that phone. If you switch accounts, sign out first (your first name and ⏻, top right).
+</li>
+<li><strong>iPhone:</strong> notifications need iOS 16.4 or later, and only work from the Home Screen app, not from Safari.
+</li>
+<li><strong>Don't tap "No thanks" on the notifications banner.</strong> It hides the banner on that phone for good, and this build has no other button to turn notifications on.
+</li>
+<li>The bell (top right) is your Inbox. Everything the app sends you lands there, even with notifications off.
+</li></ul>
+</section>
+<section class="part">
+<h2>Test order</h2>
+<p>Some steps need others done first. Go in this order:</p>
+<ol>
+<li><strong>Director:</strong> set the location's hours, add a term and sessions, add staff accounts, put the Entrance QR on screen or print it.
+</li>
+<li><strong>Parents:</strong> create a family account and invite a student.
+</li>
+<li><strong>Students:</strong> open the invite and set a password. <strong>Parents:</strong> approve them.
+</li>
+<li><strong>Staff:</strong> set up a membership for each student (Members). Nobody can enroll without one.
+</li>
+<li><strong>Parents:</strong> enroll students in sessions. <strong>Students:</strong> ask to join one.
+</li>
+<li><strong>Session day:</strong> students scan in and out, staff watch In the building and write daily notes, the director sends an announcement and an emergency alert drill.
+</li>
+<li><strong>Parents:</strong> read the daily note and download an hours log.
+</li></ol>
+</section>
+<section class="part">
+<h2>How to report a problem</h2>
+<p>Report anything that breaks, confuses you, or doesn't match this guide. One problem per report. Copy this:</p>
+<pre class="template">Role and phone:   (for example: Parent, iPhone 13, Home Screen app)
+Screen:           (for example: Schedule, Add a session)
+What happened:
+What you expected:
+Screenshot:       attached / none</pre>
+<p>Take the screenshot the moment it happens, before you tap anything else.</p>
+</section>
+<section class="role">
+<p class="kicker">ELITE Spaces internal test · tester guide</p>
+<h2>Student</h2>
+<p>You're a homeschooled student with your own phone. You scan in and out, see your schedule, and ask a parent for sessions.</p>
+<h3>Get in</h3>
+<ol>
+<li>Your "parent" sends you an invite by text or email. Open the link <strong>on your phone</strong>. (No link? Open the test link, tap <strong>Have an invite code?</strong>, type the code, tap <strong>Continue</strong>.)
+</li>
+<li>You see <strong>Welcome, [your name]</strong>. Fill in <strong>Choose a password</strong> (and <strong>Your email</strong> if it asks), then tap <strong>Finish my account</strong>.
+</li>
+<li>You see <strong>You're almost in</strong>. Your parent has to approve you before you can sign in. Tell them.
+</li>
+<li>Install the app:
+<ul>
+<li><strong>iPhone (Safari):</strong> open the test link, tap the Share button (square with an arrow), tap <strong>Add to Home Screen</strong>, tap <strong>Add</strong>.
+</li>
+<li><strong>Android (Chrome):</strong> open the test link, tap the ⋮ menu, tap <strong>Add to Home screen</strong> (or <strong>Install app</strong>).
+</li></ul>
+</li>
+<li>Open <strong>ELITE Spaces</strong> from the new icon. Sign in with your <strong>Email</strong> and <strong>Password</strong>, tap <strong>Sign in</strong>.
+</li>
+<li>On Home, tap <strong>Turn on notifications</strong>, then <strong>Allow</strong>.
+</li></ol>
+<h3>Try these, in order</h3>
+<ol>
+<li><strong>Home.</strong> You should see <strong>Not checked in</strong>, a <strong>Scan to check in</strong> button and a <strong>Your membership</strong> card.
+</li>
+<li><strong>Ask for a session.</strong> Tap <strong>Schedule</strong>. Under <strong>Ask to join a session</strong>, tap <strong>Ask to join</strong> on one. It should change to <strong>Asked</strong>, and <strong>Your requests</strong> should say <strong>Waiting for a parent</strong>.
+</li>
+<li><strong>Get the answer.</strong> When your parent decides, you get a notification. <strong>Your requests</strong> should change to <strong>Approved · enrolled</strong> or <strong>Declined</strong>. An approved session shows under <strong>Every week</strong>.
+</li>
+<li><strong>Scan in.</strong> At the location, from 30 minutes before your session starts until it ends, tap <strong>Check in</strong>, then <strong>Scan to check in</strong>. Allow the camera, point it at the code by the entrance, and allow your location. You should see <strong>✓ Checked in</strong> with the time, the session, and "Your parents have been told."
+</li>
+<li><strong>Scan with the Camera app.</strong> Another time, open your phone's own Camera app and point it at the entrance code. It should open ELITE Spaces straight to check-in (and ask you to sign in first if you're signed out).
+</li>
+<li><strong>Scan twice by mistake.</strong> Right after checking in, scan again. It should ask before checking you out. Tap <strong>Stay checked in</strong>.
+</li>
+<li><strong>Scan out.</strong> When you leave, tap <strong>Scan to check out</strong>. You should see <strong>✓ Checked out</strong> with your total time.
+</li>
+<li><strong>News.</strong> Open <strong>News</strong> and read the announcements. When the director sends the emergency alert drill, a red <strong>Emergency alert</strong> box pops up (or a notification, if the app is closed). Tap <strong>I have read this</strong>.
+</li></ol>
+<h3>Look for and report</h3>
+<ul>
+<li>A scan that takes more than about 2 seconds once your location is found.
+</li>
+<li>A wrong refusal. These messages are correct only when true: <strong>We couldn't confirm you're in the building</strong> (you're outside), <strong>No session right now</strong> (no session starting within 30 minutes or under way), <strong>This code has expired</strong> (yesterday's code).
+</li>
+<li>Any time the camera or location prompt didn't appear, or the help steps didn't get you going again.
+</li>
+<li>Notifications that didn't arrive, arrived twice, or arrived with the app closed but showed wrong details.
+</li>
+<li>You won't see daily notes. That's on purpose in this version.
+</li></ul>
+</section>
+<section class="role">
+<p class="kicker">ELITE Spaces internal test · tester guide</p>
+<h2>Parent</h2>
+<p>You hold the family account. You invite your student, pick their sessions, and get check-ins, notes and hours.</p>
+<h3>Get in</h3>
+<ol>
+<li><strong>Install the app first:</strong>
+<ul>
+<li><strong>iPhone (Safari):</strong> open the test link, tap the Share button (square with an arrow), tap <strong>Add to Home Screen</strong>, tap <strong>Add</strong>.
+</li>
+<li><strong>Android (Chrome):</strong> open the test link, tap the ⋮ menu, tap <strong>Add to Home screen</strong> (or <strong>Install app</strong>).
+</li></ul>
+</li>
+<li>Open <strong>ELITE Spaces</strong> from the new icon. Tap <strong>New family? Create an account</strong>.
+</li>
+<li>Fill in <strong>Your full name</strong>, <strong>Email</strong>, <strong>Mobile phone</strong>, <strong>Password</strong> (8 or more characters), and pick the test location under <strong>Home location</strong>. Tap <strong>Create account</strong>.
+</li>
+<li>Go to <strong>Home</strong> and tap <strong>Turn on notifications</strong>, then <strong>Allow</strong>.
+</li></ol>
+<p>On a phone, <strong>News</strong> and <strong>Family</strong> are under <strong>More</strong> in the bottom bar.</p>
+<h3>Try these, in order</h3>
+<ol>
+<li><strong>Invite your student.</strong> The <strong>Invite a student</strong> form opens right after sign-up (or <strong>Family</strong> › <strong>Invite a student</strong>). Fill in <strong>Student's full name</strong> and <strong>Student's email</strong> (an email only the student uses), tap <strong>Create invite</strong>. Send it with <strong>Text it</strong>, <strong>Email it</strong> or <strong>Copy invite message</strong>. The code is shown only once.
+</li>
+<li><strong>Approve your student.</strong> When they set a password you get a notification, and Home shows <strong>[Name] is waiting for your approval</strong>. Tap <strong>Approve</strong>.
+</li>
+<li><strong>Enroll.</strong> Once staff have set up a membership, open <strong>Schedule</strong>. Under <strong>Add a session</strong>, tap <strong>Enroll</strong> on a day and time. It should appear under <strong>[Name]'s weekly sessions</strong>.
+</li>
+<li><strong>Answer a request.</strong> When your student asks for a session, <strong>Requests from your students</strong> appears on Schedule (and <strong>Session requests</strong> on Home). Approve one. If you can, decline another and check your student is told.
+</li>
+<li><strong>Waitlist (with a second parent).</strong> On a session the director set to very few seats, fill it, then have the other parent tap <strong>Join waitlist</strong> (or <strong>Enroll</strong>, then <strong>Add [Name] to the waitlist</strong>). Drop a spot with <strong>Drop</strong>, then <strong>Drop [day]s</strong>. The waiting student should be enrolled automatically, and their parent notified.
+</li>
+<li><strong>Session day.</strong> You should get a notification when your student checks in and when they check out. Home's <strong>Today</strong> card should match.
+</li>
+<li><strong>Daily note.</strong> After staff post it, you get a notification. Open <strong>Notes</strong> to read the ratings and comment. Home also shows <strong>Today's notes</strong>.
+</li>
+<li><strong>Hours.</strong> Open <strong>Hours</strong>. Switch between <strong>Week</strong>, <strong>Month</strong> and <strong>Term</strong>. Under <strong>Download a log</strong>, pick a range and tap <strong>Download PDF</strong>, then <strong>Download CSV</strong>. Open both.
+</li></ol>
+<h3>Look for and report</h3>
+<ul>
+<li>Any check-in or check-out notification that was missing, late, or had the wrong time or session.
+</li>
+<li>An automatic check-out (student forgot to scan out) that isn't labeled as automatic.
+</li>
+<li>Hours that don't match the times you saw, or a PDF/CSV you couldn't open or wouldn't hand to an evaluator.
+</li>
+<li>An enroll, waitlist or drop that said one thing and showed another.
+</li>
+<li>Anything in <strong>Family</strong> that's confusing: invite states, <strong>Resend</strong>, <strong>Cancel invite</strong>, <strong>Invite a guardian</strong>.
+</li></ul>
+</section>
+<section class="role">
+<p class="kicker">ELITE Spaces internal test · tester guide</p>
+<h2>Staff</h2>
+<p>You work the front desk and the floor. You watch who's in the building, fix check-ins, set memberships, and write daily notes.</p>
+<h3>Get in</h3>
+<ol>
+<li>Your director gives you a <strong>temporary password</strong>. Open the test link (a computer is fine; staff screens are built for desktop too).
+</li>
+<li>Sign in with your work <strong>Email</strong> and the temporary password, tap <strong>Sign in</strong>.
+</li>
+<li>On Home, under <strong>Choose your own password</strong>, fill in <strong>Current password</strong> (the temporary one) and <strong>New password</strong>, tap <strong>Save new password</strong>.
+</li>
+<li>Phone: install it the same way as families (iPhone: Safari › Share › <strong>Add to Home Screen</strong> › <strong>Add</strong>; Android: Chrome › ⋮ › <strong>Add to Home screen</strong>).
+</li>
+<li>Notifications: staff accounts don't get the <strong>Turn on notifications</strong> banner in this build. Watch the bell (top right) and the pop-ups while the app is open.
+</li></ol>
+<p>On a phone, <strong>Members</strong>, <strong>Sessions</strong> and <strong>People</strong> are under <strong>More</strong>.</p>
+<h3>Try these, in order</h3>
+<ol>
+<li><strong>Set up memberships.</strong> Open <strong>Members</strong>. Find a test student, tap <strong>Set up</strong>. Leave <strong>Status</strong> on <strong>Active</strong>, set <strong>Weekly session limit</strong> (try 3), <strong>Start date</strong> and <strong>Last day</strong>, tap <strong>Set up membership</strong>. Do this for every test student before parents enroll.
+</li>
+<li><strong>Open In the building.</strong> Check the counts: <strong>in the building</strong>, <strong>still expected</strong>, <strong>left today</strong>. The list refreshes on its own every 15 seconds or so.
+</li>
+<li><strong>Show the entrance code.</strong> Tap <strong>Entrance QR</strong>, then <strong>Full screen</strong> (or <strong>Print</strong>). It should say <strong>Students: scan to check in or out</strong> and <strong>Today's code · good until</strong> a time.
+</li>
+<li><strong>Check someone in by hand.</strong> Under <strong>Check someone in or out by hand</strong>, type a name in <strong>Student name</strong>, tap <strong>Check in</strong>, pick a <strong>Reason (optional)</strong> like <strong>Phone is dead</strong>, tap <strong>Check in</strong> (or <strong>Check in anyway</strong> if they have no session now). The row under <strong>Here</strong> should say <strong>Checked in by [your name]</strong>. Check them out the same way with <strong>Check out</strong>.
+</li>
+<li><strong>Review a missed scan-out.</strong> Agree with a student that they won't scan out. After their session ends they appear under <strong>Needs review</strong>. Tap <strong>Time is right</strong>, or <strong>Fix time out</strong>, set <strong>Actual time out</strong>, tap <strong>Save time out</strong>.
+</li>
+<li><strong>Write daily notes.</strong> Open <strong>Daily notes</strong>. For each student who came in, tap <strong>Needs work</strong>, <strong>Good</strong> or <strong>Great</strong> on every item, add a <strong>Comment (optional)</strong>, tap <strong>Post note</strong>. Try <strong>Save for later</strong> on one, then come back and post it. Edit a posted note with <strong>Edit note</strong> › <strong>Save changes</strong>.
+</li>
+<li><strong>Change a membership.</strong> In <strong>Members</strong>, open a student who holds sessions. Try to lower <strong>Weekly session limit</strong> below what they hold (it should refuse and explain). Then set <strong>Status</strong> to <strong>Inactive</strong>: the button should say <strong>Save and pause [n] sessions</strong>. Save, then set it back to <strong>Active</strong> and save again. Their sessions should come back, and the family should be told each time.
+</li>
+<li><strong>People.</strong> Open <strong>People</strong> › <strong>Families</strong>. Search for a student or parent by name, email or phone.
+</li></ol>
+<h3>Look for and report</h3>
+<ul>
+<li>A student who checked in but isn't under <strong>Here</strong>, or a count that's wrong.
+</li>
+<li>A manual entry that isn't saved with your name and reason.
+</li>
+<li>A note you couldn't post, or a parent who didn't get the notification after <strong>Post note</strong>.
+</li>
+<li>Any screen that's slow or hard to use at the front desk with a line of students.
+</li>
+<li><strong>Sessions</strong> is read-only for staff, and only directors post in <strong>News</strong>. That's on purpose.
+</li></ul>
+</section>
+<section class="role">
+<p class="kicker">ELITE Spaces internal test · tester guide</p>
+<h2>Director</h2>
+<p>You lead the location. You do everything staff do, plus the schedule, staff accounts, announcements, emergency alerts and reports.</p>
+<h3>Get in</h3>
+<ol>
+<li>The test coordinator (HQ) gives you a <strong>temporary password</strong>. Open the test link and sign in with your work <strong>Email</strong> and that password.
+</li>
+<li>On Home, under <strong>Choose your own password</strong>, fill in <strong>Current password</strong> and <strong>New password</strong>, tap <strong>Save new password</strong>.
+</li>
+<li>Phone: install it the same way as families (iPhone: Safari › Share › <strong>Add to Home Screen</strong> › <strong>Add</strong>; Android: Chrome › ⋮ › <strong>Add to Home screen</strong>).
+</li>
+<li>Notifications: director accounts don't get the <strong>Turn on notifications</strong> banner in this build. Watch the bell (top right) and the pop-ups while the app is open.
+</li></ol>
+<p>On a phone, <strong>News</strong>, <strong>Members</strong>, <strong>Sessions</strong> and <strong>People</strong> are under <strong>More</strong>.</p>
+<h3>Try these, in order</h3>
+<ol>
+<li><strong>Location settings.</strong> Open <strong>People</strong> › <strong>Location settings</strong>. Check <strong>Check-in radius (meters)</strong> (150 suits most buildings), <strong>New QR code each day at</strong>, <strong>Opens at</strong> and <strong>Closes at</strong>. Tap <strong>Save changes</strong>.
+</li>
+<li><strong>Term and sessions.</strong> Open <strong>Sessions</strong>. Tap <strong>Add a term</strong>, fill <strong>Name</strong>, <strong>First day</strong>, <strong>Last day</strong>, tap <strong>Add term</strong>. Then tap <strong>+ New session</strong>: <strong>Name</strong>, <strong>Days it meets</strong>, <strong>Starts</strong>, <strong>Ends</strong>, <strong>Seats per day</strong>, tap <strong>Create session</strong>. Make one session with only 1 or 2 seats so parents can test the waitlist.
+</li>
+<li><strong>Staff accounts.</strong> Open <strong>People</strong> › <strong>Staff</strong>, tap <strong>Add a staff member</strong>, fill <strong>Full name</strong> and <strong>Work email</strong>, tap <strong>Create account</strong>. Copy the temporary password (it shows once) and give it to them. Try <strong>Reset password</strong>, <strong>Deactivate</strong> and <strong>Reactivate</strong> on a test account.
+</li>
+<li><strong>Entrance code.</strong> Open <strong>In the building</strong> › <strong>Entrance QR</strong> › <strong>Full screen</strong> on a screen by the door, or <strong>Print</strong> it. A printed copy works only until the time it shows.
+</li>
+<li><strong>Announcement.</strong> Open <strong>News</strong> › <strong>New announcement</strong>. Pick <strong>Who should get this?</strong>, a <strong>Kind of post</strong>, a <strong>Title</strong> and <strong>Message</strong>, leave <strong>Send now</strong>, tap <strong>Review</strong>, then <strong>Post now</strong>. Also schedule one with <strong>Schedule for later</strong>. Watch <strong>Sent to</strong>, <strong>Delivered</strong> and <strong>Read</strong>, and tap <strong>Refresh numbers</strong>.
+</li>
+<li><strong>Emergency alert drill.</strong> Agree the time with everyone first. In <strong>News</strong>, tap <strong>Send emergency alert</strong>. Start the <strong>Headline</strong> with "TEST DRILL", fill <strong>What should people do?</strong>, tap <strong>Review alert</strong>, then <strong>Send alert now</strong>. Everyone with the app open should get a red pop-up, and everyone else a notification, including parents who muted announcements.
+</li>
+<li><strong>Closure and session changes.</strong> In <strong>Sessions</strong>, tap <strong>Add a closure</strong>, pick a <strong>Date</strong> (today or later), tap <strong>Close this day</strong> › <strong>Close and tell families</strong>. Then <strong>Reopen</strong> it. Tap a session in <strong>Weekly schedule</strong>, change <strong>Seats per day</strong>, tap <strong>Save changes</strong>. Families should be told.
+</li>
+<li><strong>Reports.</strong> Open <strong>Reports</strong>. Pick a <strong>Session</strong> and a range, tap <strong>Show report</strong>. Check <strong>By student</strong>, <strong>Visits</strong> and <strong>Absences</strong>, then <strong>Download CSV</strong> and <strong>Download PDF</strong>.
+</li></ol>
+<p>Also try the staff list (memberships, In the building, daily notes) if no one else covers it.</p>
+<h3>Look for and report</h3>
+<ul>
+<li>Families who should have been told about a closure, change or cancellation but weren't, or who were told twice.
+</li>
+<li><strong>Sent to</strong>, <strong>Delivered</strong> or <strong>Read</strong> numbers that don't match what testers say they got.
+</li>
+<li>An emergency alert that didn't pop up for someone signed in, or that someone could mute.
+</li>
+<li>Report numbers that don't match In the building, Daily notes or a parent's Hours.
+</li>
+<li>Anything that refused a change without saying why.
+</li></ul>
+</section>
+<section class="part">
+<h2>Already known (no need to report)</h2>
+<ul>
+<li>An emergency alert stays pinned as <strong>active now</strong> for 24 hours. There's no way to end it early yet.
+</li>
+<li>A missed session shows as <strong>Absent</strong>, but parents aren't notified.
+</li>
+<li>Students don't see daily notes, and enrollment is weekly only (no single dates). Both are on purpose in this version.
+</li>
+<li>After some buttons (<strong>Refresh numbers</strong>, <strong>Decline</strong>, <strong>Cancel invite</strong>, <strong>Deactivate</strong>), the screen jumps back to the top.
+</li>
+<li>The parent's check-out notification doesn't name the session (the check-in one does).
+</li>
+<li>Home's <strong>Latest news</strong> doesn't update by itself when a normal announcement arrives (emergency alerts do).
+</li>
+<li>Everyone is signed out if the test server restarts. Just sign in again.
+</li></ul>
+</section>
+</main>
+</body>
+</html>

@@ -211,3 +211,16 @@ table.table { width: 100%; border-collapse: collapse; font-size: .92rem; }
 .demo-list button { width: 100%; text-align: left; justify-content: flex-start; margin-bottom: .4rem; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* Home: the offer to turn on notifications (and the iPhone Add to Home Screen steps). */
+.notify-banner { border-color: var(--accent); background: var(--accent-soft); }
+.notify-banner h2 { font-size: 1.1rem; }
+.notify-steps { margin: 0 0 .75rem; padding-left: 1.4rem; }
+.notify-steps li + li { margin-top: .25rem; }
+
+/* Narrow phones (320px): five tabs share the bar evenly instead of overflowing it.
+   Each stays at least 64px wide (44px target); a long label shortens with an ellipsis. */
+@media (max-width: 899px) {
+  #nav a, #nav .nav-more { flex: 1 1 0; min-width: 0; padding-left: 2px; padding-right: 2px; }
+  #nav a > span:last-child, #nav .nav-more > span:last-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}

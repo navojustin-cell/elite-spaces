@@ -104,9 +104,19 @@ function router(ctx) {
       throw refuse('membership_inactive',`Your membership isn't active, so your sessions are paused. Ask a parent or the front desk at ${loc.name} to renew it.`);
     }
     const slot = svc.slotNow(ctx, loc, student.id, now);
-    if (!slot) throw refuse('no_session', svc.noSessionMessage(ctx, loc, student.id, now));
-    // The mirror of the check-out question: a scan this soon after checking out asks before checking back in.
     const last = svc.lastCheckout(ctx, student.id, loc.id, today);
+    if (!slot) {
+      // A scan to check out after the auto-checkout already did it (CI-5, D-14) is not a check-in attempt.
+      if (last && last.checkout_method === 'auto') {
+        throw refuse('checked_out_auto', `You were already checked out automatically at ${svc.clockTime(loc, last.check_out_at)}, so there's nothing to scan out of. `
+          + 'If you need to check back in, ask staff at the front desk.');
+      }
+      // A closure day (SC-3) keeps the no_session code other modules rely on, with its own message.
+      const closure = svc.closureOn(ctx, loc, today);
+      if (closure) throw refuse('no_session', svc.closedMessage(ctx, loc, student.id, now, closure));
+      throw refuse('no_session', svc.noSessionMessage(ctx, loc, student.id, now));
+    }
+    // The mirror of the check-out question: a scan this soon after checking out asks before checking back in.
     if (last && now - last.check_out_at < CONFIRM_MS && b.confirm !== true) {
       throw conflict('confirm_checkin', `You checked out at ${svc.clockTime(loc, last.check_out_at)}. Check back in?`);
     }
@@ -166,6 +176,8 @@ function router(ctx) {
           id: s.id, name: s.name, here: !!open, visit_id: open ? open.id : null, since: open ? open.check_in_at : null,
           session_now: slot ? { id: slot.session_id, name: slot.name, end_at: slot.end_at } : null,
           membership_active: svc.membershipOk(ctx, s.id, today),
+          // A student no parent has approved yet can't be checked in (D-20); the list says so.
+          approved: auth.studentLinked(ctx, s.id),
         };
       }),
     });
@@ -176,6 +188,13 @@ function router(ctx) {
     const student = auth.getUser(ctx, idOf(b.studentId));
     if (!student || student.role !== 'student') throw notFound('No such student.');
     auth.assertManageLocation(req.user, student.location_id);
+    // A retired account (a cancelled invite, deactivated) is no student to check in.
+    if (!student.active) throw notFound('No such student.');
+    // Until a parent approves the account the student can't use the app (D-20), and no parent would
+    // hear about the visit (CI-6), so staff can't check them in either.
+    if (!auth.studentLinked(ctx, student.id)) {
+      throw conflict('not_approved', `${student.name}'s account isn't approved by a parent yet, so they can't be checked in. A parent approves it in Family.`);
+    }
     const loc = svc.getLocation(ctx, student.location_id);
     if (!loc.active) throw refuse('location_closed', `${loc.name} is marked closed, so check-ins are turned off. HQ can reopen it in Locations.`);
     const now = ctx.clock.now();

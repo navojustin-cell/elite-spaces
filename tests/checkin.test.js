@@ -262,12 +262,12 @@ test(['CI-3'], 'no check-in without a live enrollment that day: paused, other we
     assert.equal(visitsOf(t, s).length, 0, s.name);
     assert.equal(t.fx.notifications(s.parent).length, 0, s.name);
   }
-  // a closure cancels the day's slots even for an enrolled student (SC-3)
+  // a closure cancels the day's slots even for an enrolled student (SC-3), and the scan says the center is closed (L31)
   t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(t.loc.id, '2026-10-14', 'Staff training');
   const closed = await t.scan();
   assert.equal(closed.status, 403);
   assert.equal(closed.body.error, 'no_session');
-  assert.equal(closed.body.message, "You don't have a session right now. Your next one is Wed, Oct 21 at 1:00 PM. Staff can check you in if needed.");
+  assert.equal(closed.body.message, 'Irvine is closed today (Staff training), so there are no sessions. Your next one is Wed, Oct 21 at 1:00 PM.');
   assert.equal(visitsOf(t, t.fam.student).length, 0);
 });
 
@@ -509,7 +509,7 @@ test(['CI-6'], 'every active linked parent is told about each check-in and check
     const n = t.fx.notifications(p, 'checkout');
     assert.equal(n.length, 1);
     assert.equal(n[0].title, 'Maya checked out of Irvine · 3:47 PM');
-    assert.equal(n[0].body, 'Total time 2h 42m.');
+    assert.equal(n[0].body, 'Afternoon Study. Total time 2h 42m.', 'the check-out names the session, as the check-in does');
   }
   assert.equal(t.fx.notifications(pending).length, 0, 'a pending guardian is not told');
   assert.equal(t.fx.notifications(t.fam.student).length, 0);
@@ -627,7 +627,7 @@ test(['CI-7', 'NF-2', 'CI-6'], 'a manual check-in links the enrolled session; a 
   assert.deepEqual(JSON.parse(logs[0].detail), { student_id: t.fam.student.id, student: 'Maya Johnson', staff: 'Dana Park', reason: 'Left early with a parent' });
   const [n] = t.fx.notifications(t.fam.parent, 'checkout');
   assert.equal(n.title, 'Maya was checked out by staff at Irvine · 2:00 PM');
-  assert.equal(n.body, 'Total time 55m. Checked out by Dana Park.');
+  assert.equal(n.body, 'Afternoon Study. Total time 55m. Checked out by Dana Park.');
   const again = await t.as(dir).post(`/api/checkin/visits/${v.id}/checkout`, {});
   assert.equal(again.status, 409);
   assert.equal(again.body.error, 'already_out');
@@ -1392,4 +1392,284 @@ test(['CI-3', 'NF-1'], "the Home card says when a membership that hasn't started
   assert.deepEqual(await startsOn(ben), [[ben.id, '2026-11-02']]);
   setClock(t, '09:00', '2026-11-02');
   assert.deepEqual(await startsOn(ben), [[ben.id, null]]);
+});
+
+// ---------------------------------------------------------------- sweep fixes (Oct 14 sweep: L31, L32, L37, L63, L65)
+
+test(['CI-3'], 'a scan on a closure day says the center is closed, names the reason and the next session, and offers no staff check-in (L31)', async () => {
+  const t = await setup();
+  const leo = kid(t, t.loc, 'Leo Garcia', t.sess, [3, 5]);
+  const nia = kid(t, t.loc, 'Nia None');
+  t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(t.loc.id, '2026-10-14', null);
+  const leoR = await t.scan(leo);
+  assert.equal(leoR.status, 403);
+  assert.equal(leoR.body.error, 'no_session');
+  assert.equal(leoR.body.message, 'Irvine is closed today, so there are no sessions. Your next one is Fri, Oct 16 at 1:00 PM.');
+  const niaR = await t.scan(nia);
+  assert.deepEqual([niaR.status, niaR.body.error, niaR.body.message], [403, 'no_session', 'Irvine is closed today, so there are no sessions.']);
+  assert.equal(visitsOf(t, leo).length + visitsOf(t, nia).length, 0);
+  assert.equal(t.fx.notifications(leo.parent).length, 0);
+  // a closure on a later day doesn't make today's scan say closed
+  t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(t.loc.id, '2026-10-21', 'Staff training');
+  setClock(t, '13:05', '2026-10-15');
+  const thu = await t.scan(leo);
+  assert.equal(thu.body.message, "You don't have a session right now. Your next one is tomorrow at 1:00 PM. Staff can check you in if needed.");
+});
+
+test(['CI-4', 'CI-5'], 'a scan after the auto-checkout says the student is already checked out, not that there is no session; a later session still checks in (L32)', async () => {
+  const t = await setup();
+  const evening = t.fx.session(t.loc, { name: 'Evening Study', weekdays: '3', start: '17:00', end: '19:00' });
+  t.fx.enroll(t.fam.student, evening, 3);
+  const leo = kid(t, t.loc, 'Leo Garcia', t.sess, [3]);
+  assert.equal((await t.scan()).body.action, 'checkin');
+  assert.equal((await t.scan(leo)).body.action, 'checkin');
+  setClock(t, '14:00');
+  const [lv] = visitsOf(t, leo);
+  assert.equal((await t.as(t.staff).post(`/api/checkin/visits/${lv.id}/checkout`, {})).status, 200);
+  setClock(t, '16:01');
+  t.jobs();
+  const r = await t.scan();
+  assert.equal(r.status, 403);
+  assert.equal(r.body.error, 'checked_out_auto');
+  assert.equal(r.body.message, "You were already checked out automatically at 4:00 PM, so there's nothing to scan out of. If you need to check back in, ask staff at the front desk.");
+  assert.equal(visitsOf(t, t.fam.student).length, 1);
+  assert.deepEqual(t.fx.notifications(t.fam.parent).map(n => n.kind).sort(), ['checkin', 'checkout_auto']);
+  // a check-out by staff is not an automatic one: Leo hears the usual no-session answer
+  const leoR = await t.scan(leo);
+  assert.equal(leoR.body.error, 'no_session');
+  // once the next session's check-in window opens, a scan checks in as usual
+  setClock(t, '16:35');
+  const back = await t.scan();
+  assert.equal(back.status, 200);
+  assert.equal(back.body.action, 'checkin');
+  assert.equal(back.body.session.name, 'Evening Study');
+});
+
+test(['CI-7'], "'Left today' lists a student who left twice once, at their latest check-out (L37)", async () => {
+  const t = await setup();
+  const dir = t.fx.director(t.loc, { name: 'Dana Park' });
+  const leo = kid(t, t.loc, 'Leo Garcia', t.sess, [3]);
+  setClock(t, '12:49');
+  assert.equal((await t.as(dir).post('/api/checkin/manual-checkin', { studentId: leo.id })).status, 200);
+  setClock(t, '13:20');
+  const [first] = visitsOf(t, leo);
+  assert.equal((await t.as(dir).post(`/api/checkin/visits/${first.id}/checkout`, { reason: 'Leaving early' })).status, 200);
+  setClock(t, '13:30');
+  assert.equal((await t.as(dir).post('/api/checkin/manual-checkin', { studentId: leo.id })).status, 200);
+  setClock(t, '16:05');
+  t.jobs();
+  const b = (await t.as(dir).get(`/api/checkin/locations/${t.loc.id}/building`)).body;
+  assert.deepEqual(b.here, []);
+  const second = visitsOf(t, leo)[1];
+  assert.deepEqual(b.left.map(v => [v.student_id, v.visit_id, v.checkout_method, v.check_out_at]),
+    [[leo.id, second.id, 'auto', at(LA, '2026-10-14', '16:00')]]);
+});
+
+test(['CI-7', 'CI-6'], 'staff can check in a student only after a parent approves the account; the search says who is waiting (L63)', async () => {
+  const t = await setup();
+  const pend = t.fx.family(t.loc, { linked: false });
+  rename(t, pend.student, 'Pia Pending');
+  const s = await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/students?q=`);
+  assert.deepEqual(s.body.students.map(x => [x.name, x.approved]), [['Maya Johnson', true], ['Pia Pending', false]]);
+  for (const override of [undefined, true]) {
+    const r = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: pend.student.id, override, reason: 'walked in' });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error, 'not_approved');
+    assert.equal(r.body.message, "Pia Pending's account isn't approved by a parent yet, so they can't be checked in. A parent approves it in Family.");
+  }
+  assert.equal(visitsOf(t, pend.student).length, 0);
+  assert.equal(t.fx.audit('checkin.manual_checkin').length, 0);
+  // once the parent approves, staff can check them in and the parent is told
+  t.fx.link(pend.parent, pend.student, 'active');
+  const ok = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: pend.student.id, override: true });
+  assert.equal(ok.status, 200);
+  assert.equal(t.fx.notifications(pend.parent, 'checkin').length, 1);
+});
+
+test(['CI-7', 'NF-1'], 'a retired (inactive) student is not found for a manual check-in, even by id (L65)', async () => {
+  const t = await setup();
+  const gone = kid(t, t.loc, 'Ray Retired', t.sess, [3]);
+  t.db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(gone.id);
+  for (const override of [undefined, true]) {
+    const r = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: gone.id, override });
+    assert.equal(r.status, 404);
+    assert.equal(r.body.message, 'No such student.');
+  }
+  assert.equal(visitsOf(t, gone).length, 0);
+  assert.equal(t.fx.notifications(gone.parent).length, 0);
+  // staff at another location still get a plain refusal, as for any student there
+  const other = t.fx.staff(t.fx.location({ name: 'Arcadia' }));
+  assert.equal((await t.as(other).post('/api/checkin/manual-checkin', { studentId: gone.id, override: true })).status, 403);
+});
+
+// ---------------------------------------------------------------- the check-in screens in a browser tab
+
+// Just enough DOM for public/js/app.js and this module's view, as in core.test.js and
+// enrollment.test.js: one tree under <html>; focus, bubbling events and isConnected work as in a browser.
+class El {
+  constructor(doc, tag, data = '') { Object.assign(this, { doc, tag, data, childNodes: [], attrs: new Map(), on: {}, parentNode: null }); }
+  get textContent() { return this.tag ? this.childNodes.map(c => c.textContent).join('') : this.data; }
+  set textContent(s) { this.replaceChildren(String(s)); }
+  get className() { return this.getAttribute('class') || ''; }
+  set className(v) { this.setAttribute('class', v); }
+  setAttribute(k, v) { this.attrs.set(k, String(v)); }
+  getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
+  removeAttribute(k) { this.attrs.delete(k); }
+  get value() { return this._value ?? this.getAttribute('value') ?? ''; }
+  set value(v) { this._value = String(v); }
+  get id() { return this.getAttribute('id') || ''; }
+  get hidden() { return this.attrs.has('hidden'); }
+  set hidden(v) { if (v) this.attrs.set('hidden', ''); else this.attrs.delete('hidden'); }
+  get cls() { return this.className.split(/\s+/).filter(Boolean); }
+  get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === this.doc.documentElement; }
+  addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
+  dispatch(type, props) {
+    const ev = Object.assign({ type, target: this, stopped: false, preventDefault() {}, stopPropagation() { this.stopped = true; } }, props);
+    for (let n = this; n && !ev.stopped; n = n.parentNode) { ev.currentTarget = n; for (const fn of n.on[type] || []) fn(ev); }
+  }
+  click() { this.dispatch('click'); }
+  focus() { this.doc.focused = this; }
+  adopt(kids) { return kids.map(k => { const n = k instanceof El ? k : new El(this.doc, null, String(k)); n.remove(); n.parentNode = this; return n; }); }
+  append(...kids) { this.childNodes.push(...this.adopt(kids)); }
+  appendChild(k) { this.append(k); return k; }
+  prepend(...kids) { this.childNodes.unshift(...this.adopt(kids)); }
+  after(...kids) { const p = this.parentNode, ns = p.adopt(kids); p.childNodes.splice(p.childNodes.indexOf(this) + 1, 0, ...ns); }
+  replaceChildren(...kids) { this.childNodes.forEach(c => { c.parentNode = null; }); this.childNodes = []; this.append(...kids); }
+  remove() { if (this.parentNode) this.parentNode.childNodes = this.parentNode.childNodes.filter(c => c !== this); this.parentNode = null; }
+  contains(n) { for (; n; n = n.parentNode) if (n === this) return true; return false; }
+  all() { return this.childNodes.flatMap(c => [c, ...c.all()]); }
+  find(pred) { return this.all().find(pred); }
+  findAll(pred) { return this.all().filter(pred); }
+  // Only what the views ask for: '.class', or a tag name (the last part of '#main h1').
+  querySelector(sel) {
+    const last = sel.split(/\s+/).pop();
+    return this.find(n => (last.startsWith('.') ? n.cls.includes(last.slice(1)) : n.tag === last)) || null;
+  }
+}
+
+// One tab running the real shell and the check-in view (read from ROOT, so the
+// mutation runner's copy is the one exercised) against the test server.
+function shellTab(t) {
+  const vm = require('vm'), fs = require('fs'), path = require('path'), crypto = require('crypto');
+  const { ROOT } = require('./lib');
+  let cookie = '';
+  const pending = new Set();
+  const track = p => { pending.add(p); const done = () => pending.delete(p); p.then(done, done); return p; };
+  const doc = { title: '', hidden: false, on: {}, addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); } };
+  const el = (tag, attrs = {}) => { const n = new El(doc, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; };
+  doc.documentElement = el('html');
+  doc.head = el('head');
+  doc.body = el('body');
+  doc.documentElement.append(doc.head, doc.body);
+  const shell = el('div', { id: 'shell' });
+  shell.append(el('nav', { id: 'nav', hidden: '' }), el('main', { id: 'main', tabindex: '-1' }));
+  doc.body.append(el('div', { id: 'devbar', hidden: '' }), el('header', { id: 'topbar', hidden: '' }), el('div', { id: 'toasts' }), shell);
+  Object.assign(doc, {
+    createElement: tag => new El(doc, tag), createTextNode: s => new El(doc, null, String(s)),
+    getElementById: id => doc.documentElement.find(n => n.id === id) || null,
+    querySelector: sel => doc.documentElement.querySelector(sel),
+  });
+  Object.defineProperty(doc, 'activeElement', { get: () => (doc.focused && doc.focused.isConnected ? doc.focused : doc.body) });
+  const winOn = {};
+  const location = {
+    _hash: '',
+    get hash() { return this._hash; },
+    set hash(v) {
+      this._hash = v ? (String(v).startsWith('#') ? String(v) : '#' + v) : '';
+      track(new Promise(r => setImmediate(() => { (winOn.hashchange || []).forEach(fn => fn({ type: 'hashchange' })); r(); })));
+    },
+  };
+  class EventSource { close() {} }
+  const fetchAs = (url, opts = {}) => track(fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie }) }))
+    .then(async r => new Response(await r.arrayBuffer(), { status: r.status, headers: r.headers })));
+  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, console, navigator: {}, location, EventSource,
+    history: { replaceState(_s, _t, url) { location._hash = String(url).replace(/^[^#]*/, ''); } },
+    addEventListener(type, fn) { (winOn[type] = winOn[type] || []).push(fn); },
+    setTimeout: (fn, ms) => setTimeout(fn, ms).unref(), clearTimeout,
+    setInterval: (fn, ms) => setInterval(fn, ms).unref(), clearInterval };
+  win.window = win;
+  vm.createContext(win);
+  for (const f of ['public/js/app.js', 'public/js/views/checkin.js']) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
+  const settle = async () => {
+    do {
+      await Promise.allSettled([...pending]);
+      for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+    } while (pending.size);
+  };
+  return {
+    doc, settle, main: () => doc.getElementById('main'),
+    async open(user, hash) {
+      const token = crypto.randomBytes(16).toString('hex');
+      t.ctx.sessions.set(token, user.id);
+      cookie = 'sid=' + token;
+      location._hash = hash;
+      win.App.start();
+      await settle();
+    },
+  };
+}
+// Visible text, one space between words (Intl may put a narrow no-break space before AM/PM).
+const words = n => n.all().filter(c => !c.tag).map(c => c.data).join(' ').replace(/\s+/g, ' ').trim();
+const byTag = (root, tag) => root.findAll(n => n.tag === tag);
+
+test(['CI-3'], 'Home says a session is on now only once it has started; in the 30 minutes before, it says when it starts and that check-in is open (L34)', async () => {
+  const t = await setup();
+  const line = async (user, hm) => {
+    setClock(t, hm);
+    const tab = shellTab(t);
+    await tab.open(user, '#/home');
+    return words(tab.main());
+  };
+  for (const [user, who] of [[t.fam.student, 'student'], [t.fam.parent, 'parent']]) {
+    const early = await line(user, '12:48');
+    assert.match(early, /Afternoon Study starts at 1:00 PM · check-in is open/, who);
+    assert.doesNotMatch(early, /on now/, who);
+    assert.match(await line(user, '13:00'), /Afternoon Study is on now, until 4:00 PM/, who);
+    assert.match(await line(user, '12:10'), /Next session today at 1:00 PM · Afternoon Study/, who);
+  }
+});
+
+test(['CI-4', 'CI-5', 'CI-3'], 'the Check in screen offers staff help to check out while the student is here, and names an auto-checkout or a closure when the scan is refused (L31, L32)', async () => {
+  const t = await setup({ dev: true });
+  const help = tab => tab.main().findAll(n => n.tag === 'p' && /^Having trouble\?/.test(n.textContent)).map(n => n.textContent);
+  const screen = async () => {
+    const tab = shellTab(t);
+    await tab.open(t.fam.student, '#/checkin');
+    return tab;
+  };
+  const simulate = async tab => {
+    byTag(tab.main(), 'button').find(b => /Simulate scan/.test(b.textContent)).click();
+    await tab.settle();
+    return words(tab.main().find(n => n.getAttribute('role') === 'alert'));
+  };
+  assert.deepEqual(help(await screen()), ['Having trouble? Ask staff at the front desk to check you in.']);
+  assert.equal((await t.scan()).body.action, 'checkin');
+  assert.deepEqual(help(await screen()), ['Having trouble? Ask staff at the front desk to check you out.']);
+  setClock(t, '16:01');
+  t.jobs();
+  const tab = await screen();
+  assert.deepEqual(help(tab), ['Having trouble? Ask staff at the front desk to check you in.']);
+  assert.equal(await simulate(tab), "You're already checked out You were already checked out automatically at 4:00 PM, so there's nothing to scan out of. If you need to check back in, ask staff at the front desk.");
+  // on a closure day the screen says the center is closed
+  t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(t.loc.id, '2026-10-21', 'Power outage');
+  setClock(t, '13:05', '2026-10-21');
+  assert.equal(await simulate(await screen()), 'No session right now Irvine is closed today (Power outage), so there are no sessions. Your next one is Wed, Oct 28 at 1:00 PM.');
+});
+
+test(['CI-7'], 'the staff search shows a student waiting for parent approval with no Check in button (L63)', async () => {
+  const t = await setup();
+  const pend = t.fx.family(t.loc, { linked: false });
+  rename(t, pend.student, 'Pia Pending');
+  const tab = shellTab(t);
+  await tab.open(t.staff, '#/building');
+  const q = tab.doc.getElementById('ci-find');
+  q.value = '';
+  q.dispatch('input');
+  await new Promise(r => setTimeout(r, 300));
+  await tab.settle();
+  const rows = byTag(q.parentNode.parentNode, 'li');
+  assert.deepEqual(rows.map(li => [words(li), byTag(li, 'button').map(b => b.textContent)]), [
+    ['MJ Maya Johnson Has Afternoon Study now Check in', ['Check in']],
+    ['PP Pia Pending Waiting for a parent to approve the account', []],
+  ]);
 });

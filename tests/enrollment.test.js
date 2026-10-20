@@ -579,10 +579,12 @@ test(['EN-3', 'EN-4'], 'an approval runs the same membership and seat checks as 
   assert.equal(active(t, f.student).length, 1);
   const row = t.db.prepare('SELECT * FROM enrollment_requests WHERE id = ?').get(r.body.request.id);
   assert.deepEqual([row.status, row.outcome], ['approved', 'blocked']);
-  assert.match(row.outcome_message, /already has 1 weekly session, the most/);
+  // The parent's reply names the student; what the student is told speaks to them (L54).
+  assert.match(a.body.message, /already has 1 weekly session, the most the membership allows\. Drop one to add another\./);
+  assert.match(row.outcome_message, /^You already have 1 weekly session, the most your membership allows\./);
   const told = t.fx.notifications(f.student, 'enrollment_request_approved');
   assert.equal(told.length, 1);
-  assert.match(told[0].title, /couldn't be enrolled yet/);
+  assert.match(told[0].title, /couldn't be enrolled$/); // nothing retries it, so no "yet" (L29)
   assert.match(told[0].body, /weekly session/);
 
   // Full: the approval is recorded, and the parent can then take the waitlist.
@@ -1183,11 +1185,12 @@ test(['EN-3'], 'request notices in the Inbox open Schedule, for the parents aske
     .map(item => [words(item), item.tag === 'a' ? item.getAttribute('href') : null]);
   const parent = shellTab(t);
   await parent.open(f.parent, '#/inbox');
-  assert.deepEqual(links(parent).map(([text, href]) => [/asked to join Afternoon Study/.test(text), href]), [[true, '#/schedule']]);
+  const opens = '#/schedule/request/' + r.body.request.id; // Schedule on that student (L35)
+  assert.deepEqual(links(parent).map(([text, href]) => [/asked to join Afternoon Study/.test(text), href]), [[true, opens]]);
   const student = shellTab(t);
   await student.open(f.student, '#/inbox');
-  assert.deepEqual(links(student).map(([text, href]) => [/declined your request for Afternoon Study/.test(text), href]), [[true, '#/schedule']]);
-  await student.go('#/schedule');
+  assert.deepEqual(links(student).map(([text, href]) => [/declined your request for Afternoon Study/.test(text), href]), [[true, opens]]);
+  await student.go(opens);
   assert.equal(byTag(student.main(), 'h1')[0].textContent, 'My schedule');
 });
 
@@ -1385,4 +1388,230 @@ test(['EN-7'], 'weeks before the membership starts show as not started, never ab
   await tab.go('#/schedule');
   const rows = tab.main().findAll(n => n.tag === 'li').map(words).filter(w => /Oct 26/.test(w));
   assert.deepEqual(rows, ['Mon Oct 26 Afternoon Study 1pm–4pm · Membership starts Nov 2, 2026 Not started']);
+});
+
+// ---------------------------------------------------------------- sweep fixes L29, L30, L33, L35, L52, L54
+
+// L54 / L29: an approval that can't enroll the student tells the parent what they can do, and tells the
+// student in their own words what a parent or the front desk can do. Nothing retries it, so nothing says "yet".
+test(['EN-3', 'EN-4'], 'a student whose approved request could not enroll them is told in their own words, never to drop a session or join the waitlist', async () => {
+  const { t, loc, sess } = await world();
+  const ask = async (f, session, weekday) => {
+    const r = await t.as(f.student).post('/api/enrollment/requests', { sessionId: session.id, weekday });
+    assert.equal(r.status, 201);
+    const a = await t.as(f.parent).post(`/api/enrollment/requests/${r.body.request.id}/approve`);
+    assert.equal(a.status, 200);
+    const mine = (await t.as(f.student).get('/api/enrollment/requests')).body.requests.find(x => x.id === r.body.request.id);
+    const told = t.fx.notifications(f.student, 'enrollment_request_approved').pop();
+    return { a: a.body, stored: mine.outcome_message, title: told.title, body: told.body };
+  };
+  const named = (f, student, parent) => { rename(t, f.student, student); rename(t, f.parent, parent); return f; };
+
+  const capped = named(t.fx.family(loc, { cap: 1 }), 'Leo Garcia', 'Maria Garcia');
+  t.fx.enroll(capped.student, sess, 1);
+  const c = await ask(capped, sess, 3);
+  assert.equal(c.a.outcome, 'blocked');
+  assert.equal(c.a.message, 'Leo already has 1 weekly session, the most the membership allows. Drop one to add another.');
+  const capText = 'You already have 1 weekly session, the most your membership allows. A parent can drop one to make room, then add this one.';
+  assert.deepEqual([c.stored, c.title, c.body], [capText, "Maria approved your request, but you couldn't be enrolled", capText]);
+
+  const noMembership = named(t.fx.family(loc), 'Ana Diaz', 'Rosa Diaz');
+  t.db.prepare('DELETE FROM memberships WHERE student_id = ?').run(noMembership.student.id);
+  const cases = [
+    [noMembership, "You don't have a membership yet. A parent can set one up with the front desk."],
+    [named(t.fx.family(loc, { status: 'inactive' }), 'Ben Ito', 'Kai Ito'), "Your membership is inactive, so new sessions can't be added. A parent or the front desk can reactivate it."],
+    [named(t.fx.family(loc, { expires: '2026-10-13' }), 'Cy Park', 'Jo Park'), "Your membership expired on Oct 13, 2026. Once it's renewed, a parent can add sessions again."],
+    [named(t.fx.family(loc, { start: '2026-11-02' }), 'Di Lee', 'Al Lee'), 'Your membership starts on Nov 2, 2026. A parent can add sessions from that day.'],
+  ];
+  for (const [f, want] of cases) {
+    const o = await ask(f, sess, 5);
+    assert.equal(o.a.outcome, 'blocked');
+    assert.deepEqual([o.stored, o.body], [want, want]);
+  }
+
+  // Full: the student hears that a parent can add them to the waitlist, or where they stand if one already did.
+  const small = t.fx.session(loc, { name: 'Quiet Room', weekdays: '2,4', start: '16:30', end: '18:30', capacity: 1 });
+  fill(t, loc, small, 2, 1);
+  fill(t, loc, small, 4, 1);
+  const full = named(t.fx.family(loc), 'Eve Ruiz', 'Lu Ruiz');
+  const fu = await ask(full, small, 2);
+  assert.equal(fu.a.outcome, 'full');
+  assert.match(fu.a.message, /^Quiet Room on Tuesdays is full\. Join the waitlist and Eve will be enrolled automatically/);
+  assert.deepEqual([fu.stored, fu.body], ['Quiet Room on Tuesdays is full. A parent can add you to the waitlist.', 'Tuesdays 4:30pm–6:30pm. A parent can add you to the waitlist.']);
+  const inLine = named(t.fx.family(loc), 'Fay Wu', 'Ty Wu');
+  const r = await t.as(inLine.student).post('/api/enrollment/requests', { sessionId: small.id, weekday: 4 });
+  assert.equal((await joinLine(t, inLine.parent, inLine.student, small, 4)).body.outcome, 'waitlisted'); // a parent put her in line first
+  const a = await t.as(inLine.parent).post(`/api/enrollment/requests/${r.body.request.id}/approve`);
+  assert.equal(a.body.outcome, 'full');
+  const stored = t.db.prepare('SELECT outcome_message FROM enrollment_requests WHERE id = ?').get(r.body.request.id).outcome_message;
+  assert.equal(stored, "Quiet Room on Thursdays is full. You're number 1 on its waitlist and will be enrolled automatically when a seat opens.");
+  assert.equal(t.fx.notifications(inLine.student, 'enrollment_request_approved')[0].body,
+    "Thursdays 4:30pm–6:30pm. You're number 1 on its waitlist and will be enrolled automatically when a seat opens.");
+
+  // Nothing a student reads asks them to drop or join the waitlist, or names them in the third person.
+  for (const f of [capped, full, inLine, ...cases.map(x => x[0])]) {
+    const reqs = (await t.as(f.student).get('/api/enrollment/requests')).body.requests;
+    const said = reqs.map(x => x.outcome_message).concat(t.fx.notifications(f.student).map(n => n.title + ' ' + n.body)).join(' ');
+    assert.ok(!/Drop one|Join the waitlist/.test(said), said);
+    assert.ok(!new RegExp('\\b' + f.student.name.split(' ')[0] + '\\b').test(said), said);
+  }
+});
+
+// L30: a request approved while the slot was full (or blocked) says enrolled once the student holds that slot.
+test(['EN-3', 'EN-5'], 'an approved request that could not enroll the student then says enrolled once they get that seat, from the waitlist or directly', async () => {
+  const { t, loc, sess } = await world();
+  const small = t.fx.session(loc, { name: 'Quiet Room', weekdays: '2,4', start: '16:30', end: '18:30', capacity: 1 });
+  const [holder] = fill(t, loc, small, 4, 1);
+  const f = t.fx.family(loc);
+  const g = t.fx.family(loc); // another family asking for the same slot stays as it was
+  const askAndApprove = async (fam, session, wd) => {
+    const r = await t.as(fam.student).post('/api/enrollment/requests', { sessionId: session.id, weekday: wd });
+    await t.as(fam.parent).post(`/api/enrollment/requests/${r.body.request.id}/approve`);
+    return r.body.request.id;
+  };
+  const thu = await askAndApprove(f, small, 4);
+  const tue = await askAndApprove(f, small, 2); // a seat was free on Tuesdays
+  const other = await askAndApprove(g, small, 4);
+  const req = id => t.db.prepare('SELECT outcome, outcome_message FROM enrollment_requests WHERE id = ?').get(id);
+  assert.equal(req(thu).outcome, 'full');
+  assert.equal(req(tue).outcome, 'enrolled');
+  assert.equal((await joinLine(t, f.parent, f.student, small, 4)).body.outcome, 'waitlisted');
+  const seat = t.db.prepare("SELECT id FROM enrollments WHERE student_id = ? AND session_id = ? AND weekday = 4 AND status = 'active'").get(holder.student.id, small.id);
+  assert.equal((await drop(t, holder.parent, seat.id)).status, 200); // the seat goes to the first in line
+  assert.deepEqual(active(t, f.student).map(e => [e.session_id, e.weekday]), [[small.id, 2], [small.id, 4]]);
+  const mine = (await t.as(f.student).get('/api/enrollment/requests')).body.requests.find(x => x.id === thu);
+  assert.deepEqual([mine.status, mine.outcome, mine.outcome_message], ['approved', 'enrolled', null]);
+  assert.equal(req(other).outcome, 'full', "another student's request is untouched");
+
+  // Blocked at the cap, then the parent makes room and adds that slot.
+  const capped = t.fx.family(loc, { cap: 1 });
+  const held = t.fx.enroll(capped.student, sess, 1);
+  const wed = await askAndApprove(capped, sess, 3);
+  assert.equal(req(wed).outcome, 'blocked');
+  assert.equal((await drop(t, capped.parent, held.id)).status, 200);
+  assert.equal(req(wed).outcome, 'blocked', 'dropping alone enrolls nothing (no retry, D-17)');
+  assert.equal((await enroll(t, capped.parent, capped.student, sess, 3)).status, 201);
+  assert.deepEqual({ ...req(wed) }, { outcome: 'enrolled', outcome_message: null });
+});
+
+// L33: a renewal while today's session is running brings today's occurrence back; it is not "Paused"
+// while the student can check in. If it ends unattended it stays paused, never absent.
+test(['EN-7', 'MB-5'], "a spot restored while today's session is running shows today as upcoming, and as paused if it ends unattended", async () => {
+  const { t, loc, sess } = await world(); // Mon/Wed/Fri 13:00-16:00
+  const f = t.fx.family(loc), g = t.fx.family(loc);
+  t.clock.set(at(LA, '2026-09-01', '09:00'));
+  const e = t.fx.enroll(f.student, sess, 1);
+  t.fx.enroll(g.student, sess, 1);
+  t.clock.set(at(LA, '2026-10-24', '08:00')); // both memberships lapse and the spots pause (MB-5)
+  t.db.prepare("UPDATE enrollments SET status = 'paused' WHERE session_id = ?").run(sess.id);
+  t.clock.set(at(LA, '2026-10-26', '13:05')); // Mon: f's membership is renewed five minutes into the session
+  t.db.prepare("UPDATE enrollments SET status = 'active' WHERE id = ?").run(e.id);
+  const today = async (who, clock) => {
+    t.clock.set(at(LA, '2026-10-26', clock));
+    return (await t.as(who.parent).get(`/api/enrollment/students/${who.student.id}/schedule?from=2026-10-26&to=2026-11-02`))
+      .body.occurrences.map(o => `${o.date} ${o.status}`);
+  };
+  assert.deepEqual(await today(f, '13:10'), ['2026-10-26 upcoming', '2026-11-02 upcoming']);
+  assert.deepEqual(await today(g, '13:10'), ['2026-10-26 paused', '2026-11-02 paused'], 'a spot still paused stays paused');
+  const tab = shellTab(t);
+  await tab.open(f.student, '#/home');
+  const card = tab.main().find(n => n.getAttribute('data-card') === 'enrollment-week');
+  assert.deepEqual(card.findAll(n => n.tag === 'li').map(words), ['Today 1pm–4pm Afternoon Study Upcoming']);
+  // It ended and she never came: on hold when it began, so paused, not absent.
+  assert.deepEqual(await today(f, '16:30'), ['2026-10-26 paused', '2026-11-02 upcoming']);
+  // Had she checked in, it is attended.
+  t.fx.visit(f.student, loc, { session: sess, weekday: 1, local_date: '2026-10-26', check_in_at: at(LA, '2026-10-26', '13:15'), check_out_at: at(LA, '2026-10-26', '16:00'), checkout_method: 'scan' });
+  assert.deepEqual(await today(f, '16:30'), ['2026-10-26 attended', '2026-11-02 upcoming']);
+});
+
+// L52: with no way to add a session (no membership, or one that isn't active), Schedule and Home don't
+// point the parent at "Add a session"; the notice there says why.
+test(['EN-4'], 'a family that cannot add sessions is not told to pick one on Schedule or Home', async () => {
+  const { t, loc } = await world();
+  const none = t.fx.family(loc);
+  t.db.prepare('DELETE FROM memberships WHERE student_id = ?').run(none.student.id);
+  const off = t.fx.family(loc, { status: 'inactive' });
+  const fine = t.fx.family(loc);
+  const empty = tab => tab.main().findAll(n => n.tag === 'p' && /^No (weekly )?sessions/.test(words(n))).map(words);
+  for (const [who, schedule, home] of [
+    [none, 'No weekly sessions yet.', 'No sessions this week.'],
+    [off, 'No weekly sessions yet.', 'No sessions this week.'],
+    [fine, 'No weekly sessions yet. Pick one under "Add a session" below.', 'No sessions this week. Add one from Schedule.']]) {
+    const tab = shellTab(t);
+    await tab.open(who.parent, '#/schedule');
+    assert.deepEqual(empty(tab).filter(w => /^No weekly/.test(w)), [schedule]);
+    const enrolls = byTag(tab.main(), 'button').filter(b => /^Enroll /.test(b.getAttribute('aria-label') || ''));
+    assert.ok(enrolls.length > 0 && enrolls.every(b => (b.getAttribute('disabled') !== null) === (who !== fine)));
+    await tab.go('#/home');
+    assert.deepEqual(empty(tab), [home]);
+  }
+  // A student can still ask, so their Home keeps pointing at Schedule.
+  const tab = shellTab(t);
+  await tab.open(none.student, '#/home');
+  assert.deepEqual(empty(tab), ['No sessions this week. Ask a parent for one from Schedule.']);
+});
+
+// L29: the screens don't promise a retry that never comes.
+test(['EN-3'], 'approving a request over the weekly cap says it could not be enrolled, never "yet", on the parent and student screens', async () => {
+  const { t, loc, sess } = await world();
+  const f = t.fx.family(loc, { cap: 1 });
+  rename(t, f.student, 'Leo Garcia');
+  t.fx.enroll(f.student, sess, 1);
+  assert.equal((await t.as(f.student).post('/api/enrollment/requests', { sessionId: sess.id, weekday: 3 })).status, 201);
+  const parent = shellTab(t);
+  await parent.open(f.parent, '#/schedule');
+  const cardText = words(parent.main().find(n => n.getAttribute('aria-labelledby') === 'en-req-h'));
+  assert.ok(cardText.includes("Approving won't enroll them: Leo already has 1 weekly session, the most the membership allows. Drop one to add another."), cardText);
+  byTag(parent.main(), 'button').find(b => b.getAttribute('aria-label') === "Approve Leo's request for Afternoon Study on Wednesdays").click();
+  await parent.settle();
+  assert.deepEqual(parent.toasts(), ["Approved, but Leo couldn't be enrolled. Leo already has 1 weekly session, the most the membership allows. Drop one to add another."]);
+  const student = shellTab(t);
+  await student.open(f.student, '#/schedule');
+  const row = student.main().find(n => n.getAttribute('aria-labelledby') === 'en-myreq-h').findAll(n => n.tag === 'li')[0];
+  assert.match(words(row), /^Afternoon Study Wednesdays · 1pm–4pm · \S+ You already have 1 weekly session, the most your membership allows\. A parent can drop one to make room, then add this one\. Approved · not enrolled$/);
+  assert.ok(!/\byet\b/.test(words(row)));
+});
+
+// L35: enrollment and request notices open Schedule on the student they are about.
+test(['EN-2', 'EN-3', 'EN-5'], 'enrollment, waitlist and request notices in the Inbox open Schedule on the student they are about', async () => {
+  const { t, loc, sess } = await world();
+  const f = t.fx.family(loc, { students: 2 });
+  const leo = rename(t, f.students[0], 'Leo Garcia'), sofia = rename(t, f.students[1], 'Sofia Garcia');
+  const en = await enroll(t, f.parent, sofia, sess, 1); // Sofia is the second tab
+  assert.equal(en.status, 201);
+  const rq = await t.as(sofia).post('/api/enrollment/requests', { sessionId: sess.id, weekday: 3 });
+  const links = tab => tab.main().findAll(n => n.tag === 'li').map(li => li.childNodes[0])
+    .map(item => [words(item).replace(/^New /, '').split(' ').slice(0, 2).join(' '), item.tag === 'a' ? item.getAttribute('href') : null]);
+  const parent = shellTab(t);
+  await parent.open(f.parent, '#/inbox');
+  const toEnrollment = '#/schedule/enrollment/' + en.body.enrollment.id, toRequest = '#/schedule/request/' + rq.body.request.id;
+  assert.deepEqual(links(parent).sort(), [['Sofia asked', toRequest], ['Sofia is', toEnrollment]]);
+  const shown = tab => [byTag(tab.main(), 'button').filter(b => b.getAttribute('role') === 'tab' && b.getAttribute('aria-selected') === 'true').map(b => b.textContent),
+    words(tab.main().find(n => n.id === 'en-mine-h'))];
+  for (const to of [toEnrollment, toRequest]) {
+    await parent.go(to);
+    assert.deepEqual(shown(parent), [['Sofia'], "Sofia's weekly sessions"], to);
+    assert.ok(parent.main().find(n => n.id === 'en-week-h'), 'this week is shown');
+  }
+  await parent.go('#/schedule');
+  assert.deepEqual(shown(parent), [['Leo'], "Leo's weekly sessions"]);
+  // The student's own notice opens their schedule, with this week shown.
+  const student = shellTab(t);
+  await student.open(sofia, '#/inbox');
+  assert.deepEqual(links(student), [['Sofia is', toEnrollment]]);
+  await student.go(toEnrollment);
+  assert.equal(byTag(student.main(), 'h1')[0].textContent, 'My schedule');
+  assert.ok(student.main().find(n => n.id === 'en-week-h'), 'this week is shown');
+  // A waitlist promotion carries the same kind of link.
+  const small = t.fx.session(loc, { name: 'Quiet Room', weekdays: '2', start: '16:30', end: '18:30', capacity: 1 });
+  const [holder] = fill(t, loc, small, 2, 1);
+  assert.equal((await joinLine(t, f.parent, leo, small, 2)).body.outcome, 'waitlisted');
+  const seat = t.db.prepare('SELECT id FROM enrollments WHERE student_id = ? AND session_id = ?').get(holder.student.id, small.id);
+  assert.equal((await drop(t, holder.parent, seat.id)).status, 200);
+  const promoted = t.db.prepare("SELECT id FROM enrollments WHERE student_id = ? AND session_id = ? AND status = 'active'").get(leo.id, small.id);
+  const later = shellTab(t);
+  await later.open(f.parent, '#/inbox');
+  assert.ok(links(later).some(([text, href]) => text === 'A seat' && href === '#/schedule/enrollment/' + promoted.id), JSON.stringify(links(later)));
+  await later.go('#/schedule/enrollment/' + promoted.id);
+  assert.deepEqual(shown(later), [['Leo'], "Leo's weekly sessions"]);
 });

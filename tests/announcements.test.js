@@ -847,6 +847,106 @@ test(['NF-1'], 'every route refuses a signed-out caller', async () => {
   }
 });
 
+// ---------------------------------------------------------------- who looks after a scheduled post (L42, L58, L43)
+
+const statusOf = (t, id) => t.db.prepare('SELECT status FROM announcements WHERE id = ?').get(id).status;
+const scheduledIds = async (t, u) => (await t.as(u).get(API + '/feed')).body.scheduled.map(p => p.id);
+
+test(['AN-3', 'NF-1'], 'a director moved to another location hands their scheduled post to the old location\'s director, shown with its location and zone', async () => {
+  const w = await world();
+  const { t } = w;
+  const id = (await t.as(w.dirB).post(API, post({ publish_at: '2026-10-20T09:00' }))).body.announcement.id;
+  const dirB2 = t.fx.director(w.B);
+  // While its sender is still Toronto's director, it stays theirs alone.
+  assert.deepEqual(await scheduledIds(t, dirB2), []);
+  assert.equal((await t.as(dirB2).del(API + '/' + id)).status, 403);
+  // HQ makes the sender director of Irvine.
+  t.db.prepare('UPDATE users SET location_id = ? WHERE id = ?').run(w.A.id, w.dirB.id);
+  assert.deepEqual(await scheduledIds(t, w.dirB), [], 'it no longer shows on their new location\'s News');
+  assert.equal((await t.as(w.dirB).del(API + '/' + id)).status, 403);
+  assert.equal((await t.as(w.dirB).get(API + '/' + id + '/stats')).status, 403);
+  assert.deepEqual(await scheduledIds(t, w.dirA), [], 'nor on the new location director\'s');
+  const [card] = (await t.as(dirB2).get(API + '/feed')).body.scheduled;
+  assert.equal(card.id, id, 'Toronto\'s director now looks after it');
+  assert.deepEqual([card.zone_name, card.tz, card.locations.map(l => l.name)], ['Toronto', TO, ['Toronto']]);
+  assert.ok(card.stats, 'with its numbers');
+  assert.equal((await t.as(dirB2).get(API + '/' + id + '/stats')).status, 200);
+  assert.equal((await t.as(dirB2).del(API + '/' + id)).status, 200);
+  assert.equal(statusOf(t, id), 'cancelled');
+});
+
+test(['AN-3', 'NF-1'], 'a director who is deactivated or made staff hands their scheduled post to the location\'s director, and it goes out under the location\'s name', async () => {
+  const w = await world();
+  const { t } = w;
+  const before = (await t.as(w.dirA).post(API, post({ title: 'Sent before' }))).body.announcement.id;
+  const later = (await t.as(w.dirA).post(API, post({ title: 'Later', publish_at: '2026-10-15T09:00' }))).body.announcement.id;
+  const dirA2 = t.fx.director(w.A);
+  // Made staff: no longer a director, so the post passes on.
+  t.db.prepare("UPDATE users SET role = 'staff' WHERE id = ?").run(w.dirA.id);
+  assert.deepEqual(await scheduledIds(t, dirA2), [later]);
+  t.db.prepare("UPDATE users SET role = 'director', active = 0 WHERE id = ?").run(w.dirA.id);
+  assert.deepEqual(await scheduledIds(t, dirA2), [later], 'deactivated: it passes on too');
+  assert.equal((await t.as(dirA2).get(API + '/' + later + '/stats')).status, 200);
+  for (const u of [w.dirB, w.staffA]) assert.equal((await t.as(u).del(API + '/' + later)).status, 403, 'not another location\'s director or staff');
+  assert.deepEqual(await scheduledIds(t, w.dirB), []);
+
+  t.clock.set(at(LA, '2026-10-15', '09:01'));
+  t.jobs();
+  assert.equal(statusOf(t, later), 'published');
+  const posts = (await t.as(w.famA.parent).get(API + '/feed')).body.posts;
+  const sentLater = posts.find(p => p.id === later), sentBefore = posts.find(p => p.id === before);
+  assert.deepEqual(sentLater.sender, { name: null, role: 'director' }, 'no departed director\'s name on it');
+  assert.deepEqual(sentLater.locations.map(l => l.name), ['Irvine']);
+  assert.equal(sentBefore.sender.name, w.dirA.name, 'a post sent while they were director keeps their name');
+});
+
+test(['AN-2', 'NF-1'], 'HQ\'s scheduled posts stay with HQ when the HQ account that made them is deactivated', async () => {
+  const w = await world();
+  const { t } = w;
+  const hq2 = t.fx.hq();
+  const id = (await t.as(w.hq).post(API, post({ locations: [w.A.id], publish_at: '2026-10-20T09:00' }))).body.announcement.id;
+  t.db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(w.hq.id);
+  assert.deepEqual(await scheduledIds(t, w.dirA), []);
+  assert.equal((await t.as(w.dirA).del(API + '/' + id)).status, 403);
+  assert.deepEqual(await scheduledIds(t, hq2), [id]);
+  t.clock.set(at(LA, '2026-10-20', '09:00'));
+  t.jobs();
+  const sent = (await t.as(w.famA.parent).get(API + '/feed')).body.posts.find(p => p.id === id);
+  assert.equal(sent.sender.role, 'hq');
+});
+
+test(['AN-2', 'AN-3'], 'an HQ post scheduled for several locations shows its time in the zone it was entered in, naming that location', async () => {
+  const w = await world();
+  const { t } = w;
+  // Calgary has a higher id than Toronto but sorts first by name.
+  const C = t.fx.location({ name: 'Calgary', timezone: 'America/Edmonton' });
+  const r = await t.as(w.hq).post(API, post({ locations: [C.id, w.B.id], publish_at: '2026-10-20T09:00' }));
+  assert.equal(r.status, 201);
+  const due = at(TO, '2026-10-20', '09:00');
+  for (const card of [r.body.announcement, (await t.as(w.hq).get(API + '/feed')).body.scheduled[0]]) {
+    assert.equal(card.publish_at, due);
+    assert.deepEqual([card.zone_name, card.tz], ['Toronto', TO]);
+    assert.deepEqual(card.locations.map(l => l.name), ['Calgary', 'Toronto']);
+  }
+  // Once sent, each family sees its own location's zone as before.
+  t.clock.set(due);
+  t.jobs();
+  const sent = (await t.as(w.hq).get(API + '/feed')).body.posts[0];
+  assert.equal(sent.zone_name, null);
+});
+
+test(['AN-3', 'AN-4', 'NF-1'], 'the feed names every location a parent hears from: their home and each linked student\'s', async () => {
+  const w = await world();
+  const { t } = w;
+  t.fx.link(w.famA.parent, w.famB.student);
+  const mine = async u => (await t.as(u).get(API + '/feed')).body.my_locations;
+  assert.deepEqual(await mine(w.famA.parent), ['Irvine', 'Toronto']);
+  assert.deepEqual(await mine(w.famA2.parent), ['Irvine']);
+  assert.deepEqual(await mine(w.famB.student), ['Toronto']);
+  assert.deepEqual(await mine(w.staffB), ['Toronto']);
+  assert.equal(await mine(w.hq), null);
+});
+
 // ---------------------------------------------------------------- the emergency pop-up in a browser tab
 
 // Just enough DOM for public/js/app.js and the announcements view. Elements live
@@ -1105,4 +1205,125 @@ test(['AN-2', 'AN-5'], 'HQ\'s alert screen lists a closed location, marked close
   assert.ok(labels.includes('All locations (2)'), JSON.stringify(labels));
   assert.ok(labels.includes('Toronto (closed)'), JSON.stringify(labels));
   assert.ok(labels.includes('Irvine'), JSON.stringify(labels));
+});
+
+// ---------------------------------------------------------------- the review step, News and Home as each viewer sees them
+
+const textOf = n => n.textContent;
+const articles = root => root.findAll(n => n.tag === 'article');
+// Fills the compose form and asks for the review step.
+async function review(tab, { title = 'Fall open house', body = 'Come see the new study rooms on Friday.', allLocations = false } = {}) {
+  const main = tab.main();
+  if (allLocations) main.find(n => n.tag === 'input' && n.getAttribute('name') === 'ann-locmode' && n.getAttribute('value') === 'all').checked = true;
+  tab.doc.getElementById('ann-title').value = title;
+  tab.doc.getElementById('ann-body').value = body;
+  main.find(n => n.tag === 'form').dispatch('submit');
+  await tab.settle();
+  return main.find(n => n.tag === 'section' && n.getAttribute('aria-labelledby') === 'ann-review-h');
+}
+
+test(['AN-1', 'AN-4'], 'the review step shows the post as families get it: their front desk, and no staff-only "Sent to" line', async () => {
+  const w = await world();
+  const { t } = w;
+  t.db.prepare("UPDATE locations SET address = '1 Main St' WHERE id = ?").run(w.A.id);
+  const tab = alertTab(t);
+  tab.signIn(w.dirA);
+  await tab.start();
+  await tab.go('#/news/new');
+  const box = await review(tab);
+  assert.ok(box && !box.hidden, 'the review step is on screen');
+  assert.ok(box.find(n => n.tag === 'h3' && n.textContent === 'What families will see'));
+  const [card] = articles(box);
+  assert.ok(textOf(card).includes('Questions? Ask the Irvine front desk at 1 Main St.'), textOf(card));
+  assert.ok(!textOf(card).includes('Sent to'), textOf(card));
+  assert.ok(textOf(card).includes(w.dirA.name + ', Irvine · Just now'), textOf(card));
+});
+
+test(['AN-2', 'AN-5'], 'HQ\'s alert review for several locations shows one location\'s family copy, not HQ\'s own view', async () => {
+  const w = await world();
+  const { t } = w;
+  const tab = alertTab(t);
+  tab.signIn(w.hq);
+  await tab.start();
+  await tab.go('#/news/emergency');
+  const box = await review(tab, { title: 'Power outage', body: 'Head home safely.', allLocations: true });
+  const [card] = articles(box);
+  assert.ok(textOf(card).includes('ELITE HQ, Irvine · Just now'), textOf(card));
+  assert.ok(!textOf(card).includes('2 locations'), textOf(card));
+  assert.ok(textOf(card).includes('Questions? Ask the Irvine front desk.'), textOf(card));
+  assert.ok(!textOf(card).includes('Sent to everyone'), textOf(card));
+  assert.ok(textOf(box).includes('As families at Irvine see it.'), textOf(box));
+});
+
+test(['AN-5'], 'an alert HQ sent to several locations names them on News for HQ, and counts them for a location\'s staff', async () => {
+  const w = await world();
+  const { t } = w;
+  await t.as(w.hq).post(API + '/emergency', alert({ locations: [w.A.id, w.B.id] }));
+  await t.as(w.dirA).post(API + '/emergency', alert({ title: 'Fire drill' }));
+  const lines = async u => {
+    const tab = alertTab(t, '#/news');
+    tab.signIn(u);
+    await tab.start();
+    return tab.main().findAll(n => n.tag === 'p' && n.textContent.startsWith('Sent to everyone')).map(textOf);
+  };
+  assert.deepEqual(await lines(w.hq), ['Sent to everyone at the location. Nobody can mute emergency alerts.',
+    'Sent to everyone at Irvine and Toronto. Nobody can mute emergency alerts.']);
+  assert.deepEqual(await lines(w.staffA), ['Sent to everyone at the location. Nobody can mute emergency alerts.',
+    'Sent to everyone at 2 locations. Nobody can mute emergency alerts.']);
+});
+
+test(['AN-5'], 'Home\'s "Hide from Home" button has an accessible name that starts with its visible words', async () => {
+  const w = await world();
+  const { t } = w;
+  await t.as(w.dirA).post(API + '/emergency', alert());
+  const tab = alertTab(t);
+  tab.signIn(w.famA.parent);
+  await tab.start();
+  const btn = tab.main().find(n => n.tag === 'button' && n.textContent === 'Hide from Home');
+  assert.ok(btn, 'the alert is pinned on Home');
+  assert.equal(btn.getAttribute('aria-label'), 'Hide from Home: Power outage');
+});
+
+test(['AN-2', 'AN-3'], 'News shows an HQ scheduled post at the time HQ entered, naming the zone it was entered in', async () => {
+  const w = await world();
+  const { t } = w;
+  const C = t.fx.location({ name: 'Calgary', timezone: 'America/Edmonton' });
+  await t.as(w.hq).post(API, post({ title: 'Winter break', locations: [C.id, w.B.id], publish_at: '2026-10-20T09:00' }));
+  const tab = alertTab(t, '#/news');
+  tab.signIn(w.hq);
+  await tab.start();
+  const sched = tab.main().find(n => n.tag === 'section' && n.getAttribute('aria-labelledby') === 'ann-sched');
+  assert.ok(textOf(sched).includes('Goes out Oct 20, 9:00 AM (Toronto time)'), textOf(sched));
+});
+
+test(['AN-3', 'AN-4'], 'a parent with students at two locations sees News and Home name both', async () => {
+  const w = await world();
+  const { t } = w;
+  t.fx.link(w.famA.parent, w.famB.student);
+  const tab = alertTab(t, '#/news');
+  tab.signIn(w.famA.parent);
+  await tab.start();
+  assert.ok(textOf(tab.main()).includes('Announcements from Irvine and Toronto.'), textOf(tab.main()));
+  assert.ok(textOf(tab.main()).includes('When Irvine and Toronto share news'), textOf(tab.main()));
+  await tab.go('#/home');
+  assert.ok(textOf(tab.main()).includes('News from Irvine and Toronto will show up here.'), textOf(tab.main()));
+});
+
+test(['AN-3'], 'Home\'s Latest news shows a new announcement as soon as it arrives, and other notices leave it be', async () => {
+  const w = await world();
+  const { t } = w;
+  const tab = alertTab(t);
+  tab.signIn(w.famA.parent);
+  await tab.start();
+  const card = () => tab.main().find(n => n.tag === 'section' && n.getAttribute('aria-labelledby') === 'home-news-h');
+  assert.ok(textOf(card()).includes('No announcements yet.'));
+  await t.as(w.dirA).post(API, post({ title: 'Pumpkin carving' }));
+  await tab.arrive(t.fx.notifications(w.famA.parent, 'announcement')[0]);
+  const shown = card();
+  assert.ok(textOf(shown).includes('Pumpkin carving'), textOf(shown));
+  // A notice that brings no new post (a check-in, say) does not redraw it.
+  tab.App.toast('Sam checked in');
+  await tab.settle();
+  assert.equal(card(), shown);
+  assert.ok(shown.isConnected);
 });

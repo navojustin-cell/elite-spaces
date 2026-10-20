@@ -32,7 +32,8 @@
   const qs = o => Object.entries(o).filter(([, v]) => v != null && v !== '')
     .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
   // Decimal hours always with two places, as the PDF and CSV print them: "8.50".
-  const hours = minutes => (minutes / 60).toFixed(2);
+  // The server's hours are the sum of each visit's rounded hours, so they match the files' columns (L61).
+  const hours = n => n.toFixed(2);
   const count = (n, one, many) => n + ' ' + (n === 1 ? one : many);
   const longDate = iso => App.fmtDate(iso, { weekday: undefined, year: 'numeric' });
   const first = name => String(name || '').split(' ')[0];
@@ -160,7 +161,7 @@
 
         history.replaceChildren(
           nav,
-          h('div', { class: 'card att-stats' }, stat(t.visits, t.visits === 1 ? 'visit' : 'visits'), stat(hours(t.minutes), 'hours'),
+          h('div', { class: 'card att-stats' }, stat(t.visits, t.visits === 1 ? 'visit' : 'visits'), stat(hours(t.hours), 'hours'),
             stat(t.absences, t.absences === 1 ? 'absence' : 'absences')),
           items.length
             ? h('div', { class: 'card' }, h('ul', { class: 'list att-list', 'aria-label': `${student.name}, ${p.label}` }, items.map(i => i.el)))
@@ -198,7 +199,7 @@
           if (!hoursState.from || !hoursState.to) { preview.textContent = 'Choose a start date and an end date.'; return; }
           try {
             const log = await App.api.get(`${API}/students/${student.id}/log?` + qs({ from: hoursState.from, to: hoursState.to }));
-            if (mine === pseq) preview.textContent = `${log.label}: ${count(log.totals.visits, 'visit', 'visits')} · ${hours(log.totals.minutes)} hours · ${count(log.totals.absences, 'absence', 'absences')}`;
+            if (mine === pseq) preview.textContent = `${log.label}: ${count(log.totals.visits, 'visit', 'visits')} · ${hours(log.totals.hours)} hours · ${count(log.totals.absences, 'absence', 'absences')}`;
           } catch (e) { if (mine === pseq) preview.textContent = e.message; }
         };
         const file = ext => `${API}/students/${student.id}/log.${ext}?` + qs({ from: hoursState.from, to: hoursState.to });
@@ -230,9 +231,9 @@
         h('ul', { class: 'list' }, students.map(s => h('li', null,
           h('div', { class: 'grow' }, h('strong', null, s.name),
             h('div', { class: 'muted small' }, s.week.totals.visits
-              ? `${count(s.week.totals.visits, 'visit', 'visits')} · ${hours(s.week.totals.minutes)} hours`
+              ? `${count(s.week.totals.visits, 'visit', 'visits')} · ${hours(s.week.totals.hours)} hours`
               : 'No visits yet this week')),
-          h('div', { class: 'muted small' }, `${hours(s.month.totals.minutes)} hours in ${s.month.label.split(' ')[0]}`))))));
+          h('div', { class: 'muted small' }, `${hours(s.month.totals.hours)} hours in ${s.month.label.split(' ')[0]}`))))));
     },
   });
 
@@ -383,7 +384,7 @@
           panel.setAttribute('aria-labelledby', 'rep-tab-' + repState.tab);
           if (repState.tab === 'students') {
             panel.replaceChildren(rep.by_student.length ? table(['Student', 'Visits', 'Hours', 'Absences'],
-              rep.by_student.map(s => [s.student_name, s.visits, hours(s.minutes), s.absences])) : h('div', { class: 'card empty' }, noVisits));
+              rep.by_student.map(s => [s.student_name, s.visits, hours(s.hours), s.absences])) : h('div', { class: 'card empty' }, noVisits));
           } else if (repState.tab === 'visits') {
             panel.replaceChildren(rep.visits.length ? table(
               ['Date', 'Student', ...(all ? ['Location'] : []), 'Session', 'In', 'Out', 'Total', 'Check-out'],
@@ -405,7 +406,7 @@
         results.replaceChildren(
           h('div', { class: 'page-head' }, h('div', null, h('h2', null, rep.label), h('p', { class: 'small' }, where)),
             h('div', { class: 'row' }, downloads)),
-          h('div', { class: 'card att-stats att-four' }, stat(t.visits, t.visits === 1 ? 'visit' : 'visits'), stat(hours(t.minutes), 'hours'),
+          h('div', { class: 'card att-stats att-four' }, stat(t.visits, t.visits === 1 ? 'visit' : 'visits'), stat(hours(t.hours), 'hours'),
             stat(t.students, t.students === 1 ? 'student' : 'students'), stat(t.absences, t.absences === 1 ? 'absence' : 'absences')),
           // A ternary, not &&: replaceChildren would print a bare false as the word "false".
           t.needs_review > 0 ? h('div', { class: 'notice notice-warn' }, h('strong', null, count(t.needs_review, 'visit needs', 'visits need') + ' review. '),
@@ -450,7 +451,7 @@
             h('div', { class: 'muted small' }, (opts.all_locations ? 'All locations' : opts.locations[0].name) + ' · ' + rep.label)),
           h('button', { type: 'button', class: 'btn btn-ghost', onclick: open }, 'Open reports')),
         h('div', { class: 'att-stats', style: 'margin-top:.75rem' }, stat(t.visits, t.visits === 1 ? 'visit' : 'visits'),
-          stat(hours(t.minutes), 'hours'), stat(t.absences, t.absences === 1 ? 'absence' : 'absences')),
+          stat(hours(t.hours), 'hours'), stat(t.absences, t.absences === 1 ? 'absence' : 'absences')),
         t.needs_review > 0 && h('div', { class: 'notice notice-warn', style: 'margin:.75rem 0 0' },
           count(t.needs_review, 'visit needs', 'visits need') + ' review: the student didn\'t scan out.')));
     },

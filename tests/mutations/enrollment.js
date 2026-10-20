@@ -117,10 +117,10 @@ module.exports = [
   { name: 'closure days count as absent', covers: ['EN-7'], file: S,
     find: "closures.has(d) ? 'closed' : ", repl: '' },
   { name: 'paused enrollments count as absent', covers: ['EN-7'], file: S,
-    find: "statusAt(e, changes.get(e.id), start) === 'paused' ? 'paused' : ", repl: '' },
+    find: "held ? 'paused' : ", repl: '' },
   // D-15 / D-16: a week is paused or absent by the enrollment's status when it started.
   { name: 'weeks are judged by the enrollment\'s status now, not on that date', covers: ['EN-7'], file: S,
-    find: "statusAt(e, changes.get(e.id), start) === 'paused'", repl: "e.status === 'paused'" },
+    find: "const held = statusAt(e, ch, start) === 'paused'", repl: "const held = e.status === 'paused'" },
   { name: 'weeks before the first logged change take today\'s status', covers: ['EN-7'], file: S,
     find: 'let s = changes.length ? changes[0].from_status : e.status;', repl: 'let s = e.status;' },
   // The status log is written by a trigger in the enrollment schema on the foundation's app clock (D-26).
@@ -251,7 +251,7 @@ module.exports = [
     find: '      el: btn.parentNode, opener: btn, danger: true,\n      title: `Drop', repl: '      opener: btn, danger: true,\n      title: `Drop' },
   // EN-3: request notices open Schedule from the Inbox.
   { name: 'request notices in the Inbox open nothing', covers: ['EN-3'], file: V,
-    find: "App.inboxLink('enrollment_request', 'schedule');", repl: '' },
+    find: "App.inboxLink('enrollment_request', n => 'schedule/request/' + n.ref_id);", repl: '' },
   // EN-4 / MB-5: a lapsed student hears one message, the one the Home membership card uses.
   { name: 'a lapsed student gets no word at the top of Schedule', covers: ['EN-4'], file: V,
     find: 'if (lapsed(me.membership)) {', repl: 'if (false) {' },
@@ -259,6 +259,56 @@ module.exports = [
     find: "lapsedText(me.enrollments.some(e => e.status === 'paused'), me.location.name)", repl: 'lapsedText(false, me.location.name)' },
   { name: 'the Ask card words a lapse its own way', covers: ['EN-4'], file: V,
     find: "if (lapsed(m)) return h('div'", repl: "if (false) return h('div'" },
+
+  // ---- sweep fixes (Oct 14 sweep) ----
+  // L54: the student is told in their own words, never to drop or join the waitlist.
+  { name: "a blocked approval tells the student the parent's 'Drop one' message", covers: ['EN-3'], file: S,
+    find: "const toStudent = out.outcome === 'blocked' ? forStudent(eligibility(ctx, student, slot.loc))", repl: "const toStudent = out.outcome === 'blocked' ? out.message" },
+  { name: "a full approval stores the parent's 'Join the waitlist' message for the student", covers: ['EN-3'], file: S,
+    find: ": out.outcome === 'full' ? `${session.name} on ${DAYS[r.weekday]}s is full. ${fullTail}` : null;", repl: ": out.outcome === 'full' ? out.message : null;" },
+  { name: 'a student already in line is told a parent can add them to the waitlist', covers: ['EN-3'], file: S,
+    find: "const waiting = out.outcome === 'full' && waitingRow(", repl: "const waiting = false && waitingRow(" },
+  { name: 'the student hears the cap in the third person', covers: ['EN-3'], file: S,
+    find: 'weekly_cap: `You already have ${check.used} weekly session', repl: 'weekly_cap: `Student already has ${check.used} weekly session' },
+  { name: 'a student blocked by an expired membership is told nothing', covers: ['EN-3'], file: S,
+    find: "membership_expired: m && `Your membership expired on", repl: "membership_expired_x: m && `Your membership expired on" },
+  // L29: nothing retries a blocked approval, so nothing says "yet".
+  { name: 'the student is told they could not be enrolled "yet"', covers: ['EN-3'], file: S,
+    find: "but you couldn't be enrolled`,", repl: "but you couldn't be enrolled yet`," },
+  { name: 'the parent is told the student could not be enrolled "yet"', covers: ['EN-3'], file: V,
+    find: "couldn't be enrolled. ${out.message}`", repl: "couldn't be enrolled yet. ${out.message}`" },
+  { name: 'the request badge says "not enrolled yet"', covers: ['EN-3'], file: V,
+    find: "['badge-warn', 'Approved · not enrolled']", repl: "['badge-warn', 'Approved · not enrolled yet']" },
+  { name: 'the pre-check says approving won\'t enroll them "yet"', covers: ['EN-3'], file: V,
+    find: "'Approving won\\'t enroll them: '", repl: "'Approving won\\'t enroll them yet: '" },
+  // L30: an approved request for a slot the student now holds says enrolled.
+  { name: 'an approved full request still says full after the waitlist enrolls them', covers: ['EN-3', 'EN-5'], file: S,
+    find: "AND status = 'approved' AND outcome IN ('full','blocked')`).run(", repl: "AND status = 'approved' AND outcome IN ('none')`).run(" },
+  { name: 'a blocked approval still says blocked after the parent adds that slot', covers: ['EN-3'], file: S,
+    find: "AND status = 'approved' AND outcome IN ('full','blocked')`).run(", repl: "AND status = 'approved' AND outcome IN ('full')`).run(" },
+  { name: "a seat settles every student's approved requests for that slot", covers: ['EN-3', 'NF-1'], file: S,
+    find: "SET outcome = 'enrolled', outcome_message = NULL\n    WHERE student_id = ? AND", repl: "SET outcome = 'enrolled', outcome_message = NULL\n    WHERE ? IS NOT NULL AND" },
+  // L33: a spot restored mid-session is on again for the rest of that session.
+  { name: 'a spot restored while the session runs still shows today as paused', covers: ['EN-7'], file: S,
+    find: " && (now >= end || statusAt(e, ch, now) === 'paused');", repl: ';' },
+  { name: 'a restored spot\'s occurrence that ended unattended turns absent', covers: ['EN-7'], file: S,
+    find: "(now >= end || statusAt(e, ch, now) === 'paused')", repl: "(statusAt(e, ch, now) === 'paused')" },
+  // L52: no "pick one" for a family whose Enroll buttons are all disabled.
+  { name: 'Schedule tells a family with no membership to pick a session', covers: ['EN-4'], file: V,
+    find: "sel.membership.can_add ? 'No weekly sessions yet. Pick one", repl: "true ? 'No weekly sessions yet. Pick one" },
+  { name: 'Home tells a family with no membership to add a session', covers: ['EN-4'], file: V,
+    find: "students[i].membership.can_add ? 'No sessions this week. Add one", repl: "true ? 'No sessions this week. Add one" },
+  // L35: enrollment notices open Schedule on that student.
+  { name: 'enrollment and waitlist notices in the Inbox open nothing', covers: ['EN-2', 'EN-5'], file: V,
+    find: "App.inboxLink('enrollment', n => 'schedule/enrollment/' + n.ref_id);", repl: '' },
+  { name: 'a request notice opens the first student, not the one who asked', covers: ['EN-3'], file: V,
+    find: "(requests.find(r => r.id === ref.id) || {}).student_id", repl: 'undefined' },
+  { name: 'an enrollment notice opens the first student, not the one enrolled', covers: ['EN-2'], file: V,
+    find: "(students.find(s => s.enrollments.some(e => e.id === ref.id)) || {}).id", repl: 'undefined' },
+  { name: "the parent's Schedule reads an Inbox item's id as a week", covers: ['EN-2'], file: V,
+    find: 'const from = ref ? null : params[1] || null;', repl: 'const from = params[1] || null;' },
+  { name: "the student's Schedule reads an Inbox item's id as a week", covers: ['EN-3'], file: V,
+    find: 'const from = inboxRef(params) ? null : params[1] || null;', repl: 'const from = params[1] || null;' },
 
   // ---- the demo data (seed.js) ----
   { name: "the demo request's Inbox notice carries the seeding time, not the request's", covers: ['EN-3'], file: SEED,

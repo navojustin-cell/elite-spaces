@@ -12,12 +12,7 @@ and the last fix-and-verify pass. None of them blocks the gate.
 - Notification settings beyond muting announcements.
 
 ## Known small issues (bugs or polish, in scope, not yet fixed)
-- **Focus:** after some re-rendering actions (Mark all read, Refresh numbers, Decline/Cancel invite, Deactivate), focus falls back to the top of the page.
-- **Accounts screen:** the Decline and Cancel invite buttons don't name the person.
-- **Phones at 320px:** the bottom tab bar is slightly too wide (it fits at 375px), and the notes edit hint wraps to a third line.
-- **Parent notifications:** the check-out notification doesn't name the session (the check-in one does).
-- **Home "Latest news":** it doesn't refresh live when a normal announcement arrives (emergency alerts do).
-- **Tab titles:** the create-account and invite-code screens keep "Sign in" as the tab title.
+- **Focus:** after some re-rendering actions (Refresh numbers), focus falls back to the top of the page.
 
 ## Environment notes
 - The Claude browser pane blocks service workers, the camera and `window.confirm`. Scans in that pane use the dev "Simulate scan" button. On a real phone the camera scan needs the app served over HTTPS (localhost is fine on the same machine).

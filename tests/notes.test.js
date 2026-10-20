@@ -280,6 +280,57 @@ test(['DN-2'], 'the checklist always keeps at least one item', async () => {
   assert.equal(w.t.db.prepare('SELECT COUNT(*) AS n FROM note_items WHERE active = 1').get().n, 1);
 });
 
+// L45: two identical rating rows would show staff (and parents) the same item twice.
+test(['DN-2'], 'a checklist item name is used only once, whatever its case or spacing; a retired name is restored, not added again', async () => {
+  const w = await world();
+  const hq = w.t.as(w.hq);
+  const [onTime, focused, , productive] = w.items;
+  const labels = () => w.t.db.prepare('SELECT label, active FROM note_items ORDER BY id').all().map(r => [r.label, r.active]);
+  const before = labels();
+
+  for (const label of ['Focused', 'focused', '  FOCUSED  ', 'On   time']) {
+    const r = await hq.post('/api/notes/items', { label });
+    assert.equal(r.status, 409, label);
+    assert.equal(r.body.error, 'duplicate_label', label);
+  }
+  assert.equal((await hq.post('/api/notes/items', { label: 'focused' })).body.message,
+    '"Focused" is already on the checklist. Give the item a different name.');
+  // Renaming one item to another's name, in any case, is refused too.
+  const rename = await hq.patch('/api/notes/items/' + onTime.id, { label: 'FOCUSED' });
+  assert.equal(rename.status, 409);
+  assert.equal(rename.body.message, '"Focused" is already on the checklist. Give the item a different name.');
+  assert.deepEqual(labels(), before);
+  assert.equal(w.t.fx.audit().length, 0, 'nothing refused is logged');
+
+  // An item may change its own case or spacing.
+  const own = await hq.patch('/api/notes/items/' + onTime.id, { label: 'ON  TIME' });
+  assert.equal(own.status, 200);
+  assert.equal(own.body.item.label, 'ON TIME');
+
+  // A retired item keeps its name: adding it again points to Restore, and Restore works.
+  assert.equal((await hq.patch('/api/notes/items/' + productive.id, { active: false })).status, 200);
+  const again = await hq.post('/api/notes/items', { label: 'productive use of time' });
+  assert.equal(again.status, 409);
+  assert.equal(again.body.message, '"Productive use of time" is a retired item. Restore it instead of adding it again.');
+  assert.equal((await hq.patch('/api/notes/items/' + focused.id, { label: 'Productive use of TIME' })).status, 409);
+  assert.equal((await hq.patch('/api/notes/items/' + productive.id, { active: true })).status, 200);
+
+  // A checklist that already holds a duplicate (from before this rule) can't restore it beside its twin.
+  const twin = Number(w.t.db.prepare("INSERT INTO note_items (label, position, active) VALUES ('focused', 9, 0)").run().lastInsertRowid);
+  const restore = await hq.patch('/api/notes/items/' + twin, { active: true });
+  assert.equal(restore.status, 409);
+  assert.equal(restore.body.message, '"Focused" is already on the checklist. Give the item a different name.');
+  assert.equal(w.t.db.prepare('SELECT active FROM note_items WHERE id = ?').get(twin).active, 0);
+  // Retiring it, or anything else, is never blocked by a name.
+  assert.equal((await hq.patch('/api/notes/items/' + focused.id, { active: false })).status, 200);
+  assert.equal((await hq.patch('/api/notes/items/' + twin, { active: true })).status, 200, 'with its twin retired, it can come back');
+
+  // Staff see each item once.
+  const day = await w.t.as(w.staffA).get('/api/notes/day');
+  const names = day.body.items.map(i => i.label.toLowerCase());
+  assert.equal(new Set(names).size, names.length);
+});
+
 test(['DN-2', 'DN-5'], 'a posted note keeps the checklist wording it was written with', async () => {
   const w = await world();
   const leo = w.fa.students[0], anh = w.fb.student;
@@ -868,6 +919,12 @@ function notesTab(t) {
       App.me = await App.api.get('/api/auth/me');
     },
     open: (id, ...params) => mount(box => App.views.find(v => v.id === id).render(box, params)),
+    hash: () => win.location.hash,
+    // Opens the route App.go last set, read as public/js/app.js reads the address.
+    follow() {
+      const [id, ...params] = win.location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+      return this.open(id, ...params);
+    },
     card: id => mount(box => App.cards.find(c => c.id === id).render(box)),
     async click(button) { button.click(); await settle(); },
   };
@@ -1151,4 +1208,84 @@ test(['DN-2', 'DN-4'], 'when HQ retires a checklist item while a note form is op
   await A.tap('Tidy', 'Good');
   await tab.click(A.button('Post note'));
   assert.equal(w.notes().find(n => n.student_id === anh.id).status, 'posted');
+});
+
+// L46: HQ's location switch used to carry the old location's "today" as a chosen date.
+test(['DN-4'], "HQ switching location on Daily notes lands on that location's own today, and keeps a past day it was showing", async () => {
+  const w = await world();
+  const tor = w.t.fx.location({ name: 'Toronto', timezone: 'America/Toronto' });
+  // 10:30 PM Sunday Oct 18 in Irvine and Arcadia is 1:30 AM Monday Oct 19 in Toronto.
+  w.t.clock.set(Date.parse('2026-10-19T05:30:00Z'));
+  const tab = notesTab(w.t);
+  await tab.signIn(w.hq);
+  const head = box => box.find(n => n.tag === 'p' && n.parentNode.find(x => x.tag === 'h1')).textContent;
+  const button = (box, label) => box.find(n => n.tag === 'button' && n.textContent === label);
+  const switchTo = async (box, loc) => { const s = byId(box, 'dn-loc'); s.value = String(loc.id); s.dispatch('change'); return tab.follow(); };
+
+  const irvine = await tab.open('daily-notes', 'today', String(w.A.id));
+  assert.equal(head(irvine), 'Today, Sunday, October 18 · Irvine');
+  const toronto = await switchTo(irvine, tor);
+  assert.equal(tab.hash(), `#/daily-notes/today/${tor.id}`);
+  assert.equal(tab.requests.at(-1).url, `/api/notes/day?location=${tor.id}`, 'no date is sent, so the server uses Toronto\'s today');
+  assert.equal(head(toronto), 'Today, Monday, October 19 · Toronto');
+  assert.equal(byId(toronto, 'dn-date').value, '2026-10-19');
+  assert.equal(button(toronto, 'Back to today'), undefined);
+  // And back again: Irvine's today, not Toronto's.
+  assert.equal(head(await switchTo(toronto, w.A)), 'Today, Sunday, October 18 · Irvine');
+
+  // A past day HQ chose stays chosen at the next location.
+  const past = await tab.open('daily-notes', '2026-10-15', String(tor.id));
+  assert.equal(head(past), 'Thursday, October 15 · Toronto');
+  const there = await switchTo(past, w.A);
+  assert.equal(tab.hash(), `#/daily-notes/2026-10-15/${w.A.id}`);
+  assert.equal(head(there), 'Thursday, October 15 · Irvine');
+  assert.ok(button(there, 'Back to today'));
+});
+
+// L59 (WCAG 2.5.3 Label in Name): a button's accessible name contains the words it shows.
+test(['DN-2', 'DN-4', 'NF-7'], "the notes screens' buttons have accessible names that contain their visible text", async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  w.visit(leo, w.A);
+  assert.equal((await w.save(w.staffA, leo, TODAY, { ratings: w.all(3), post: true })).status, 200);
+  assert.equal((await w.t.as(w.hq).patch('/api/notes/items/' + w.items[3].id, { active: false })).status, 200);
+  const tab = notesTab(w.t);
+  const labelInName = box => {
+    const named = box.findAll(n => n.tag === 'button' && n.getAttribute('aria-label') !== null && /[a-z]/i.test(n.textContent));
+    for (const b of named) assert.ok(b.getAttribute('aria-label').toLowerCase().includes(b.textContent.toLowerCase()), `"${b.textContent}" is named "${b.getAttribute('aria-label')}"`);
+    return named.map(b => b.getAttribute('aria-label'));
+  };
+
+  await tab.signIn(w.hq);
+  const checklist = await tab.open('note-checklist');
+  assert.deepEqual(labelInName(checklist).filter(l => /^Rename/.test(l)), ['Rename item 1', 'Rename item 2', 'Rename item 3']);
+  assert.ok(labelInName(checklist).includes('Restore "Productive use of time"'));
+
+  await tab.signIn(w.staffA);
+  const day = await tab.open('daily-notes');
+  assert.deepEqual(labelInName(day), ['Edit note for Leo Garcia']);
+});
+
+// Open item: on a 320px phone the hint can run to three lines; below the buttons it never pushes them.
+test(['DN-4', 'NF-7'], 'the note hint sits below Post note and Save changes, so a longer hint never moves them', async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  w.visit(leo, w.A);
+  const tab = notesTab(w.t);
+  await tab.signIn(w.staffA);
+  await tab.open('daily-notes');
+  const c = noteCard(tab, leo);
+  const order = () => {
+    const kids = c.card().childNodes;
+    const hint = kids.findIndex(n => n.cls.includes('note-hint'));
+    const actions = kids.findIndex(n => n.cls.includes('note-actions'));
+    return [actions >= 0, hint === kids.length - 1, hint > actions];
+  };
+  assert.deepEqual(order(), [true, true, true], 'Post note');
+  for (const label of PRD_ITEMS) await c.tap(label, 'Great');
+  await tab.click(c.button('Post note'));
+  await tab.click(c.button('Edit note'));
+  await c.tap('Focused', 'Good');
+  assert.equal(c.hint(), 'Ready to save. Parents see the change but are not notified again.');
+  assert.deepEqual(order(), [true, true, true], 'Save changes');
 });

@@ -1763,3 +1763,57 @@ test(['AT-4'], 'Reports: HQ choosing another location gets that location\'s rang
   choose(view, { Location: String(tor.id) });
   assert.deepEqual(range(), ['2026-10-01', '2026-10-02']);
 });
+
+// L61: each visit's hours are rounded once; every hours total is the sum of the
+// visit hours it covers, so the hours column adds up to the total in the CSV, the
+// PDF and every screen. Minutes stay exact.
+test(['AT-1', 'AT-3', 'AT-4'], 'hours add up: per-visit and per-student hours sum to the printed total in the CSV, PDF, reports and screens', async () => {
+  const w = await reportWorld();
+  const t = w.t;
+  t.clock.set(at(LA, '2026-10-16', '17:00')); // Fri Oct 16
+  // Maya: three 181-minute visits this week (3.0167 hours each). Ben and Ava: one each.
+  for (const d of ['2026-10-12', '2026-10-14', '2026-10-16']) w.visit(d, '13:00', '16:01');
+  const ava = rename(t, t.fx.family(w.loc).student, 'Ava Diaz');
+  w.visit('2026-10-16', '13:00', '16:01', { student: w.ben, session: null });
+  w.visit('2026-10-16', '13:00', '16:01', { student: ava, session: null });
+  const sum = list => Math.round(list.reduce((s, x) => s + Number(x), 0) * 100) / 100;
+  const S = `${A}/students/${w.kid.id}`, range = 'from=2026-10-12&to=2026-10-16';
+
+  // The family CSV: 3.02 + 3.02 + 3.02 = 9.06, and the total row says 9.06 (543 minutes).
+  const rows = parseCsv((await t.as(w.parent).get(`${S}/log.csv?${range}`)).body);
+  const visits = rows.filter(r => r[0] === 'visit'), total = rows.at(-1);
+  assert.deepEqual(visits.map(r => [r[7], r[8]]), [['181', '3.02'], ['181', '3.02'], ['181', '3.02']]);
+  assert.deepEqual([total[0], total[7], total[8]], ['total', '543', '9.06']);
+  assert.equal(sum(visits.map(r => r[8])).toFixed(2), total[8]);
+  // The same total in the log, the week's history, the Home totals and the PDF.
+  const log = await t.as(w.parent).get(`${S}/log?${range}`);
+  assert.deepEqual([log.body.totals.minutes, log.body.totals.hours], [543, 9.06]);
+  assert.equal((await t.as(w.parent).get(`${S}/history?period=week`)).body.totals.hours, 9.06);
+  assert.equal((await t.as(w.parent).get(`${A}/students`)).body.students[0].week.totals.hours, 9.06);
+  assert.ok(pdfText((await t.as(w.parent).get(`${S}/log.pdf?${range}`)).body).includes('3 Visits 9.06 Total hours · 9h 3m'));
+
+  // The director's report: per-student hours add up to the total, and Maya's matches her own log.
+  const rep = await t.as(w.director).get(`${A}/report?from=2026-10-16&to=2026-10-16`);
+  assert.deepEqual(rep.body.by_student.map(s => [s.student_name, s.minutes, s.hours]),
+    [['Ava Diaz', 181, 3.02], ['Ben Cole', 181, 3.02], ['Maya Johnson', 181, 3.02]]);
+  assert.deepEqual([rep.body.totals.minutes, rep.body.totals.hours], [543, 9.06]);
+  const week = await t.as(w.director).get(`${A}/report?${range}`);
+  assert.equal(week.body.by_student.find(s => s.student_name === 'Maya Johnson').hours, log.body.totals.hours);
+  assert.equal(sum(week.body.by_student.map(s => s.hours)), week.body.totals.hours);
+  assert.equal(week.body.totals.hours, 15.1); // five visits of 3.02; 905 minutes alone would round to 15.08
+  const repRows = parseCsv((await t.as(w.director).get(`${A}/report.csv?${range}`)).body);
+  assert.equal(sum(repRows.filter(r => r[0] === 'visit').map(r => r[8])).toFixed(2), repRows.at(-1)[8]);
+  assert.equal(repRows.at(-1)[8], '15.10');
+  const pdf = pdfText((await t.as(w.director).get(`${A}/report.pdf?${range}`)).body);
+  for (const want of ['15.10 Total hours · 15h 5m', 'Ava Diaz 1 3.02', 'Ben Cole 1 3.02', 'Maya Johnson 3 9.06']) assert.ok(pdf.includes(want), want + ' in ' + pdf);
+
+  // The screens show the server's hours, not hours worked out again from minutes.
+  const tab = browserTab(t);
+  tab.signIn(w.parent);
+  const hours = await tab.open('hours');
+  assert.match(words(byId(hours, 'att-history')), /3 visits 9\.06 hours/);
+  tab.signIn(w.director);
+  const reports = await tab.open('reports');
+  // This month: Maya 3.00 + 3.00 + 3 x 3.02 = 15.06 (903 minutes alone: 15.05); with Ben's 5.52 and Ava's 3.02, 23.60.
+  assert.match(words(reportBox(reports)), /^Oct 1 – Oct 31, 2026 .* 8 visits 23\.60 hours .* Ava Diaz 1 3\.02 0 Ben Cole 2 5\.52 1 Maya Johnson 5 15\.06 2$/);
+});

@@ -1,0 +1,31 @@
+# Render Blueprint for ELITE Spaces (docs/deploy.md has the click-by-click steps).
+# One web service. Node comes from .node-version (24). The SQLite database lives
+# on a persistent disk so it survives deploys and restarts. A persistent disk
+# needs a paid instance type (Starter or above).
+services:
+  - type: web
+    name: elite-spaces
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: node --no-warnings server.js
+    healthCheckPath: /healthz
+    autoDeploy: false
+    disk:
+      name: elite-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: ELITE_DB
+        value: /var/data/elite-spaces.db
+      # Web push keys. Leave these blank to let the app make a key pair once and
+      # keep it in the database (on the disk). Fill all three to use your own.
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false
+      # ELITE_DEV is deliberately not set: dev mode (demo sign-in, clock control)
+      # must stay off on a hosted server. ELITE_SEED_DEMO=1 loads demo data into
+      # an empty database only; add it by hand for a demo, never for real families.
