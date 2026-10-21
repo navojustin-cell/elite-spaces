@@ -11,6 +11,12 @@ and the last fix-and-verify pass. None of them blocks the gate.
 - An "include audit log of staff edits" option on attendance exports.
 - Notification settings beyond muting announcements.
 
+- **Daily check-in goals (Justin, Oct 21, 2026; to design later).** After scanning in, a student picks the
+  subject they're working on (Math, English, ...). The app offers example goals for that subject, and the student
+  writes a sentence or two about what they're doing (studying, a project). Up to 3 goals, optional, not required
+  daily. Mentors and staff can see it and comment, so they can check in on anyone who needs help. Over time it
+  tracks what each student works on (study content stays in their own third-party curriculum).
+
 ## Known small issues (bugs or polish, in scope, not yet fixed)
 - **Focus:** after some re-rendering actions (Refresh numbers), focus falls back to the top of the page.
 
