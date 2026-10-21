@@ -286,6 +286,7 @@ function status(ctx, student, ms) {
   const visits = ctx.db.prepare(`SELECT v.*, s.name AS session_name, s.end_time FROM visits v LEFT JOIN sessions s ON s.id = v.session_id
     WHERE v.student_id = ? AND v.location_id = ? AND v.local_date = ? ORDER BY v.check_in_at DESC, v.id DESC`).all(student.id, loc.id, today);
   const v = visits[0];
+  const closure = closureOn(ctx, loc, today);
   // The next slot skips any slot today's visits already cover (D-15a, R2).
   const next = nextSlot(ctx, loc, student.id, ms, s => s.date === today && visits.some(x => visitCovers(x, s)));
   // During a back-to-back stay (R2) the visit is in the latest slot it has run on into.
@@ -305,6 +306,8 @@ function status(ctx, student, ms) {
     } : null,
     // A membership that hasn't started yet (R6): its first day, so the card can say when check-in opens.
     starts_on: startsLater(ctx, student.id, today),
+    // A closure today (SC-3, D-19), so the Check in screen can say the center is closed (L31).
+    closed_today: closure ? { reason: closure.reason || null } : null,
     next: next ? {
       session_name: next.name, date: next.date, start_at: next.start_at, end_at: next.end_at,
       opens_at: next.start_at - EARLY_MS, when: when(loc, next.start_at, ms),

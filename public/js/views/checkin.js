@@ -150,7 +150,11 @@
           h('div', { class: 'muted small' }, statusLine(status, true, now))),
         stateBadge(status)));
       scanBtn.querySelector('.ci-scan-label').textContent = status.state === 'here' ? 'Scan to check out' : 'Scan to check in';
-      helpLine.textContent = `Having trouble? Ask staff at the front desk to check you ${status.state === 'here' ? 'out' : 'in'}.`;
+      // On a closure day (SC-3) there is nothing to check in to, so the line says so instead of offering staff (L31).
+      const closed = status.closed_today && status.state !== 'here';
+      helpLine.textContent = closed
+        ? `${status.location.name} is closed today${status.closed_today.reason ? ` (${status.closed_today.reason})` : ''}. There are no sessions to check in to.`
+        : `Having trouble? Ask staff at the front desk to check you ${status.state === 'here' ? 'out' : 'in'}.`;
     }
 
     function busy(text) {
@@ -191,7 +195,7 @@
       code_expired: 'This code has expired', bad_code: "That code didn't work", wrong_location: 'This is a different location',
       outside_radius: "We couldn't confirm you're in the building", no_session: 'No session right now',
       membership_inactive: "Your membership isn't active", location_needed: 'We need your location',
-      location_closed: 'This location is closed', checked_out_auto: "You're already checked out",
+      location_closed: 'This location is closed', checked_out_auto: "You're already checked out", closed_today: 'Closed today',
     };
 
     // Send one scan. `pos` is reused when the student confirms a check-out, so they aren't asked twice.
@@ -215,7 +219,10 @@
           const inOut = status && status.state === 'here' ? 'out' : 'in';
           return showError("Your phone's location is fuzzy right now", `It's only accurate to about ${Math.round(pos.accuracy)} m. Step near a window or the entrance and try again, or ask staff to check you ${inOut}.`, { retry: () => submit(target) });
         }
-        showError(TITLES[e.code] || "We couldn't check you in", e.message);
+        // A closure day keeps the no_session code; fresh status says whether today is closed (L31).
+        if (e.code === 'no_session') await loadStatus();
+        const closed = e.code === 'no_session' && status && status.closed_today;
+        showError(TITLES[closed ? 'closed_today' : e.code] || "We couldn't check you in", e.message);
       }
     }
 

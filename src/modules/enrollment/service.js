@@ -445,7 +445,7 @@ function listRequests(ctx, user) {
     ORDER BY r.status = 'pending' DESC, r.created_at DESC, r.id DESC`).all(...ids, since);
   return rows.map(r => {
     const out = Object.assign({}, r, { timezone: getLocation(ctx, r.location_id).timezone });
-    if (r.status === 'pending' || r.outcome === 'blocked') out.check =precheck(ctx, getStudent(ctx, r.student_id), r.session_id, r.weekday);
+    if (r.status === 'pending' || r.outcome === 'blocked') out.check = precheck(ctx, getStudent(ctx, r.student_id), r.session_id, r.weekday);
     return out;
   });
 }

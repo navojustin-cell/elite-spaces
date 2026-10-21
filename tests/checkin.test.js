@@ -1419,6 +1419,21 @@ test(['CI-3'], 'a scan on a closure day says the center is closed, names the rea
   assert.equal(thu.body.message, "You don't have a session right now. Your next one is tomorrow at 1:00 PM. Staff can check you in if needed.");
 });
 
+test(['CI-3', 'SC-3'], "the status says when today is a closure day, with its reason, so the Check in screen can say so (L31)", async () => {
+  const t = await setup();
+  const closed = async who => (await t.as(who).get('/api/checkin/status')).body.students.map(s => s.closed_today);
+  assert.deepEqual(await closed(t.fam.student), [null]);
+  t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(t.loc.id, '2026-10-14', 'Power outage');
+  t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(t.loc.id, '2026-10-16', null);
+  assert.deepEqual(await closed(t.fam.student), [{ reason: 'Power outage' }]);
+  assert.deepEqual(await closed(t.fam.parent), [{ reason: 'Power outage' }]);
+  // a closure on a later day doesn't make today closed; a closure with no reason is still closed
+  setClock(t, '13:05', '2026-10-15');
+  assert.deepEqual(await closed(t.fam.student), [null]);
+  setClock(t, '13:05', '2026-10-16');
+  assert.deepEqual(await closed(t.fam.student), [{ reason: null }]);
+});
+
 test(['CI-4', 'CI-5'], 'a scan after the auto-checkout says the student is already checked out, not that there is no session; a later session still checks in (L32)', async () => {
   const t = await setup();
   const evening = t.fx.session(t.loc, { name: 'Evening Study', weekdays: '3', start: '17:00', end: '19:00' });
@@ -1600,7 +1615,7 @@ function shellTab(t) {
     } while (pending.size);
   };
   return {
-    doc, settle, main: () => doc.getElementById('main'),
+    doc, settle, main: () => doc.getElementById('main'), App: win.App,
     async open(user, hash) {
       const token = crypto.randomBytes(16).toString('hex');
       t.ctx.sessions.set(token, user.id);
@@ -1653,10 +1668,20 @@ test(['CI-4', 'CI-5', 'CI-3'], 'the Check in screen offers staff help to check o
   const tab = await screen();
   assert.deepEqual(help(tab), ['Having trouble? Ask staff at the front desk to check you in.']);
   assert.equal(await simulate(tab), "You're already checked out You were already checked out automatically at 4:00 PM, so there's nothing to scan out of. If you need to check back in, ask staff at the front desk.");
-  // on a closure day the screen says the center is closed
-  t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(t.loc.id, '2026-10-21', 'Power outage');
+  // on a closure day the screen says the center is closed: the refusal's title and the line under the button,
+  // even on a screen opened before the closure was added
   setClock(t, '13:05', '2026-10-21');
-  assert.equal(await simulate(await screen()), 'No session right now Irvine is closed today (Power outage), so there are no sessions. Your next one is Wed, Oct 28 at 1:00 PM.');
+  const open = await screen();
+  assert.deepEqual(help(open), ['Having trouble? Ask staff at the front desk to check you in.']);
+  t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(t.loc.id, '2026-10-21', 'Power outage');
+  const closedText = 'Closed today Irvine is closed today (Power outage), so there are no sessions. Your next one is Wed, Oct 28 at 1:00 PM.';
+  const closedLine = 'Irvine is closed today (Power outage). There are no sessions to check in to.';
+  const lines = tab => tab.main().findAll(n => n.tag === 'p' && /Having trouble\?|closed today/.test(n.textContent)).map(n => n.textContent);
+  assert.equal(await simulate(open), closedText);
+  assert.deepEqual(lines(open), [closedLine]);
+  const fresh = await screen();
+  assert.deepEqual(lines(fresh), [closedLine]);
+  assert.equal(await simulate(fresh), closedText);
 });
 
 test(['CI-7'], 'the staff search shows a student waiting for parent approval with no Check in button (L63)', async () => {
@@ -1675,4 +1700,29 @@ test(['CI-7'], 'the staff search shows a student waiting for parent approval wit
     ['MJ Maya Johnson Has Afternoon Study now Check in', ['Check in']],
     ['PP Pia Pending Waiting for a parent to approve the account', []],
   ]);
+});
+
+test(['CI-6'], "check-in Inbox items open a screen: a parent's check-in opens Home, a check-out opens Hours, staff open In the building (L35)", async () => {
+  const t = await setup();
+  assert.equal((await t.scan()).body.action, 'checkin');
+  setClock(t, '14:00');
+  assert.equal((await t.scan()).body.action, 'checkout');
+  setClock(t, '14:01');
+  assert.equal((await t.scan(t.fam.student, { confirm: true })).body.action, 'checkin');
+  setClock(t, '16:01');
+  t.jobs();
+  load('src/notify.js').send(t.ctx, [t.staff.id], { kind: 'checkin', title: 'Staff visit item', refType: 'visit', refId: 1 });
+  const links = async (user, withHours) => {
+    const tab = shellTab(t);
+    // Hours is the attendance module's screen, not loaded here: a stand-in shows where the link goes.
+    if (withHours) tab.App.register({ id: 'hours', title: 'Hours', roles: ['parent'], render(el) { el.append('hours'); } });
+    await tab.open(user, '#/inbox');
+    return byTag(tab.main(), 'li').map(li => [li.childNodes[0].find(n => n.tag === 'strong').textContent.split(' ')[1],
+      li.childNodes[0].tag === 'a' ? li.childNodes[0].getAttribute('href') : null]);
+  };
+  assert.deepEqual(await links(t.fam.parent, true),
+    [['was', '#/hours'], ['checked', '#/home'], ['checked', '#/hours'], ['checked', '#/home']]);
+  // with no Hours screen a check-out still opens Home
+  assert.deepEqual((await links(t.fam.parent, false)).map(x => x[1]), ['#/home', '#/home', '#/home', '#/home']);
+  assert.deepEqual(await links(t.staff, false), [['visit', '#/building']]);
 });
