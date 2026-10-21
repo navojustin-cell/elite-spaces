@@ -43,7 +43,10 @@
     if (!res.ok) {
       const e = new Error((data && data.message) || 'Request failed.');
       e.status = res.status; e.code = data && data.error;
-      if (res.status === 401 && App.me) { App.me = null; render(); }
+      if (res.status === 401 && App.me) boot({ me: null });
+      // Refused: another tab may have signed in as someone else. Check once; if
+      // so, the app is drawn again for that account and this error says nothing.
+      if (res.status === 403 && App.me && await checkAccount()) e.accountChanged = true;
       throw e;
     }
     return data;
@@ -61,7 +64,7 @@
   // Wrap an async action: shows errors as toasts, disables the button while running.
   App.run = async (btn, fn) => {
     if (btn) btn.disabled = true;
-    try { return await fn(); } catch (e) { App.toast(e.message, 'error'); } finally { if (btn) btn.disabled = false; }
+    try { return await fn(); } catch (e) { if (!e.accountChanged) App.toast(e.message, 'error'); } finally { if (btn) btn.disabled = false; }
   };
 
   // Ask before a consequential action, inline, never with window.confirm:
@@ -263,7 +266,9 @@
     try {
       const me = await App.api.get('/api/auth/me');
       const was = App.me;
+      if (meId(me) !== meId(was)) return accountChanged(me); // another tab signed in as someone else
       App.me = me;
+      checkedAt = Date.now();
       if (!was || me.user.role !== was.user.role || me.user.location_id !== was.user.location_id) render();
     } catch (_) { /* signed out: api() already redrew the sign-in screen */ }
   }
@@ -479,7 +484,11 @@
       if (seq === renderSeq) main.replaceChildren(h('div', { class: 'notice notice-danger', role: 'alert' }, e.message || 'Could not load this page.'));
     }
   }
-  window.addEventListener('hashchange', () => { render(); document.getElementById('main').focus({ preventScroll: true }); });
+  window.addEventListener('hashchange', async () => {
+    // After a pause, make sure this tab still acts as the account it shows before drawing the next page.
+    if (App.me && Date.now() - checkedAt > RECHECK_MS && await checkAccount()) return;
+    render(); document.getElementById('main').focus({ preventScroll: true });
+  });
 
   // ---------- sign-in ----------
   async function renderSignIn(main) {
@@ -493,7 +502,7 @@
     const form = h('form', { class: 'card', onsubmit: async e => {
       e.preventDefault();
       err.replaceChildren();
-      try { await App.api.post('/api/auth/login', { email: email.value, password: pw.value }); await boot(); }
+      try { await App.api.post('/api/auth/login', { email: email.value, password: pw.value }); await boot({ announce: true }); }
       catch (x) { err.replaceChildren(h('div', { class: 'notice notice-danger' }, x.message)); }
     } },
       err,
@@ -533,7 +542,7 @@
       const box = demo = h('div', { class: 'card demo-list' }, h('h2', null, 'Demo accounts'), h('p', { class: 'muted small' }, 'Dev mode: sign in as anyone with one tap.'));
       for (const [role, list] of Object.entries(groups)) {
         box.append(h('h3', { style: 'text-transform:capitalize;margin-top:.75rem' }, role === 'hq' ? 'HQ admin' : role));
-        list.forEach(a => box.append(h('button', { class: 'btn', onclick: async () => { await App.api.post('/api/dev/login-as', { userId: a.id }); await boot(); } },
+        list.forEach(a => box.append(h('button', { class: 'btn', onclick: async () => { await App.api.post('/api/dev/login-as', { userId: a.id }); await boot({ announce: true }); } },
           a.name, h('span', { class: 'muted small' }, a.location ? ' · ' + a.location : ''))));
       }
       wrap.append(box);
@@ -549,21 +558,77 @@
     if (stream) stream.close();
     location.hash = '';
     render();
+    tellOtherTabs();
   }
 
-  async function boot() {
-    try { App.me = await App.api.get('/api/auth/me'); } catch (_) { App.me = null; }
+  // me: who is signed in, when the caller already knows; otherwise it is read.
+  // announce: this tab just signed someone in, so other open tabs are told.
+  let booting = 0;
+  async function boot({ me, announce = false } = {}) {
+    const before = meId(App.me);
+    if (me === undefined) {
+      booting++;
+      try { me = await App.api.get('/api/auth/me'); } catch (_) { me = null; } finally { booting--; }
+    }
+    App.me = me;
+    checkedAt = Date.now();
     App.unread = 0; // a new sign-in never shows the last person's count
     render();
     if (App.me) {
       updateBell(); listen();
       // Notifications already allowed here: make sure this account gets them on this device.
       if (pushSupported() && Notification.permission === 'granted') pushSubscribe().catch(() => {});
-    }
+    } else if (stream) { stream.close(); stream = null; } // no more of the old account's notifications here
+    if (announce && meId(App.me) !== before) tellOtherTabs();
   }
   // Re-read the signed-in user and draw the app again, e.g. right after a module
   // signs someone in (family sign-up, accepting an invite). App.start() runs once.
-  App.boot = boot;
+  App.boot = () => boot({ announce: true });
+
+  // ---------- one account per browser ----------
+  // Every tab shares the sign-in cookie, so a sign-in, sign-out or switch in
+  // another tab changes who this tab's requests act as. This tab checks who is
+  // signed in when it comes back into view, before drawing a page after a pause,
+  // and after a refusal (403), and other tabs tell it at once when they sign in
+  // or out. When the account changed, the whole app is drawn again for the one
+  // signed in now: anything typed for the old account is dropped, never sent.
+  const RECHECK_MS = 5000;
+  let checkedAt = 0, checking = null;
+  const meId = me => (me ? me.user.id : null);
+  // Resolves true when the account changed (and the app was drawn again).
+  function checkAccount() {
+    if (!checking) checking = (async () => {
+      let me;
+      try {
+        const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
+        if (res.status === 401) me = null; else if (res.ok) me = await res.json(); else return false;
+      } catch (_) { return false; }
+      checkedAt = Date.now();
+      // While this tab is itself reading who is signed in (starting up, signing in), that read has the final word.
+      if (booting || meId(me) === meId(App.me)) return false;
+      await accountChanged(me);
+      return true;
+    })().finally(() => { checking = null; });
+    return checking;
+  }
+  async function accountChanged(me) {
+    if (closeConfirm) closeConfirm(false, false); // a question asked for the old account is answered No
+    await boot({ me });
+    App.toast(me ? "You're now signed in as " + me.user.name + '.' : "You're signed out.");
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkAccount(); });
+  window.addEventListener('focus', () => checkAccount());
+  // Telling the other tabs: BroadcastChannel, or a storage event where there is none.
+  const ACCOUNT_KEY = 'elite.account';
+  let channel = null;
+  try {
+    if (typeof BroadcastChannel === 'function') { channel = new BroadcastChannel(ACCOUNT_KEY); channel.onmessage = () => checkAccount(); }
+  } catch (_) { channel = null; }
+  window.addEventListener('storage', e => { if (e.key === ACCOUNT_KEY) checkAccount(); });
+  function tellOtherTabs() {
+    if (channel) { try { channel.postMessage('changed'); return; } catch (_) { /* fall back to storage */ } }
+    local.set(ACCOUNT_KEY, Date.now() + ':' + Math.random());
+  }
 
   App.start = () => {
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

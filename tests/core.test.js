@@ -166,8 +166,8 @@ class El {
 
 // One browser tab running the real shell (read from ROOT, so the mutation runner's
 // copy is the one exercised) against the test server, opened at address `hash`.
-function shellTab(t, hash = '', extras = {}) {
-  let cookie = '';
+// Tabs given the same `jar` share the sign-in cookie, as tabs in one browser do.
+function shellTab(t, hash = '', extras = {}, jar = { cookie: '' }) {
   const pending = new Set(), streams = [];
   const track = p => { pending.add(p); const done = () => pending.delete(p); p.then(done, done); return p; };
   const doc = { title: '', hidden: false, on: {}, addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); } };
@@ -186,7 +186,7 @@ function shellTab(t, hash = '', extras = {}) {
   });
   Object.defineProperty(doc, 'activeElement', { get: () => (doc.focused && doc.focused.isConnected ? doc.focused : doc.body) });
   const winOn = {};
-  const fire = type => (winOn[type] || []).forEach(fn => fn({ type }));
+  const fire = (type, props) => (winOn[type] || []).forEach(fn => fn(Object.assign({ type }, props)));
   const location = {
     _hash: hash,
     get hash() { return this._hash; },
@@ -196,8 +196,13 @@ function shellTab(t, hash = '', extras = {}) {
   class EventSource { constructor(url) { this.url = url; streams.push(this); } close() { this.closed = true; } }
   // hold(match): the next matching request waits to be sent until release() (a slow network).
   let held = null;
-  const send = (url, opts) => track(fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie }) }))
-    .then(async r => new Response(await r.arrayBuffer(), { status: r.status, headers: r.headers })));
+  // Like a browser, a Set-Cookie answer (sign-in, sign-out) changes the cookie every tab sends.
+  const send = (url, opts) => track(fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie: jar.cookie }) }))
+    .then(async r => {
+      const set = r.headers.get('set-cookie');
+      if (set) jar.cookie = set.split(';')[0];
+      return new Response(await r.arrayBuffer(), { status: r.status, headers: r.headers });
+    }));
   const fetchAs = (url, opts = {}) => {
     if (!held || !held.match(url, opts)) return send(url, opts);
     const wait = held.wait;
@@ -221,9 +226,9 @@ function shellTab(t, hash = '', extras = {}) {
     } while (pending.size);
   };
   return {
-    App: win.App, win, doc, location, streams, settle, el, hold, track,
+    App: win.App, win, doc, location, streams, settle, el, hold, track, fire,
     main: () => doc.getElementById('main'),
-    signIn(user) { const token = crypto.randomBytes(16).toString('hex'); t.ctx.sessions.set(token, user.id); cookie = 'sid=' + token; },
+    signIn(user) { const token = crypto.randomBytes(16).toString('hex'); t.ctx.sessions.set(token, user.id); jar.cookie = 'sid=' + token; },
     async start() { win.App.start(); await settle(); },
     async go(to) { location.hash = to; await settle(); },
   };
@@ -924,4 +929,290 @@ test(['CORE', 'NF-7'], 'sign-in: the tab title names the screen, following a pan
   await tab.settle();
   changed();
   assert.equal(tab.doc.title, 'Home · ELITE Spaces', 'once signed in, the sign-in screen no longer sets the title');
+});
+
+// ---------------------------------------------------------------- one account per browser (fix list 2026-10-21 item 3)
+
+const signedInAs = tab => {
+  const top = tab.doc.getElementById('topbar');
+  const out = top.find(n => n.tag === 'button' && /^Sign out /.test(n.getAttribute('aria-label') || ''));
+  return top.hidden || !out ? null : out.getAttribute('aria-label').replace(/^Sign out /, '');
+};
+const toastsOf = tab => tab.doc.getElementById('toasts').childNodes.map(words);
+// A page holding a form, which notes whom it was drawn for.
+function deskView(tab, drawn) {
+  const { h } = tab.App;
+  tab.App.register({ id: 'desk', title: 'Desk', roles: ['staff', 'parent'], order: 5, render(el) {
+    drawn.push(tab.App.me.user.name);
+    el.append(h('h1', null, 'Desk'), h('form', null, h('input', { 'aria-label': 'Note' })));
+  } });
+}
+
+test(['CORE'], 'another tab signs in as someone else: back in view or focused (or hearing from the old account), this tab is drawn again for the account signed in now, drops the half-typed form and the open question, and says who is signed in', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const dana = t.fx.staff(loc, { name: 'Dana Park' }), chris = t.fx.staff(loc, { name: 'Chris Ortiz' }), pat = t.fx.director(loc, { name: 'Pat Lee' });
+  const tab = shellTab(t, '#/desk');
+  const drawn = [];
+  deskView(tab, drawn);
+  tab.signIn(dana);
+  // The window gets focus while the tab is still reading who is signed in: that read decides, nothing is "switched".
+  const release = tab.hold(url => url === '/api/auth/me');
+  tab.App.start();
+  tab.fire('focus');
+  await tab.settle();
+  release();
+  await tab.settle();
+  assert.equal(signedInAs(tab), 'Dana Park');
+  assert.deepEqual(drawn, ['Dana Park']);
+  assert.deepEqual(toastsOf(tab), []);
+
+  const input = tab.main().find(n => n.tag === 'input');
+  input.value = 'Half-typed for Dana';
+  const question = tab.App.confirm({ anchor: input, title: 'Save the note?', confirmLabel: 'Save note', cancelLabel: 'Keep editing' });
+  const answerNow = () => Promise.race([question, new Promise(r => setImmediate(() => r('unanswered')))]);
+  assert.equal(await answerNow(), 'unanswered');
+
+  // Another tab signs in as Pat: the cookie every tab sends is now Pat's. This tab comes back into view.
+  tab.signIn(pat);
+  tab.doc.hidden = false;
+  tab.doc.on.visibilitychange.forEach(fn => fn({ type: 'visibilitychange' }));
+  await tab.settle();
+  assert.equal(signedInAs(tab), 'Pat Lee');
+  assert.deepEqual(drawn, ['Dana Park', 'Pat Lee']);
+  assert.equal(input.isConnected, false, "Dana's half-typed form is gone");
+  assert.notEqual(tab.main().find(n => n.tag === 'input'), input, 'a fresh form, drawn for Pat');
+  assert.equal(await answerNow(), false, 'the question asked for Dana is answered No, so nothing is saved');
+  assert.deepEqual(toastsOf(tab), ["You're now signed in as Pat Lee."]);
+
+  // Focus: nothing changed, nothing is drawn again; then a switch to Chris.
+  tab.fire('focus');
+  await tab.settle();
+  assert.deepEqual(drawn, ['Dana Park', 'Pat Lee'], 'same account: no redraw');
+  tab.signIn(chris);
+  tab.fire('focus');
+  await tab.settle();
+  assert.equal(signedInAs(tab), 'Chris Ortiz');
+  assert.deepEqual(toastsOf(tab).slice(-1), ["You're now signed in as Chris Ortiz."]);
+
+  // Back to Dana (same role and location as Chris), noticed through a notification arriving on the open stream.
+  tab.signIn(dana);
+  tab.streams.at(-1).onmessage({ data: JSON.stringify({ id: 1, title: 'Closed Monday' }) });
+  await tab.settle();
+  assert.equal(signedInAs(tab), 'Dana Park');
+  assert.deepEqual(drawn.slice(-1), ['Dana Park']);
+  assert.deepEqual(toastsOf(tab).slice(-1), ["You're now signed in as Dana Park."]);
+
+  // Signed out underneath (a 401): the sign-in screen, and the old account's notification stream is closed.
+  const live = tab.streams.at(-1);
+  t.ctx.sessions.clear();
+  await tab.App.refreshBell();
+  await tab.settle();
+  assert.equal(signedInAs(tab), null);
+  assert.equal(live.closed, true, "no more of Dana's notifications in this tab");
+});
+
+test(['CORE'], 'after a pause, the next page opens only once the tab has checked who is signed in, so it is never drawn for the old account', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const dana = t.fx.staff(loc, { name: 'Dana Park' }), chris = t.fx.staff(loc, { name: 'Chris Ortiz' });
+  let later = 0;
+  class LaterDate extends Date { static now() { return Date.now() + later; } }
+  const tab = shellTab(t, '#/desk', { Date: LaterDate });
+  const drawn = [];
+  deskView(tab, drawn);
+  tab.App.register({ id: 'roster', title: 'Roster', roles: ['staff'], render(el) { drawn.push('roster for ' + tab.App.me.user.name); el.append('roster'); } });
+  tab.signIn(dana);
+  await tab.start();
+  tab.signIn(chris); // another tab, while this one sat open
+  later = 6000;
+  await tab.go('#/roster');
+  assert.deepEqual(drawn, ['Dana Park', 'roster for Chris Ortiz']);
+  assert.equal(signedInAs(tab), 'Chris Ortiz');
+  assert.deepEqual(toastsOf(tab), ["You're now signed in as Chris Ortiz."]);
+});
+
+test(['CORE'], 'a refusal (403) checks once who is signed in: the same account just sees the refusal; after a switch the app is drawn again for the new account, with no error about the old page', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const dana = t.fx.staff(loc, { name: 'Dana Park' }), parent = t.fx.family(loc).parent;
+  const tab = shellTab(t, '#/desk');
+  const drawn = [];
+  deskView(tab, drawn);
+  // What a module's scope check answers when the signed-in account may not do something.
+  const send = tab.win.fetch;
+  let meReads = 0;
+  tab.win.fetch = (url, opts) => {
+    if (url === '/api/auth/me') meReads++;
+    if (url !== '/api/desk/save') return send(url, opts);
+    return tab.track(Promise.resolve(new Response(JSON.stringify({ error: 'forbidden', message: 'You do not have access to that.' }),
+      { status: 403, headers: { 'content-type': 'application/json' } })));
+  };
+  tab.signIn(dana);
+  await tab.start();
+  const save = () => tab.App.run(null, () => tab.App.api.post('/api/desk/save', { note: 'x' }));
+  meReads = 0;
+  await save();
+  await tab.settle();
+  assert.equal(meReads, 1, 'checked once');
+  assert.deepEqual(toastsOf(tab), ['You do not have access to that.']);
+  assert.deepEqual(drawn, ['Dana Park'], 'same account: not drawn again');
+
+  tab.signIn(parent); // another tab signed in as a parent
+  await save();
+  await tab.settle();
+  assert.equal(signedInAs(tab), parent.name);
+  assert.deepEqual(drawn, ['Dana Park', parent.name]);
+  assert.deepEqual(toastsOf(tab), ['You do not have access to that.', "You're now signed in as " + parent.name + '.']);
+});
+
+// Two tabs in one browser share a cookie jar and can reach each other by
+// BroadcastChannel or, where there is none, by storage events.
+function channelBus() {
+  const open = [];
+  return class BroadcastChannel {
+    constructor(name) { this.name = name; open.push(this); }
+    postMessage(data) { for (const c of open) if (c !== this && c.name === this.name && c.onmessage) setImmediate(() => c.onmessage({ data })); }
+    close() {}
+  };
+}
+function storageBus() {
+  const m = new Map(), tabs = [];
+  const storeFor = () => {
+    const s = { getItem: k => (m.has(k) ? m.get(k) : null),
+      setItem(k, v) { m.set(k, String(v)); for (const x of tabs) if (x.store !== s) setImmediate(() => x.tab.fire('storage', { key: k, newValue: String(v) })); } };
+    return s;
+  };
+  return { storeFor, tabs };
+}
+
+test(['CORE'], 'signing in or out in one tab redraws the other tabs at once (BroadcastChannel, or a storage event without it), and a tab signed out elsewhere stops showing the old account', async () => {
+  const t = await makeApp();
+  const loc = t.fx.location();
+  const dana = t.fx.staff(loc, { name: 'Dana Park' }), chris = t.fx.staff(loc, { name: 'Chris Ortiz' });
+  const settleAll = async (...tabs) => { for (let i = 0; i < 3; i++) for (const x of tabs) await x.settle(); };
+  for (const transport of ['BroadcastChannel', 'storage']) {
+    const jar = { cookie: '' };
+    let a, b;
+    if (transport === 'BroadcastChannel') {
+      const BroadcastChannel = channelBus();
+      a = shellTab(t, '', { BroadcastChannel }, jar);
+      b = shellTab(t, '', { BroadcastChannel }, jar);
+    } else {
+      const bus = storageBus();
+      const sa = bus.storeFor(), sb = bus.storeFor();
+      a = shellTab(t, '', { localStorage: sa }, jar);
+      b = shellTab(t, '', { localStorage: sb }, jar);
+      bus.tabs.push({ store: sa, tab: a }, { store: sb, tab: b });
+    }
+    a.signIn(dana);
+    await a.start();
+    await b.start();
+    assert.deepEqual([signedInAs(a), signedInAs(b)], ['Dana Park', 'Dana Park'], transport);
+
+    // Tab b signs out.
+    b.doc.getElementById('topbar').find(n => n.tag === 'button' && /^Sign out/.test(n.getAttribute('aria-label') || '')).click();
+    await settleAll(a, b);
+    assert.equal(signedInAs(a), null, transport + ': tab a shows the sign-in screen');
+    assert.ok(byTag(a.main(), 'form').length, transport);
+    assert.deepEqual(toastsOf(a), ["You're signed out."], transport);
+    assert.ok(a.streams.length && a.streams.every(s => s.closed), transport + ": no more of Dana's notifications in tab a");
+
+    // Tab b signs in as Chris with the form.
+    b.doc.getElementById('si-email').value = chris.email;
+    b.doc.getElementById('si-pw').value = 'demo1234';
+    b.main().find(n => n.tag === 'form').dispatch('submit');
+    await settleAll(a, b);
+    assert.deepEqual([signedInAs(a), signedInAs(b)], ['Chris Ortiz', 'Chris Ortiz'], transport);
+    assert.deepEqual(toastsOf(a).slice(-1), ["You're now signed in as Chris Ortiz."], transport);
+    assert.deepEqual(toastsOf(b), [], transport + ': the tab that signed in has nothing to explain');
+  }
+});
+
+// ---------------------------------------------------------------- home-screen icons (fix list 2026-10-21 item 2)
+
+// Width, height and transparency from a PNG's own header.
+function pngInfo(file) {
+  const b = fs.readFileSync(file);
+  assert.deepEqual([...b.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], file + ' is a PNG');
+  assert.equal(b.toString('latin1', 12, 16), 'IHDR', file);
+  return { size: b.readUInt32BE(16) + 'x' + b.readUInt32BE(20), opaque: [0, 2].includes(b[25]) && !b.includes(Buffer.from('tRNS')), bytes: b };
+}
+
+test(['CORE', 'NF-8'], 'home-screen icons: the head names a 180px opaque apple-touch-icon PNG (also at the site root), the manifest lists 192 and 512 PNGs plus a full-bleed maskable one and keeps the SVG, and pushes show the 192 PNG', async () => {
+  const pub = rel => path.join(ROOT, 'public', rel.replace(/^\//, ''));
+  const html = fs.readFileSync(pub('index.html'), 'utf8');
+  const links = html.match(/<link rel="apple-touch-icon"[^>]*>/g) || [];
+  assert.equal(links.length, 1);
+  const attr = (tag, k) => (tag.match(new RegExp(' ' + k + '="([^"]*)"')) || [])[1];
+  assert.equal(attr(links[0], 'sizes'), '180x180');
+  const touch = attr(links[0], 'href');
+  assert.match(touch, /\.png$/);
+  const touchPng = pngInfo(pub(touch));
+  assert.equal(touchPng.size, '180x180');
+  assert.ok(touchPng.opaque, 'no transparency: iOS rounds the corners itself');
+
+  const { icons } = JSON.parse(fs.readFileSync(pub('manifest.webmanifest'), 'utf8'));
+  const pngs = icons.filter(i => i.type === 'image/png');
+  for (const i of pngs) assert.equal(pngInfo(pub(i.src)).size, i.sizes, i.src + ' is the size the manifest says');
+  const purposes = i => (i.purpose || 'any').split(/\s+/);
+  assert.deepEqual(pngs.filter(i => purposes(i).includes('any')).map(i => i.sizes).sort(), ['192x192', '512x512']);
+  const maskable = icons.filter(i => purposes(i).includes('maskable'));
+  assert.deepEqual(maskable.map(i => [i.type, i.sizes]), [['image/png', '512x512']], 'one maskable icon, and it is the PNG');
+  assert.ok(pngInfo(pub(maskable[0].src)).opaque, 'maskable art is full-bleed');
+  assert.ok(icons.some(i => i.src === '/icon.svg' && i.type === 'image/svg+xml'), 'the SVG stays');
+
+  // Served as PNGs, and an iPhone asking the site root gets the same icon.
+  const t = await makeApp();
+  for (const src of [touch, ...pngs.map(i => i.src)]) {
+    const r = await t.anon.get(src);
+    assert.deepEqual([r.status, r.headers.get('content-type')], [200, 'image/png'], src);
+    assert.ok(Buffer.compare(r.body, pngInfo(pub(src)).bytes) === 0, src);
+  }
+  const root = await t.anon.get('/apple-touch-icon.png');
+  assert.deepEqual([root.status, root.headers.get('content-type')], [200, 'image/png']);
+  assert.ok(Buffer.compare(root.body, touchPng.bytes) === 0, '/apple-touch-icon.png is the 180px icon');
+
+  // The service worker's notifications use the 192px PNG.
+  const on = {}, shown = [];
+  const self = { addEventListener: (type, fn) => { on[type] = fn; }, location: { origin: 'https://app.test' },
+    registration: { showNotification: (title, o) => { shown.push(o); return Promise.resolve(); } }, clients: {} };
+  const sw = { self, URL, caches: {}, fetch() {} };
+  vm.createContext(sw);
+  vm.runInContext(fs.readFileSync(pub('sw.js'), 'utf8'), sw, { filename: 'public/sw.js' });
+  let p;
+  on.push({ data: { json: () => ({ id: 5, title: 'Maya checked in' }) }, waitUntil: x => { p = x; } });
+  await p;
+  assert.equal(shown[0].icon, '/icons/icon-192.png');
+  assert.equal(pngInfo(pub(shown[0].icon)).size, '192x192');
+});
+
+// ---------------------------------------------------------------- security headers (fix list 2026-10-21 item 11)
+
+test('CORE', 'every response carries the security headers (no sniffing, no framing, a strict referrer) and never names the server software; HSTS only over HTTPS', async () => {
+  const t = await makeApp();
+  const p = t.fx.family(t.fx.location()).parent;
+  const plain = (url, headers = {}) => fetch(t.base + url, { headers });
+  const answers = {
+    'the app page': await plain('/'),
+    'a static file': await plain('/css/app.css'),
+    'the root icon': await plain('/apple-touch-icon.png'),
+    'an API answer': await t.as(p).get('/api/notifications'),
+    'a sign-in refusal': await plain('/api/auth/me'),
+    'an unknown API path': await plain('/api/nope'),
+    'bad JSON': await fetch(t.base + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{nope' }),
+    'the health check': await plain('/healthz'),
+  };
+  assert.equal(answers['bad JSON'].status, 400);
+  for (const [what, r] of Object.entries(answers)) {
+    const hd = k => r.headers.get(k);
+    assert.deepEqual({
+      nosniff: hd('x-content-type-options'), frame: hd('x-frame-options'), csp: hd('content-security-policy'),
+      referrer: hd('referrer-policy'), poweredBy: hd('x-powered-by'), hsts: hd('strict-transport-security'),
+    }, { nosniff: 'nosniff', frame: 'DENY', csp: "frame-ancestors 'none'", referrer: 'strict-origin-when-cross-origin', poweredBy: null, hsts: null }, what);
+  }
+  for (const url of ['/', '/healthz', '/api/auth/me']) {
+    assert.equal((await plain(url, { 'x-forwarded-proto': 'https' })).headers.get('strict-transport-security'), 'max-age=31536000', 'HTTPS through the host: ' + url);
+    assert.equal((await plain(url, { 'x-forwarded-proto': 'http' })).headers.get('strict-transport-security'), null, 'plain HTTP: ' + url);
+  }
 });

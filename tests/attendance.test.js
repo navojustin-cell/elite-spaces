@@ -1696,6 +1696,39 @@ test(['AT-2', 'AT-4'], 'R2: back-to-back sessions are one visit, and it counts f
   assert.deepEqual(rep.body.by_student.map(s => [s.student_name, s.visits, s.absences]), [['Kai Lee', 1, 0], ['Maya Johnson', 1, 1]]);
 });
 
+// Fix list Oct 21, item 1: a visit still open (no check-out yet) has lasted only until now, and never
+// past the time auto-checkout will close it (D-14). It covers a later session only once that session
+// has begun, and only while the stay runs on back to back (R2, D-28).
+test(['AT-2', 'AT-4'], 'an open visit covers only sessions already under way, never a later one, in absences and session reports', async () => {
+  const w = await world(); // Maya: Afternoon Study Mon/Wed/Fri 13:00-16:00
+  const director = w.t.fx.director(w.loc);
+  const morning = w.t.fx.session(w.loc, { term: w.term, name: 'Morning Focus', weekdays: '3', start: '09:30', end: '12:00' });
+  const midday = w.t.fx.session(w.loc, { term: w.term, name: 'Midday Lab', weekdays: '3', start: '12:00', end: '13:00' });
+  enrollSince(w.t, w.kid, morning, 3, at(LA, '2026-09-28', '08:00'));
+  const ben = rename(w.t, w.t.fx.family(w.loc).student, 'Ben Cole'); // Morning Focus then Midday Lab, back to back
+  enrollSince(w.t, ben, morning, 3, at(LA, '2026-09-28', '08:00'));
+  enrollSince(w.t, ben, midday, 3, at(LA, '2026-09-28', '08:00'));
+  const d = '2026-10-14';
+  w.visit(d, '09:55', null, { session: morning });                // Maya scanned in for Morning Focus, still in
+  w.visit(d, '09:55', null, { session: morning, student: ben });  // so did Ben
+  const report = async s => (await w.t.as(director).get(`${A}/report?session=${s.id}&from=${d}&to=${d}`)).body.visits.map(v => v.student_name);
+  const absent = async () => (await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log?from=${d}&to=${d}`)).body.absences.map(a => a.session_name);
+  // 11:00: neither visit covers a session that hasn't started.
+  w.t.clock.set(at(LA, d, '11:00'));
+  assert.deepEqual(await report(w.pm), []);
+  assert.deepEqual(await report(midday), []);
+  // 12:30: Ben's stay runs on into Midday Lab, which has begun (R2).
+  w.t.clock.set(at(LA, d, '12:30'));
+  assert.deepEqual(await report(midday), ['Ben Cole']);
+  assert.deepEqual(await report(w.pm), []);
+  // 5pm with auto-checkout not yet run: Maya's visit closes at 12:00 (Afternoon Study's check-in window
+  // opened only at 12:30), so she missed Afternoon Study; Ben's covered Midday Lab to its end.
+  w.t.clock.set(at(LA, d, '17:00'));
+  assert.deepEqual(await absent(), ['Afternoon Study']);
+  assert.deepEqual(await report(w.pm), []);
+  assert.deepEqual(await report(midday), ['Ben Cole']);
+});
+
 test(['AT-2', 'AT-4'], 'R8: after a session\'s times change, past dates keep the times they had for absences, overlaps and the hours shown', async () => {
   const w = await world();
   const director = w.t.fx.director(w.loc);

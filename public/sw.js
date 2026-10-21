@@ -1,8 +1,8 @@
 /* Installable-app service worker: caches the shell so the app opens fast
    (API calls always go to the network), shows web push notifications, and
    opens the app at the right screen when one is tapped. */
-const CACHE = 'elite-spaces-v2';
-const SHELL = ['/', '/css/app.css', '/js/app.js', '/icon.svg', '/manifest.webmanifest'];
+const CACHE = 'elite-spaces-v3';
+const SHELL = ['/', '/css/app.css', '/js/app.js', '/icon.svg', '/icons/icon-192.png', '/manifest.webmanifest'];
 self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener('activate', e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', e => {
@@ -20,7 +20,7 @@ self.addEventListener('push', e => {
   e.waitUntil(self.registration.showNotification(n.title || 'ELITE Spaces', {
     body: n.body || '',
     tag: n.tag || (n.id ? 'n' + n.id : undefined),
-    icon: '/icon.svg',
+    icon: '/icons/icon-192.png',
     requireInteraction: !!n.requireInteraction,
     data: { url: n.url || '/#/inbox' },
   }));

@@ -558,6 +558,38 @@ function membershipAt(ctx, studentId) {
   return t => { for (const c of changes) if (t < c.at) return c.before; return m; };
 }
 
+// How long a visit has lasted as of `now`: its check-out, or for one still open
+// (no check-out yet) only up to now, and never past the time auto-checkout will
+// close it (CI-5, D-14): its slot's end, run on through each back-to-back slot
+// whose check-in window has opened by then (D-28), capped by closing time; with
+// no slot, closing time. So an open visit never overlaps a session that hasn't
+// started yet, and covers each back-to-back slot once it has begun.
+function visitEnd(ctx, hist, now) {
+  const cutoffs = new Map();
+  const cutoff = v => {
+    const loc = ctx.db.prepare('SELECT timezone, close_time FROM locations WHERE id = ?').get(v.location_id);
+    const d = v.local_date, wd = time.weekdayOfDate(d);
+    const close = time.toMs(loc, d, loc.close_time);
+    const s = v.session_id == null ? null : ctx.db.prepare('SELECT id, start_time, end_time FROM sessions WHERE id = ?').get(v.session_id);
+    if (!s) return Math.max(close, v.check_in_at);
+    let end = time.toMs(loc, d, sessionTimes.timesOn(hist, s.id, d, s).end_time);
+    const closed = ctx.db.prepare('SELECT 1 FROM closures WHERE location_id = ? AND date = ?').get(v.location_id, d);
+    const slots = closed ? [] : ctx.db.prepare(`SELECT s.id, s.start_time, s.end_time FROM enrollments e
+        JOIN sessions s ON s.id = e.session_id JOIN terms t ON t.id = s.term_id
+      WHERE e.student_id = ? AND e.status = 'active' AND e.weekday = ? AND s.status = 'active' AND s.location_id = ?
+        AND t.start_date <= ? AND t.end_date >= ?`).all(v.student_id, wd, v.location_id, d, d)
+      .map(x => { const h = sessionTimes.timesOn(hist, x.id, d, x); return [time.toMs(loc, d, h.start_time), time.toMs(loc, d, h.end_time)]; })
+      .sort((a, b) => a[0] - b[0]);
+    for (const [a, b] of slots) if (a - 30 * 60000 <= end && b > end) end = b;
+    return Math.max(Math.min(end, close), v.check_in_at);
+  };
+  return v => {
+    if (v.check_out_at != null) return v.check_out_at;
+    if (!cutoffs.has(v.id)) cutoffs.set(v.id, cutoff(v));
+    return Math.min(now, cutoffs.get(v.id));
+  };
+}
+
 // EN-7: every weekly occurrence in [from, to] with its status. Absent is
 // computed here (D-15), never stored, and carries no penalty. Each week is
 // judged by the enrollment's status when it started: paused then is paused
@@ -586,6 +618,7 @@ function schedule(ctx, student, q) {
     JOIN enrollments e ON e.id = l.enrollment_id WHERE e.student_id = ? ORDER BY l.at, l.id`).all(student.id)) changes.get(c.enrollment_id).push(c);
   const hist = sessionTimes.history(ctx);
   const membership = membershipAt(ctx, student.id);
+  const lastUntil = visitEnd(ctx, hist, now);
   const out = [], seen = new Set();
   for (const e of enrollments) {
     const lo = from > e.term_start ? from : e.term_start;
@@ -595,7 +628,7 @@ function schedule(ctx, student, q) {
       if (time.weekdayOfDate(d) !== e.weekday) continue;
       const hours = sessionTimes.timesOn(hist, e.session_id, d, e);
       const start = time.toMs(loc, d, hours.start_time), end = time.toMs(loc, d, hours.end_time);
-      const during = x => x.check_in_at < end && (x.check_out_at == null || x.check_out_at > start);
+      const during = x => x.check_in_at < end && lastUntil(x) > start;
       const own = visits.find(x => x.local_date === d && (x.session_id === e.session_id
         || (x.session_id == null && during(x))));
       // It counts if they came, or were enrolled from its start to its end.

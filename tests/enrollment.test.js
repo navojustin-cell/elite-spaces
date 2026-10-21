@@ -1322,6 +1322,44 @@ test(['EN-7'], 'one visit through back-to-back sessions marks every enrolled slo
   ]);
 });
 
+// Fix list Oct 21, item 1: a visit still open (no check-out yet) has lasted only until now, and never
+// past the time auto-checkout will close it (D-14). It never makes a later session that day read
+// "Attended" before that session has begun; a back-to-back stay (D-28) covers each slot once it begins.
+test(['EN-7'], 'an open visit counts only for sessions already under way, never for a later one that has not started', async () => {
+  const { t, loc, sess } = await world(); // Afternoon Study Mon/Wed/Fri 13:00-16:00
+  const morning = t.fx.session(loc, { name: 'Morning Focus', weekdays: '3', start: '09:30', end: '12:00' });
+  const midday = t.fx.session(loc, { name: 'Midday Lab', weekdays: '3', start: '12:00', end: '13:00' });
+  const ana = t.fx.family(loc), ben = t.fx.family(loc), cy = t.fx.family(loc);
+  t.clock.set(at(LA, '2026-09-01', '09:00'));
+  for (const f of [ana, cy]) { t.fx.enroll(f.student, morning, 3); t.fx.enroll(f.student, sess, 3); }
+  t.fx.enroll(ben.student, morning, 3); // Ben stays on through Midday Lab, back to back
+  t.fx.enroll(ben.student, midday, 3);
+  const d = '2026-10-14';
+  // Ana scanned in for Morning Focus at 9:55, Ben too; staff checked Cy in at 9:55 with no session.
+  t.fx.visit(ana.student, loc, { session: morning, weekday: 3, local_date: d, check_in_at: at(LA, d, '09:55') });
+  t.fx.visit(ben.student, loc, { session: morning, weekday: 3, local_date: d, check_in_at: at(LA, d, '09:55') });
+  t.fx.visit(cy.student, loc, { local_date: d, check_in_at: at(LA, d, '09:55'), checkin_method: 'staff' });
+  const today = async f => (await t.as(f.parent).get(`/api/enrollment/students/${f.student.id}/schedule?from=${d}&to=${d}`))
+    .body.occurrences.map(o => `${o.name} ${o.status}`);
+  t.clock.set(at(LA, d, '09:55'));
+  assert.deepEqual(await today(ana), ['Morning Focus attended', 'Afternoon Study upcoming']);
+  assert.deepEqual(await today(cy), ['Morning Focus attended', 'Afternoon Study upcoming']);
+  assert.deepEqual(await today(ben), ['Morning Focus attended', 'Midday Lab upcoming']);
+  // Home "This week" says the same.
+  const tab = shellTab(t);
+  await tab.open(ana.parent, '#/home');
+  const card = tab.main().find(n => n.getAttribute('data-card') === 'enrollment-week');
+  assert.deepEqual(card.findAll(n => n.tag === 'li').map(words).filter(x => x.startsWith('Today')),
+    ['Today 9:30am–12pm Morning Focus Attended', 'Today 1pm–4pm Afternoon Study Upcoming']);
+  // 12:10: Ben's stay runs on into Midday Lab, which has begun, so both count (D-28).
+  t.clock.set(at(LA, d, '12:10'));
+  assert.deepEqual(await today(ben), ['Morning Focus attended', 'Midday Lab attended']);
+  // 1:30pm, auto-checkout not yet run: Ana's visit closes at 12:00 (Afternoon Study's check-in window
+  // opened only at 12:30), so it still never covers Afternoon Study.
+  t.clock.set(at(LA, d, '13:30'));
+  assert.deepEqual(await today(ana), ['Morning Focus attended', 'Afternoon Study upcoming']);
+});
+
 // D-34: a session's time edit applies from the edit date on. Past weeks keep the hours they had, so
 // their status and times on the Schedule do not change.
 test(['EN-7'], "editing a session's times leaves past weeks on the Schedule with the hours they had and the same status", async () => {

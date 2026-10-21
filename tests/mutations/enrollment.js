@@ -310,6 +310,16 @@ module.exports = [
     find: " && (now >= end || statusAt(e, ch, now) === 'paused');", repl: ';' },
   { name: 'a restored spot\'s occurrence that ended unattended turns absent', covers: ['EN-7'], file: S,
     find: "(now >= end || statusAt(e, ch, now) === 'paused')", repl: "(statusAt(e, ch, now) === 'paused')" },
+  // Fix list Oct 21, item 1: an open visit lasts until now, at most until auto-checkout would close it.
+  { name: 'an open visit overlaps every later session that day on the Schedule', covers: ['EN-7'], file: S,
+    find: 'const during = x => x.check_in_at < end && lastUntil(x) > start;',
+    repl: 'const during = x => x.check_in_at < end && (x.check_out_at == null || x.check_out_at > start);' },
+  { name: 'an open visit on the Schedule runs on to its auto-checkout time, not just until now', covers: ['EN-7'], file: S,
+    find: 'return Math.min(now, cutoffs.get(v.id));', repl: 'return cutoffs.get(v.id);' },
+  { name: 'an open visit on the Schedule runs on past the time auto-checkout would close it', covers: ['EN-7'], file: S,
+    find: 'return Math.min(now, cutoffs.get(v.id));', repl: 'return now;' },
+  { name: 'an open visit on the Schedule stops at its own slot end, not running on through back-to-back slots', covers: ['EN-7'], file: S,
+    find: 'for (const [a, b] of slots) if (a - 30 * 60000 <= end && b > end) end = b;', repl: '' },
   // L52: no "pick one" for a family whose Enroll buttons are all disabled.
   { name: 'Schedule tells a family with no membership to pick a session', covers: ['EN-4'], file: V,
     find: "sel.membership.can_add ? 'No weekly sessions yet. Pick one", repl: "true ? 'No weekly sessions yet. Pick one" },

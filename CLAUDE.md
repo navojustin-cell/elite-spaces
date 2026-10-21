@@ -19,6 +19,13 @@ Dev mode is off unless `ELITE_DEV=1` is set explicitly. It adds a purple bar for
 clock and running scheduled jobs, plus one-tap demo sign-in on the sign-in screen.
 The sign-in cookie is named per port (`sid_<PORT>`), so several local servers in one browser don't sign each other out.
 It is httpOnly, responses must never echo its token (L64), and it is Secure when the request came over HTTPS (`trust proxy` is on).
+Every response carries security headers (`src/app.js`, no dependencies): no `X-Powered-By`, `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY` plus `Content-Security-Policy: frame-ancestors 'none'` (deliberately no script policy),
+`Referrer-Policy: strict-origin-when-cross-origin`, and `Strict-Transport-Security` only when the request came over HTTPS.
+
+Icons: `public/icon.svg` is the design; `python scripts/make-icons.py` (PIL) draws the PNGs in `public/icons/`
+(180px apple-touch-icon, opaque and full-bleed; 192/512 for the manifest; a maskable 512 with the art in the safe zone).
+`/apple-touch-icon.png` at the site root serves the 180px one. Edit the SVG, then rerun the script.
 
 Hosting: `render.yaml` + `.node-version` set up a Render web service with a disk; `docs/deploy.md` has the steps.
 `GET /healthz` answers `{ok:true}` without sign-in. A new database gets the schema only; `ELITE_SEED_DEMO=1`
@@ -59,7 +66,14 @@ The shared contracts between modules (membership audit rows, the enrollment stat
 notification kinds) are in `docs/decisions.md` D-26.
 
 Shell hooks for views (`public/js/app.js`):
-- `App.boot()` redraws after a module signs someone in.
+- `App.boot()` redraws after a module signs someone in, and tells the other open tabs.
+- One account per browser: tabs share the sign-in cookie, so the shell re-checks `/api/auth/me` when a tab comes
+  into view or gets focus, before drawing a page after 5 seconds without a check, and once after any 403. Sign-in and
+  sign-out are broadcast to other tabs (BroadcastChannel, else a localStorage `storage` event). When the account
+  changed, the whole app is drawn again for the one signed in now (open `App.confirm` boxes answer `false`, forms are
+  dropped) with a toast ("You're now signed in as Chris Ortiz."). An error whose 403 turned out to be a switch has
+  `e.accountChanged`, and `App.run` doesn't toast it. Views must not keep drafts that outlive a redraw unless they are
+  keyed by `App.me.user.id`.
 - `App.inboxLink(refType, route)` makes Inbox items whose `ref_type` matches open a view. `route` is a
   view id with optional params (`'notes'`, `'schedule/12'`) or a function of the notification returning
   one. Several modules may register one ref type; the first route the signed-in role can open wins.

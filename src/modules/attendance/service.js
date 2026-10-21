@@ -125,9 +125,41 @@ function shapeVisit(v) {
   };
 }
 
+// How long a visit has lasted as of `now`: its check-out, or for one still open
+// (no check-out yet) only up to now, and never past the time auto-checkout will
+// close it (CI-5, D-14): its slot's end, run on through each back-to-back slot
+// whose check-in window has opened by then (R2, D-28), capped by closing time;
+// with no slot, closing time. So an open visit never overlaps a session that
+// hasn't started yet, and covers each back-to-back slot once it has begun.
+function visitEnd(ctx, hist, now) {
+  const cutoffs = new Map();
+  const cutoff = v => {
+    const loc = ctx.db.prepare('SELECT timezone, close_time FROM locations WHERE id = ?').get(v.location_id);
+    const d = v.local_date, wd = time.weekdayOfDate(d);
+    const close = time.toMs(loc, d, loc.close_time);
+    const s = v.session_id == null ? null : ctx.db.prepare('SELECT id, start_time, end_time FROM sessions WHERE id = ?').get(v.session_id);
+    if (!s) return Math.max(close, v.check_in_at);
+    let end = time.toMs(loc, d, sessionTimes.timesOn(hist, s.id, d, s).end_time);
+    const closed = ctx.db.prepare('SELECT 1 FROM closures WHERE location_id = ? AND date = ?').get(v.location_id, d);
+    const slots = closed ? [] : ctx.db.prepare(`SELECT s.id, s.start_time, s.end_time FROM enrollments e
+        JOIN sessions s ON s.id = e.session_id JOIN terms t ON t.id = s.term_id
+      WHERE e.student_id = ? AND e.status = 'active' AND e.weekday = ? AND s.status = 'active' AND s.location_id = ?
+        AND t.start_date <= ? AND t.end_date >= ?`).all(v.student_id, wd, v.location_id, d, d)
+      .map(x => { const h = sessionTimes.timesOn(hist, x.id, d, x); return [time.toMs(loc, d, h.start_time), time.toMs(loc, d, h.end_time)]; })
+      .sort((a, b) => a[0] - b[0]);
+    for (const [a, b] of slots) if (a - 30 * 60000 <= end && b > end) end = b;
+    return Math.max(Math.min(end, close), v.check_in_at);
+  };
+  return v => {
+    if (v.check_out_at != null) return v.check_out_at;
+    if (!cutoffs.has(v.id)) cutoffs.set(v.id, cutoff(v));
+    return Math.min(now, cutoffs.get(v.id));
+  };
+}
+
 // A visit overlaps a session's hours [start, end) when it began before the end
-// and, unless it is still open, ended after the start.
-const overlaps = (v, start, end) => v.check_in_at < end && (v.check_out_at == null || v.check_out_at > start);
+// and lasted (visitEnd) past the start.
+const overlaps = (v, start, end, lastUntil) => v.check_in_at < end && lastUntil(v) > start;
 
 // Does a visit at the session's location that isn't its own cover one of its
 // occurrences? The rule absences() uses for attended (EN-7, R2): a date inside its
@@ -149,6 +181,7 @@ function coversSession(ctx, sess) {
   }
   const enrolledFor = (v, wd, start, end) => (held.get(v.student_id + '|' + wd) || [])
     .some(e => e.created_at < end && (e.ended_at == null || e.ended_at > start));
+  const lastUntil = visitEnd(ctx, hist, ctx.clock.now());
   return v => {
     const d = v.local_date, wd = time.weekdayOfDate(d);
     if (d < sess.term_start || d > sess.term_end) return false; // outside its term
@@ -157,7 +190,7 @@ function coversSession(ctx, sess) {
     const hours = sessionTimes.timesOn(hist, sess.id, d, sess);
     const start = time.toMs(zone, d, hours.start_time), end = time.toMs(zone, d, hours.end_time);
     if (v.session_id != null && !enrolledFor(v, wd, start, end)) return false; // another session's visit, not enrolled here then
-    return overlaps(v, start, end);
+    return overlaps(v, start, end, lastUntil);
   };
 }
 
@@ -261,7 +294,7 @@ function absences(ctx, { studentId = null, locationId = null, sessionId = null, 
   const closed = new Set(ctx.db.prepare('SELECT location_id, date FROM closures WHERE date BETWEEN ? AND ?')
     .all(from, to).map(c => c.location_id + '|' + c.date));
   const dayVisits = new Map(); // student id|date -> that day's visits
-  for (const v of ctx.db.prepare(`SELECT student_id, location_id, session_id, local_date, check_in_at, check_out_at FROM visits
+  for (const v of ctx.db.prepare(`SELECT id, student_id, location_id, session_id, local_date, check_in_at, check_out_at FROM visits
     WHERE local_date BETWEEN ? AND ? AND (? IS NULL OR student_id = ?)`).all(from, to, studentId, studentId)) {
     const k = v.student_id + '|' + v.local_date;
     if (!dayVisits.has(k)) dayVisits.set(k, []);
@@ -271,10 +304,11 @@ function absences(ctx, { studentId = null, locationId = null, sessionId = null, 
   // any other visit there whose time overlaps the session's: a staff check-in with
   // no session, or one visit that runs on through back-to-back sessions.
   const attended = (e, d, start, end) => (dayVisits.get(e.student_id + '|' + d) || []).some(v => v.location_id === e.location_id
-    && (v.session_id === e.session_id || overlaps(v, start, end)));
+    && (v.session_id === e.session_id || overlaps(v, start, end, lastUntil)));
   const hist = sessionTimes.history(ctx); // R8: each date keeps the session times it had
 
   const now = ctx.clock.now();
+  const lastUntil = visitEnd(ctx, hist, now);
   const stretches = new Map(); // student id -> when their membership wasn't valid
   const out = [];
   for (const e of rows) {

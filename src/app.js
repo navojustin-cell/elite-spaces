@@ -23,6 +23,18 @@ function createApp({ dbFile = ':memory:', now = null, dev = false, cookieName = 
   // Behind a hosting proxy (Render) that ends HTTPS: trust its X-Forwarded-Proto
   // so req.secure is right and the sign-in cookie gets Secure (auth.startSession).
   app.set('trust proxy', 1);
+  // Security headers on every response, the app's own and the static files.
+  // No script policy: only frame-ancestors, so nothing the app loads is blocked.
+  app.disable('x-powered-by');
+  app.use((req, res, next) => {
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('X-Frame-Options', 'DENY');
+    res.set('Content-Security-Policy', "frame-ancestors 'none'");
+    res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    // HSTS only over HTTPS (through the host's proxy); local HTTP never gets it.
+    if (req.secure) res.set('Strict-Transport-Security', 'max-age=31536000');
+    next();
+  });
   // Uptime check for the host: no sign-in, no database work.
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
   app.use(express.json({ limit: '256kb' }));
@@ -109,6 +121,8 @@ function createApp({ dbFile = ':memory:', now = null, dev = false, cookieName = 
   for (const m of MODULES) app.use('/api/' + m.name, m.router(ctx));
 
   app.use('/api', (_req, _res, next) => next(new AppError(404, 'not_found', 'No such endpoint.')));
+  // iPhones also look for the home-screen icon at the site root.
+  app.get('/apple-touch-icon.png', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'icons', 'apple-touch-icon.png')));
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
   // Errors -> JSON. AppError carries its own status; anything else is a 500.
