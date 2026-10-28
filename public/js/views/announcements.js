@@ -1,7 +1,8 @@
-/* Announcements and emergency alerts (PRD 5, AN-1..AN-6).
+/* Announcements and emergency alerts (PRD 5, AN-1..AN-7).
    - News (#/news): the caller's feed, pinned emergency alerts, scheduled posts and
      delivery/read numbers for senders, and the family mute setting. #/news/<id>
-     (from an Inbox item) brings that post into view.
+     (from an Inbox item) brings that post into view. Directors and HQ can end a
+     pinned alert early (D-52); an ended alert sits in the feed marked Ended.
    - #/news/new: compose an announcement (audience, schedule, review step).
    - #/news/emergency: the separate emergency alert flow with a confirm step.
    - Home card: active emergency alerts and the latest announcement. */
@@ -40,7 +41,7 @@
   const count = (k, one, many) => k + ' ' + (k === 1 ? one : (many || one + 's'));
   const andList = a => a.length <= 1 ? (a[0] || '') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
   const days = s => String(s.weekdays).split(',').map(d => App.WEEKDAYS[Number(d)]).join('/');
-  // The term, when known, tells same-named sessions in different terms apart.
+  // A schedule (a session row, D-41) with its period, when known, so same-named schedules in different periods differ.
   const sessionLabel = s => s.name + ' · ' + days(s) + ' ' + App.hhmm(s.start_time) + '–' + App.hhmm(s.end_time) + (s.term_name ? ' · ' + s.term_name : '');
   const isComposer = () => App.allowed(['director']);
   const isFamily = () => ['parent', 'student'].includes(App.role());
@@ -65,9 +66,11 @@
   // Where this person's News comes from, from the feed (L60): a parent with students
   // at two locations hears from both. HQ gets the fallback.
   const placeText = (f, fallback) => (f.my_locations && f.my_locations.length ? andList(f.my_locations) : fallback);
+  // Which alerts a feed pins, to tell when one has ended.
+  const pinnedKey = f => f.active_emergencies.map(p => p.id).join(',');
 
   function audienceText(p) {
-    if (p.audience === 'session') return p.session ? 'Families in ' + sessionLabel(p.session) : 'Families in one session';
+    if (p.audience === 'session') return p.session ? 'Families in ' + sessionLabel(p.session) : 'Families in one schedule';
     return { families: 'All families', parents: 'Parents only', students: 'Students only', everyone: 'Everyone at the location' }[p.audience] || '';
   }
 
@@ -126,22 +129,27 @@
   // One post, as its readers see it. Emergency alerts are red, labeled and iconed (AN-5).
   // target: the post an Inbox item opened, focusable so the view can bring it into view.
   // asFamily: draw the copy parents and students get, whoever is signed in (the review preview, L40).
-  function postCard(p, { pinned = false, onHide = null, target = false, asFamily = false } = {}) {
+  // onEnd(p, button): the End alert action, for a pinned alert this person can end (D-52).
+  function postCard(p, { pinned = false, onHide = null, onEnd = null, target = false, asFamily = false } = {}) {
     const family = asFamily || isFamily();
     const ops = !asFamily && App.isOps();
     const meta = h('p', { class: 'ann-meta' }, fromText(p) + ' · ' + (p.when_text || App.fmtDateTime(p.published_at || p.publish_at, p.tz)));
     const at = target ? { tabindex: '-1', 'data-target': '' } : {};
     if (p.type === 'emergency') {
       return h('article', Object.assign({ class: 'emergency ann-alert', 'aria-label': 'Emergency alert: ' + p.title }, at),
-        h('div', { class: 'label' }, h('span', { 'aria-hidden': 'true' }, '⚠ '), pinned ? 'Emergency alert · active now' : 'Emergency alert'),
+        h('div', { class: 'label' }, h('span', { 'aria-hidden': 'true' }, '⚠ '),
+          pinned ? 'Emergency alert · active now' : 'Emergency alert' + (p.ended_at ? ' · Ended ' + App.fmtTime(p.ended_at, p.tz) : '')),
         h('h3', { style: 'margin:.2rem 0 0' }, p.title),
         h('p', { class: 'ann-body' }, p.body),
         meta,
+        p.ended_at && h('p', { class: 'ann-meta' }, 'Ended by ' + p.ended_by + ' · ' + App.fmtDateTime(p.ended_at, p.tz)),
         contactLine(p, family),
         ops && h('p', { class: 'ann-meta' }, alertReach(p) + ' Nobody can mute emergency alerts.'),
         p.stats && statsBlock(p),
         // The accessible name starts with the visible words, so voice control finds it (L59).
-        onHide && h('div', { style: 'margin-top:.6rem' }, h('button', { class: 'btn', type: 'button', onclick: onHide, 'aria-label': 'Hide from Home: ' + p.title }, 'Hide from Home')));
+        onHide && h('div', { style: 'margin-top:.6rem' }, h('button', { class: 'btn', type: 'button', onclick: onHide, 'aria-label': 'Hide from Home: ' + p.title }, 'Hide from Home')),
+        onEnd && h('div', { style: 'margin-top:.6rem' }, h('button', { class: 'btn', type: 'button', 'aria-label': 'End alert: ' + p.title,
+          onclick: e => onEnd(p, e.currentTarget) }, 'End alert')));
     }
     return h('article', Object.assign({ class: 'card', 'aria-label': p.title }, at),
       h('div', { class: 'ann-head' },
@@ -169,7 +177,17 @@
     const found = !focusId || [...f.active_emergencies, ...f.posts].some(p => p.id === focusId);
     if (!found) el.append(h('div', { class: 'notice', role: 'status' }, 'That announcement is no longer in your News. Here is everything that is.'));
 
-    for (const p of f.active_emergencies) el.append(postCard(p, { pinned: true, target: p.id === focusId }));
+    // Ending asks first; then the alert unpins and moves into the feed marked Ended (D-52).
+    const endAlert = async (p, btn) => {
+      const ok = await App.confirm({ anchor: btn, opener: btn, title: 'End this alert now?',
+        body: 'It stops being pinned and everyone it went to is told it has ended.', confirmLabel: 'End alert', cancelLabel: 'Keep alert active', danger: true });
+      if (ok) App.run(btn, async () => {
+        const r = await App.api.post(API + '/' + p.id + '/end');
+        App.toast('Alert ended. ' + count(r.notified, 'person', 'people') + ' told it has ended.');
+        App.refresh();
+      });
+    };
+    for (const p of f.active_emergencies) el.append(postCard(p, { pinned: true, target: p.id === focusId, onEnd: p.can_end ? endAlert : null }));
 
     if (f.scheduled.length) {
       const list = h('ul', { class: 'list' });
@@ -258,7 +276,7 @@
     const chosenLocIds = () => locMode.all.checked ? locations.map(l => l.id) : locChecks.filter(c => c.input.checked).map(c => c.l.id);
 
     // Audience (AN-4). Emergency alerts have no audience: they go to everyone (AN-5).
-    const AUD = [['families', 'All families', 'parents and students'], ['parents', 'Parents only'], ['students', 'Students only'], ['session', 'Families in one session', 'its students and their parents']];
+    const AUD = [['families', 'All families', 'parents and students'], ['parents', 'Parents only'], ['students', 'Students only'], ['session', 'Families in one schedule', 'its enrolled students and their parents']];
     const audIn = {};
     const audField = !emergency && h('fieldset', null, h('legend', null, 'Who should get this?'),
       AUD.map(([v, label, hint]) => {
@@ -267,10 +285,10 @@
       }));
     const audience = () => emergency ? 'everyone' : (Object.keys(audIn).find(k => audIn[k].checked) || 'families');
     const sessionSel = h('select', { id: 'ann-session' },
-      h('option', { value: '' }, opts.sessions.length ? 'Choose a session' : 'No sessions yet'),
+      h('option', { value: '' }, opts.sessions.length ? 'Choose a schedule' : 'No schedules yet'),
       opts.sessions.map(s => h('option', { value: String(s.id), selected: String(draft.sessionId) === String(s.id) },
         (isHq ? s.location_name + ' · ' : '') + sessionLabel(s) + ' · ' + count(s.enrolled, 'student') + ' enrolled')));
-    const sessionField = !emergency && h('label', { class: 'field', for: 'ann-session' }, h('span', null, 'Session'), sessionSel);
+    const sessionField = !emergency && h('label', { class: 'field', for: 'ann-session' }, h('span', null, 'Schedule'), sessionSel);
     const chosenSession = () => opts.sessions.find(s => String(s.id) === sessionSel.value) || null;
 
     const catSel = h('select', { id: 'ann-cat' }, Object.entries(opts.categories).map(([k, label]) =>
@@ -345,7 +363,7 @@
     // Problems we can name before asking the server; the server checks everything again.
     const firstProblem = b => {
       if (isHq && b.locations && b.locations !== 'all' && !b.locations.length) return 'Choose at least one location.';
-      if (!emergency && b.audience === 'session' && !b.session_id) return 'Choose a session.';
+      if (!emergency && b.audience === 'session' && !b.session_id) return 'Choose a schedule.';
       if (!b.title) return 'Add a title.';
       if (!b.body) return 'Add a message.';
       if (!emergency && whenLater.checked && !b.publish_at) return 'Pick a date and time, or choose Send now.';
@@ -416,7 +434,7 @@
             (s ? ' in ' + sessionLabel(s) : '') + ' at ' + where + (breakdown ? ': ' + breakdown : '') + '.'),
         !emergency && pv.muted > 0 && h('p', { class: 'muted small' }, count(pv.muted, 'of them has', 'of them have') +
           ' turned off announcement notifications. They will still see it in News.'),
-        !pv.recipients && h('div', { class: 'notice notice-warn' }, s ? 'Nobody is enrolled in this session right now.' : 'Nobody matches this audience right now.',
+        !pv.recipients && h('div', { class: 'notice notice-warn' }, s ? 'Nobody is enrolled in this schedule right now.' : 'Nobody matches this audience right now.',
           b.publish_at ? ' Who gets it is checked again when it goes out.' : ''),
         b.publish_at && h('p', null, 'It will go out on ' + wallTime(b.publish_at) + ', ' + (zoneLoc() ? zoneLoc().name + ' time' : 'local time') + '.'),
         h('h3', null, 'What families will see'),
@@ -434,8 +452,8 @@
   }
 
   // The News feed and the Home card on screen now, kept current by the live updates below,
-  // and the post Home's Latest news shows (null: none).
-  let feedBox = null, homeBox = null, homeLatest = null;
+  // the post Home's Latest news shows (null: none) and the alerts it pins.
+  let feedBox = null, homeBox = null, homeLatest = null, homePinned = '';
 
   App.register({
     id: 'news', title: 'News', icon: '📣', order: 50,
@@ -461,6 +479,7 @@
   async function renderHomeCard(el) {
     const f = await App.api.get(API + '/feed?limit=10');
     const hidden = store.get(hiddenKey(), []);
+    homePinned = pinnedKey(f);
     for (const p of f.active_emergencies) {
       if (hidden.includes(p.id)) continue;
       const banner = postCard(p, { pinned: true, onHide: () => {
@@ -529,14 +548,16 @@
     else if (arrived) redrawLive();
   }).observe(document.body, { childList: true });
 
-  // A normal announcement streams in as a toast only (app.js shows its title), so
-  // each new toast has Home check its Latest news, and redraw if a newer post is out.
+  // A normal announcement, and an alert's "All clear" (D-52), stream in as a toast only
+  // (app.js shows its title), so each new toast has Home check its Latest news and pinned
+  // alerts, and redraw if a newer post is out or an alert has ended.
   const toasts = document.getElementById('toasts');
   if (toasts) new MutationObserver(async records => {
     if (!App.me || !homeBox || !homeBox.isConnected || !records.some(r => r.addedNodes.length)) return;
     try {
-      const latest = (await App.api.get(API + '/feed?limit=10')).posts.find(p => p.type !== 'emergency');
-      if ((latest ? latest.id : null) !== homeLatest) await redrawLive();
+      const f = await App.api.get(API + '/feed?limit=10');
+      const latest = f.posts.find(p => p.type !== 'emergency');
+      if ((latest ? latest.id : null) !== homeLatest || pinnedKey(f) !== homePinned) await redrawLive();
     } catch (_) { /* signed out or offline: keep what is on screen */ }
   }).observe(toasts, { childList: true });
 

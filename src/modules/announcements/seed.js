@@ -1,9 +1,10 @@
 'use strict';
 // Demo announcements: a few weeks of posts across audiences, one network post
-// from HQ, a past emergency alert, one post still scheduled, a muted parent,
-// and some reads so senders see real delivery and read numbers (AN-6).
+// from HQ, a past emergency alert that Dana Park ended two hours after it went
+// out (AN-7), one post still scheduled, a muted parent, and some reads so
+// senders see real delivery and read numbers (AN-6).
 const time = require('../../time');
-const { createPost, publish } = require('./index');
+const { createPost, publish, endAlert } = require('./index');
 
 module.exports = function seed(ctx, demo) {
   const db = ctx.db;
@@ -33,20 +34,24 @@ module.exports = function seed(ctx, demo) {
     title: 'Welcome to the fall term',
     body: 'Thank you for studying with ELITE Spaces this fall. Check in with the app when you arrive, and parents will get a note at the end of each day. We are glad you are here.',
   });
-  post(demo.dirIrvine, atIrvine(5, '17:30'), {
+  const outage = post(demo.dirIrvine, atIrvine(5, '17:30'), {
     category: null, type: 'emergency', audience: 'everyone', locationIds: [irvine.id],
     title: 'Building closed early: power outage',
     body: 'We lost power and are closing at 6:00 PM today. Students, please pack up and head home or meet your ride out front. We will post here when power is back.',
   });
+  // Power came back: the director ended it two hours later, so families see it marked Ended
+  // and every recipient got the "All clear" notice then.
+  ctx.clock.set(atIrvine(5, '19:30'));
+  endAlert(ctx, demo.dirIrvine, db.prepare('SELECT * FROM announcements WHERE id = ?').get(outage));
   post(demo.dirIrvine, atIrvine(4, '10:00'), {
     category: 'workshop', audience: 'parents', locationIds: [irvine.id],
     title: 'Parent workshop: college planning for homeschoolers',
     body: 'Join us Saturday, Oct 24 at 10:00 AM in the main study room. We will cover transcripts, testing timelines and how to describe a homeschool curriculum. Coffee provided.',
   });
   post(demo.dirIrvine, atIrvine(1, '16:15'), {
-    category: 'session_offering', audience: 'session', sessionId: demo.sessions.pmMWF.id, locationIds: [irvine.id],
-    title: 'Afternoon Study: the quiet room is open Fridays',
-    body: 'Starting this Friday, the quiet room is reserved for Afternoon Study students who want a phone-free space. Just ask at the front desk.',
+    category: 'session_offering', audience: 'session', sessionId: demo.sessions.afternoonsMWF.id, locationIds: [irvine.id],
+    title: 'Afternoons MWF: the quiet room is open Fridays',
+    body: 'Starting this Friday, the quiet room is reserved for Afternoons MWF students who want a phone-free space. Just ask at the front desk.',
   });
   post(demo.dirToronto, atToronto(2, '11:00'), {
     category: 'event', audience: 'families', locationIds: [toronto.id],

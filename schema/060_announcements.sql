@@ -1,4 +1,4 @@
--- Module: announcements (PRD 5, AN-1..AN-6). Additive only: private tables.
+-- Module: announcements (PRD 5, AN-1..AN-7). Additive only: private tables.
 -- Times are UTC epoch ms, like the core schema.
 
 -- One row per announcement or emergency alert.
@@ -68,4 +68,12 @@ CREATE TABLE IF NOT EXISTS announcement_prefs (
 -- One row per such post, written when it is published.
 CREATE TABLE IF NOT EXISTS announcement_unsigned (
   announcement_id INTEGER PRIMARY KEY REFERENCES announcements(id)
+);
+
+-- S-11 / D-52: an emergency alert ended early. One row per ended alert; it is no
+-- longer pinned, and everyone who can see it sees "Ended" with this time.
+CREATE TABLE IF NOT EXISTS announcement_ends (
+  announcement_id INTEGER PRIMARY KEY REFERENCES announcements(id),
+  ended_by        INTEGER NOT NULL REFERENCES users(id),
+  ended_at        INTEGER NOT NULL
 );

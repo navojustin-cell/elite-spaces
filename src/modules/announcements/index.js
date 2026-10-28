@@ -1,5 +1,5 @@
 'use strict';
-// Module: announcements - PRD 5. Announcements and emergency alerts (AN-1..AN-6).
+// Module: announcements - PRD 5. Announcements and emergency alerts (AN-1..AN-7).
 //
 // Routes, mounted at /api/announcements:
 //   GET    /feed        posts the caller is an audience of (NF-1), active emergency alerts,
@@ -12,6 +12,7 @@
 //   DELETE /:id         cancel a scheduled post (whoever keeps it: see keeps())
 //   GET    /:id/stats   delivered and read counts (whoever keeps it)
 //   POST   /:id/read    the caller has seen a post: records the read and marks their notification read
+//   POST   /:id/end     end an emergency alert early (D-52): HQ any; a director one sent only to their location
 //   PUT    /prefs       { muted } turns announcement notifications off or on for the caller
 // Job: publish-scheduled sends each due scheduled post exactly once.
 //
@@ -85,10 +86,11 @@ function targetLocations(ctx, user, raw) {
   return [user.location_id];
 }
 
+// A session is a schedule (D-41): its audience is the families enrolled in it (AN-4).
 function targetSession(ctx, user, sessionId) {
   const s = ctx.db.prepare("SELECT * FROM sessions WHERE id = ? AND status = 'active'").get(toId(sessionId) || 0);
-  if (!s) throw bad('session', 'Choose a session.');
-  if (!auth.canManageLocation(user, s.location_id)) throw forbidden('That session is at another location.');
+  if (!s) throw bad('session', 'Choose a schedule.');
+  if (!auth.canManageLocation(user, s.location_id)) throw forbidden('That schedule is at another location.');
   return s;
 }
 
@@ -282,6 +284,7 @@ function keeps(ctx, user, a) {
 //   delivered  it reached them: a notification was delivered, or (notifications off) they saw it
 //              in News. So read <= delivered <= recipients, with muted readers counted in both.
 //   muted      got no notification because they turned announcement notifications off
+// Opening an alert's "All clear" notice (emergency_ended) is not reading the alert.
 function stats(ctx, id) {
   const s = ctx.db.prepare(`SELECT COUNT(*) AS recipients, COALESCE(SUM(notified), 0) AS notified,
       COALESCE(SUM(seen), 0) AS read, COALESCE(SUM(notified OR seen), 0) AS delivered
@@ -290,9 +293,63 @@ function stats(ctx, id) {
           AND n.ref_id = r.announcement_id AND n.delivered_at IS NOT NULL) AS notified,
         (EXISTS (SELECT 1 FROM announcement_reads ar WHERE ar.announcement_id = r.announcement_id AND ar.user_id = r.user_id)
           OR EXISTS (SELECT 1 FROM notifications n WHERE n.user_id = r.user_id AND n.ref_type = 'announcement'
-            AND n.ref_id = r.announcement_id AND n.read_at IS NOT NULL)) AS seen
+            AND n.kind <> 'emergency_ended' AND n.ref_id = r.announcement_id AND n.read_at IS NOT NULL)) AS seen
       FROM announcement_recipients r WHERE r.announcement_id = ?)`).get(id);
   return { recipients: s.recipients, delivered: s.delivered, read: s.read, muted: s.recipients - s.notified };
+}
+
+// ---------- ending an emergency alert early (S-11, D-52) ----------
+
+const ACTIVE_ALERT = " AND a.type = 'emergency' AND a.published_at > ?";
+const NOT_ENDED = ' AND NOT EXISTS (SELECT 1 FROM announcement_ends ae WHERE ae.announcement_id = a.id)';
+
+// HQ can end any alert. A director can end one whose only location is their own,
+// whoever sent it; one sent to several locations is network-wide, so HQ's alone.
+function mayEnd(ctx, user, a) {
+  if (user.role === 'hq') return true;
+  if (user.role !== 'director') return false;
+  // Every one of its locations (there is always at least one) is the director's own.
+  return postLocationIds(ctx, a.id).every(l => l === user.location_id);
+}
+
+const endOf = (ctx, id) => ctx.db.prepare(`SELECT e.ended_at, u.name, u.role FROM announcement_ends e
+  JOIN users u ON u.id = e.ended_by WHERE e.announcement_id = ?`).get(id);
+
+// Within its 24 hours, so pinned unless ended.
+const isActive = (ctx, a) => a.type === 'emergency' && a.status === 'published' && a.published_at > ctx.clock.now() - EMERGENCY_ACTIVE_MS;
+
+// Ends the alert: one announcement_ends row (it is no longer pinned), then one
+// normal-priority "All clear" notice to each of its recipients, muted or not,
+// because the alert itself ignored mute. The time in it reads in the recipient's
+// home location's zone when the alert went there, else the alert's first location's.
+// Returns how many were told. Callers check who may end it, that it is active and not ended yet.
+function endAlert(ctx, user, a) {
+  const db = ctx.db;
+  return tx(db, () => {
+    const now = ctx.clock.now();
+    db.prepare('INSERT INTO announcement_ends (announcement_id, ended_by, ended_at) VALUES (?, ?, ?)').run(a.id, user.id, now);
+    const places = db.prepare(`SELECT l.id, l.name, l.timezone FROM announcement_locations al JOIN locations l ON l.id = al.location_id
+      WHERE al.announcement_id = ? ORDER BY l.id`).all(a.id);
+    const by = user.role === 'hq' ? 'ELITE HQ' : places[0].name; // a director ends only their own location's
+    const groups = new Map(places.map(l => [l.id, []]));
+    const recipients = db.prepare(`SELECT r.user_id, u.location_id FROM announcement_recipients r JOIN users u ON u.id = r.user_id
+      WHERE r.announcement_id = ? ORDER BY r.user_id`).all(a.id);
+    for (const r of recipients) groups.get(groups.has(r.location_id) ? r.location_id : places[0].id).push(r.user_id);
+    let notified = 0;
+    for (const l of places) {
+      notified += notify.send(ctx, groups.get(l.id), {
+        kind: 'emergency_ended',
+        title: 'All clear: ' + a.title,
+        body: by + ' ended this emergency alert at ' + time.local(l, now).toFormat('h:mm a') + '.',
+        refType: 'announcement',
+        refId: a.id,
+        priority: 'normal',
+      }).length;
+    }
+    audit.log(ctx, user, 'emergency.end', { targetType: 'announcement', targetId: a.id, locationId: places.length === 1 ? places[0].id : null,
+      detail: { locations: places.map(l => l.id), notified } });
+    return notified;
+  });
 }
 
 // A non-HQ user's own locations: their home, plus each linked student's for a parent.
@@ -326,6 +383,8 @@ function shape(ctx, user, a) {
   // New until read, for anyone the post is for: a family member (muted or not)
   // or a recipient on staff. Everything else staff and HQ see is just a listing.
   const forMe = !auth.atLeast(user, 'staff') || !!db.prepare('SELECT 1 FROM announcement_recipients WHERE announcement_id = ? AND user_id = ?').get(a.id, user.id);
+  // Ended early (D-52): when, and by whom (a person's name, or ELITE HQ).
+  const end = a.type === 'emergency' ? endOf(ctx, a.id) : null;
   return {
     id: a.id, type: a.type, category: a.category, category_label: a.category ? CATEGORIES[a.category] : null,
     title: a.title, body: a.body, audience: a.audience, status: a.status,
@@ -337,6 +396,9 @@ function shape(ctx, user, a) {
     mine: a.created_by === user.id,
     unread: forMe && !seen && !(note && note.read_at),
     stats: keeps(ctx, user, a) ? stats(ctx, a.id) : null,
+    ended_at: end ? end.ended_at : null,
+    ended_by: end ? (end.role === 'hq' ? 'ELITE HQ' : end.name) : null,
+    can_end: !end && isActive(ctx, a) && mayEnd(ctx, user, a),
   };
 }
 
@@ -356,7 +418,8 @@ function router(ctx) {
     const u = req.user;
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
     const posts = visible(ctx, u, '', [], limit).map(a => shape(ctx, u, a));
-    const active = visible(ctx, u, " AND a.type = 'emergency' AND a.published_at > ?", [ctx.clock.now() - EMERGENCY_ACTIVE_MS]).map(a => shape(ctx, u, a));
+    // Pinned: alerts within their 24 hours that nobody has ended (an ended one is never pinned again).
+    const active = visible(ctx, u, ACTIVE_ALERT + NOT_ENDED, [ctx.clock.now() - EMERGENCY_ACTIVE_MS]).map(a => shape(ctx, u, a));
     // The scheduled posts this person looks after (see keeps()).
     const scheduled = auth.atLeast(u, 'director')
       ? db.prepare("SELECT a.* FROM announcements a WHERE a.status = 'scheduled' ORDER BY a.publish_at, a.id").all()
@@ -452,6 +515,17 @@ function router(ctx) {
     res.json(stats(ctx, a.id));
   });
 
+  // Signed in; mayEnd() decides who (HQ, or a director for an alert sent only to their location).
+  r.post('/:id/end', auth.requireRole(), (req, res) => {
+    const a = getPost(ctx, req.params.id);
+    if (!mayEnd(ctx, req.user, a)) throw forbidden('Only HQ can end an alert that went to other locations.');
+    if (a.type !== 'emergency') throw bad('not_emergency', 'Only emergency alerts can be ended.');
+    if (endOf(ctx, a.id)) throw conflict('already_ended', 'This alert has already ended.');
+    if (!isActive(ctx, a)) throw conflict('not_active', 'This alert is more than 24 hours old, so it is no longer pinned and cannot be ended.');
+    const notified = endAlert(ctx, req.user, a);
+    res.json({ announcement: shape(ctx, req.user, getPost(ctx, a.id)), notified });
+  });
+
   r.post('/:id/read', auth.requireRole(), (req, res) => {
     const [a] = visible(ctx, req.user, ' AND a.id = ?', [Number(req.params.id) || 0], 1);
     if (!a) throw notFound('That announcement is not available.');
@@ -478,5 +552,5 @@ module.exports = {
     },
   }],
   // For this module's seed and tests.
-  createPost, publish, audienceUsers,
+  createPost, publish, audienceUsers, endAlert,
 };

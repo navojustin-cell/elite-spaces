@@ -1,5 +1,5 @@
 'use strict';
-// Announcements and emergency alerts (PRD 5, AN-1..AN-6) and their scope rules (NF-1).
+// Announcements and emergency alerts (PRD 5, AN-1..AN-7) and their scope rules (NF-1).
 const vm = require('vm');
 const fs = require('fs');
 const path = require('path');
@@ -430,13 +430,12 @@ test(['AN-4'], 'a session audience reaches its actively enrolled students and th
   t.fx.link(guardian2, w.famA.student);                         // second guardian: included
   const pendingParent = t.fx.user('parent', { location: A });
   t.fx.link(pendingParent, w.famA.student, 'pending');          // link not approved: excluded
-  t.fx.enroll(w.famA.student, s, 1);
-  t.fx.enroll(w.famA.student, s, 3);                            // two slots, one notification
-  t.fx.enroll(w.famA2.student, s, 5, { status: 'paused' });     // paused: excluded
+  t.fx.enroll(w.famA.student, s);                               // the whole schedule (D-42)
+  t.fx.enroll(w.famA2.student, s, 0, { status: 'paused' });     // paused: excluded
   const famA3 = t.fx.family(A);
-  t.fx.enroll(famA3.student, s, 1, { status: 'dropped' });      // dropped: excluded
+  t.fx.enroll(famA3.student, s, 0, { status: 'dropped' });      // dropped: excluded
   const famA4 = t.fx.family(A);
-  t.fx.enroll(famA4.student, other, 2);                         // other session: excluded
+  t.fx.enroll(famA4.student, other);                            // other schedule: excluded
   const r = await t.as(w.dirA).post(API, post({ audience: 'session', session_id: s.id, category: 'session_offering' }));
   assert.equal(r.status, 201);
   const id = r.body.announcement.id;
@@ -449,6 +448,7 @@ test(['AN-4'], 'a session audience reaches its actively enrolled students and th
   const none = await t.as(w.dirA).post(API, post({ audience: 'session' }));
   assert.equal(none.status, 400);
   assert.equal(none.body.error, 'session');
+  assert.equal(none.body.message, 'Choose a schedule.', 'the audience is families enrolled in a schedule');
 });
 
 test(['AN-4'], 'students whose parent has not approved them, and deactivated accounts, are left out', async () => {
@@ -471,7 +471,7 @@ test(['AN-4', 'NF-1'], 'a parent who joins later, with no students set up yet, s
   const { t, A } = w;
   const byId = ids => [...ids].sort((x, y) => x - y);
   const s = t.fx.session(A);
-  t.fx.enroll(w.famA.student, s, 1);
+  t.fx.enroll(w.famA.student, s);
   const families = (await t.as(w.dirA).post(API, post({ title: 'Open house' }))).body.announcement.id;
   const parents = (await t.as(w.dirA).post(API, post({ audience: 'parents', title: 'Parent night' }))).body.announcement.id;
   const students = (await t.as(w.dirA).post(API, post({ audience: 'students', title: 'Study jam' }))).body.announcement.id;
@@ -700,7 +700,7 @@ test(['NF-1'], 'a family member\'s feed holds only the posts sent to them', asyn
   const w = await world();
   const { t, A } = w;
   const s = t.fx.session(A);
-  t.fx.enroll(w.famA.student, s, 1);
+  t.fx.enroll(w.famA.student, s);
   const toParents = (await t.as(w.dirA).post(API, post({ audience: 'parents' }))).body.announcement.id;
   const toSession = (await t.as(w.dirA).post(API, post({ audience: 'session', session_id: s.id }))).body.announcement.id;
   const atB = (await t.as(w.dirB).post(API, post())).body.announcement.id;
@@ -763,9 +763,8 @@ test(['NF-1'], 'compose options list only the director\'s own sessions; staff an
   const w = await world();
   const sA = w.t.fx.session(w.A, { name: 'Afternoon Study' });
   const sB = w.t.fx.session(w.B, { name: 'Morning Focus' });
-  w.t.fx.enroll(w.famA.student, sA, 1);
-  w.t.fx.enroll(w.famA.student, sA, 3);
-  w.t.fx.enroll(w.famA2.student, sA, 5);
+  w.t.fx.enroll(w.famA.student, sA);
+  w.t.fx.enroll(w.famA2.student, sA);
   const a = await w.t.as(w.dirA).get(API + '/options');
   assert.equal(a.status, 200);
   assert.deepEqual(a.body.sessions.map(s => s.id), [sA.id]);
@@ -840,7 +839,7 @@ test(['NF-1'], 'the mute setting is per person and needs a signed-in user', asyn
 test(['NF-1'], 'every route refuses a signed-out caller', async () => {
   const w = await world();
   const routes = [['get', '/feed'], ['get', '/options'], ['post', '/preview'], ['post', ''], ['post', '/emergency'],
-    ['del', '/1'], ['get', '/1/stats'], ['post', '/1/read'], ['put', '/prefs']];
+    ['del', '/1'], ['get', '/1/stats'], ['post', '/1/read'], ['post', '/1/end'], ['put', '/prefs']];
   for (const [m, p] of routes) {
     const r = await w.t.anon[m](API + p, ...(m === 'get' || m === 'del' ? [] : [{}]));
     assert.equal(r.status, 401, m + ' ' + p);
@@ -945,6 +944,150 @@ test(['AN-3', 'AN-4', 'NF-1'], 'the feed names every location a parent hears fro
   assert.deepEqual(await mine(w.famB.student), ['Toronto']);
   assert.deepEqual(await mine(w.staffB), ['Toronto']);
   assert.equal(await mine(w.hq), null);
+});
+
+// ---------------------------------------------------------------- AN-7: ending an emergency alert early (D-52)
+
+const endedNotices = (t, id) => t.db.prepare("SELECT * FROM notifications WHERE kind = 'emergency_ended' AND ref_id = ? ORDER BY user_id").all(id);
+const pinnedIds = async (t, u) => (await t.as(u).get(API + '/feed')).body.active_emergencies.map(p => p.id);
+
+test(['AN-7', 'AN-5'], 'a director ends their location\'s alert: it unpins, shows Ended, and every recipient is told once, muted or not', async () => {
+  const w = await world();
+  const { t } = w;
+  await t.as(w.famA.parent).put(API + '/prefs', { muted: true });
+  t.clock.set(at(LA, '2026-10-14', '17:30'));
+  const id = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  const before = t.db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n;
+  t.clock.set(at(LA, '2026-10-14', '19:42'));
+  const r = await t.as(w.dirA).post(API + '/' + id + '/end');
+  assert.equal(r.status, 200);
+  assert.equal(r.body.notified, 6);
+  assert.equal(r.body.announcement.ended_at, at(LA, '2026-10-14', '19:42'));
+  assert.equal(r.body.announcement.ended_by, w.dirA.name);
+  assert.equal(r.body.announcement.can_end, false);
+  assert.deepEqual({ ...t.db.prepare('SELECT ended_by, ended_at FROM announcement_ends WHERE announcement_id = ?').get(id) },
+    { ended_by: w.dirA.id, ended_at: at(LA, '2026-10-14', '19:42') });
+  // One "All clear" each to the alert's recipients, the muted parent included, at normal priority.
+  const notes = endedNotices(t, id);
+  assert.deepEqual(notes.map(n => n.user_id), sorted(w.famA.parent, w.famA.student, w.famA2.parent, w.famA2.student, w.staffA, w.dirA));
+  assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, before + 6, 'nothing else is sent');
+  for (const n of notes) {
+    assert.deepEqual([n.title, n.body, n.priority, n.ref_type, n.ref_id],
+      ['All clear: Power outage', 'Irvine ended this emergency alert at 7:42 PM.', 'normal', 'announcement', id]);
+  }
+  // No longer pinned for anyone, still in the feed marked Ended with who ended it.
+  for (const u of [w.famA.parent, w.famA.student, w.staffA, w.dirA, w.hq]) {
+    const f = (await t.as(u).get(API + '/feed')).body;
+    assert.deepEqual(f.active_emergencies, [], u.role);
+    const p = f.posts.find(x => x.id === id);
+    assert.deepEqual([p.ended_at, p.ended_by, p.can_end], [at(LA, '2026-10-14', '19:42'), w.dirA.name, false], u.role);
+  }
+  const [row] = t.fx.audit('emergency.end');
+  assert.deepEqual([row.actor_id, row.target_type, row.target_id, row.location_id], [w.dirA.id, 'announcement', id, w.A.id]);
+  // Ended alerts are never pinned again while their 24 hours run, and a second end is refused.
+  t.clock.advance(3600000);
+  assert.deepEqual(await pinnedIds(t, w.famA.parent), []);
+  const again = await t.as(w.hq).post(API + '/' + id + '/end');
+  assert.equal(again.status, 409);
+  assert.equal(again.body.error, 'already_ended');
+  assert.equal(endedNotices(t, id).length, 6, 'nobody is told twice');
+});
+
+test(['AN-7', 'AN-2'], 'HQ ends an alert sent to two locations; it shows as ended by ELITE HQ, and each location reads the time in its own zone', async () => {
+  const w = await world();
+  const { t } = w;
+  const id = (await t.as(w.hq).post(API + '/emergency', alert({ locations: [w.A.id, w.B.id] }))).body.announcement.id;
+  const other = (await t.as(w.dirA).post(API + '/emergency', alert({ title: 'Fire drill' }))).body.announcement.id;
+  t.clock.set(at(LA, '2026-10-14', '11:05'));
+  const r = await t.as(w.hq).post(API + '/' + id + '/end');
+  assert.equal(r.status, 200);
+  assert.equal(r.body.notified, 10);
+  assert.equal(r.body.announcement.ended_by, 'ELITE HQ');
+  const body = u => endedNotices(t, id).find(n => n.user_id === u.id).body;
+  assert.equal(body(w.famA.parent), 'ELITE HQ ended this emergency alert at 11:05 AM.');
+  assert.equal(body(w.staffA), 'ELITE HQ ended this emergency alert at 11:05 AM.');
+  assert.equal(body(w.famB.student), 'ELITE HQ ended this emergency alert at 2:05 PM.');
+  assert.equal(body(w.dirB), 'ELITE HQ ended this emergency alert at 2:05 PM.');
+  // Families at both locations see who ended it.
+  assert.equal((await t.as(w.famB.parent).get(API + '/feed')).body.posts.find(p => p.id === id).ended_by, 'ELITE HQ');
+  // Only that alert unpins.
+  assert.deepEqual(await pinnedIds(t, w.famA.parent), [other]);
+  assert.deepEqual(await pinnedIds(t, w.famB.parent), []);
+});
+
+test(['AN-7'], 'a parent who lives elsewhere reads the "All clear" in the time of the alert\'s location', async () => {
+  const w = await world();
+  const { t } = w;
+  t.fx.link(w.famB.parent, w.famA.student);   // home in Toronto, a student in Irvine
+  const id = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  t.clock.set(at(LA, '2026-10-14', '11:05'));
+  assert.equal((await t.as(w.dirA).post(API + '/' + id + '/end')).body.notified, 7);
+  assert.equal(t.fx.notifications(w.famB.parent, 'emergency_ended')[0].body, 'Irvine ended this emergency alert at 11:05 AM.');
+});
+
+test(['AN-7', 'NF-1'], 'only HQ, or a director whose own location is the alert\'s only one, can end it', async () => {
+  const w = await world();
+  const { t } = w;
+  const dirA2 = t.fx.director(w.A);
+  const own = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  const both = (await t.as(w.hq).post(API + '/emergency', alert({ locations: [w.A.id, w.B.id] }))).body.announcement.id;
+  const hqToA = (await t.as(w.hq).post(API + '/emergency', alert({ locations: [w.A.id] }))).body.announcement.id;
+  const atB = (await t.as(w.dirB).post(API + '/emergency', alert())).body.announcement.id;
+  const ended = () => t.db.prepare('SELECT announcement_id FROM announcement_ends ORDER BY announcement_id').all().map(r => r.announcement_id);
+  // Staff and families: never.
+  for (const u of [w.staffA, w.famA.parent, w.famA.student]) {
+    assert.equal((await t.as(u).post(API + '/' + own + '/end')).status, 403, u.role);
+  }
+  // Another location's director, and any director for an alert that also went elsewhere.
+  assert.equal((await t.as(w.dirB).post(API + '/' + own + '/end')).status, 403);
+  assert.equal((await t.as(w.dirA).post(API + '/' + atB + '/end')).status, 403);
+  assert.equal((await t.as(w.dirA).post(API + '/' + both + '/end')).status, 403);
+  assert.equal((await t.as(w.dirB).post(API + '/' + both + '/end')).status, 403);
+  assert.deepEqual(ended(), []);
+  assert.equal(t.db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE kind = 'emergency_ended'").get().n, 0);
+  // can_end follows the same rule.
+  const canEnd = async u => Object.fromEntries((await t.as(u).get(API + '/feed')).body.active_emergencies.map(p => [p.id, p.can_end]));
+  assert.deepEqual(await canEnd(w.dirA), { [own]: true, [both]: false, [hqToA]: true });
+  assert.deepEqual(await canEnd(w.staffA), { [own]: false, [both]: false, [hqToA]: false });
+  assert.deepEqual(await canEnd(w.famA.parent), { [own]: false, [both]: false, [hqToA]: false });
+  assert.deepEqual(await canEnd(w.hq), { [own]: true, [both]: true, [hqToA]: true, [atB]: true });
+  // Whoever sent it: a co-director ends their colleague's alert, and a director ends HQ's alert to their location.
+  assert.equal((await t.as(dirA2).post(API + '/' + own + '/end')).status, 200);
+  assert.equal((await t.as(w.dirA).post(API + '/' + hqToA + '/end')).status, 200);
+  assert.equal((await t.as(w.hq).post(API + '/' + both + '/end')).status, 200);
+  assert.deepEqual(ended(), [own, both, hqToA].sort((x, y) => x - y));
+  assert.equal(t.fx.notifications(w.famA.parent, 'emergency_ended')[0].body.startsWith('Irvine ended'), true, 'a director ends it as the location');
+  assert.equal((await t.as(w.dirA).post(API + '/987654/end')).status, 404);
+});
+
+test(['AN-7'], 'only an emergency alert within its 24 hours can be ended', async () => {
+  const w = await world();
+  const { t } = w;
+  const ann = (await t.as(w.dirA).post(API, post())).body.announcement.id;
+  const r = await t.as(w.dirA).post(API + '/' + ann + '/end');
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, 'not_emergency');
+  const id = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  t.clock.advance(24 * 3600000 - 60000);
+  assert.equal((await t.as(w.dirA).get(API + '/feed')).body.active_emergencies[0].can_end, true, 'a minute left: still active');
+  t.clock.advance(60000);
+  const old = await t.as(w.hq).post(API + '/' + id + '/end');
+  assert.equal(old.status, 409);
+  assert.equal(old.body.error, 'not_active');
+  assert.equal((await t.as(w.hq).get(API + '/feed')).body.posts.find(p => p.id === id).can_end, false);
+  assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM announcement_ends').get().n, 0);
+  assert.equal(t.db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE kind = 'emergency_ended'").get().n, 0);
+  assert.deepEqual(t.fx.audit('emergency.end'), []);
+});
+
+test(['AN-7', 'AN-6'], 'opening the "All clear" notice is not reading the alert, so the sender\'s numbers stay true', async () => {
+  const w = await world();
+  const { t } = w;
+  const id = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  await t.as(w.dirA).post(API + '/' + id + '/end');
+  const n = t.fx.notifications(w.famA.parent, 'emergency_ended')[0];
+  assert.equal((await t.as(w.famA.parent).post('/api/notifications/' + n.id + '/read')).status, 200);
+  assert.deepEqual((await t.as(w.dirA).get(API + '/' + id + '/stats')).body, { recipients: 6, delivered: 6, read: 0, muted: 0 });
 });
 
 // ---------------------------------------------------------------- the emergency pop-up in a browser tab
@@ -1194,6 +1337,11 @@ test(['AN-4'], 'the compose session picker tells same-named sessions apart by te
   assert.deepEqual(optionTexts(tab.doc.getElementById('ann-session')), [
     'Afternoon Study · Mon/Wed 1pm–4pm · Fall 2026 · 0 students enrolled',
     'Afternoon Study · Mon/Wed 1pm–4pm · Spring 2027 · 0 students enrolled']);
+  // The audience is the families enrolled in a schedule, and the picker says so (AN-4).
+  const main = tab.main();
+  const labels = main.findAll(n => n.tag === 'label').map(textOf);
+  assert.ok(labels.includes('Families in one schedule (its enrolled students and their parents)'), JSON.stringify(labels));
+  assert.ok(labels.some(l => l.startsWith('ScheduleChoose a schedule')), JSON.stringify(labels));
 });
 
 test(['AN-2', 'AN-5'], 'HQ\'s alert screen lists a closed location, marked closed, and counts it in "All locations" (R5)', async () => {
@@ -1224,6 +1372,8 @@ test(['AN-2'], 'HQ\'s composer lists locations by name, as on Locations, and sti
   const names = fieldset.findAll(n => n.tag === 'label' && n.find(c => c.tag === 'input' && c.getAttribute('type') === 'checkbox')).map(textOf);
   assert.deepEqual(names, ['Anaheim', 'Irvine', 'Toronto']);
   // A schedule time is read at the post's lowest-numbered location (parsePublishAt), so the hint names Irvine.
+  // With All locations chosen (the fake DOM keeps a checked property only once it is set).
+  main.find(n => n.tag === 'input' && n.getAttribute('name') === 'ann-locmode' && n.getAttribute('value') === 'all').checked = true;
   main.find(n => n.tag === 'input' && n.getAttribute('name') === 'ann-when' && n.getAttribute('value') === 'later').checked = true;
   main.find(n => n.tag === 'form').dispatch('change');
   assert.ok(tab.doc.getElementById('ann-at-hint').textContent.startsWith('Irvine time ('), tab.doc.getElementById('ann-at-hint').textContent);
@@ -1373,4 +1523,89 @@ test(['AN-3'], 'Home\'s Latest news shows a new announcement as soon as it arriv
   await tab.settle();
   assert.equal(card(), shown);
   assert.ok(shown.isConnected);
+});
+
+// ---------------------------------------------------------------- AN-7 on screen
+
+const button = (root, text) => root.find(n => n.tag === 'button' && n.textContent === text);
+const confirmBox = tab => tab.main().find(n => n.tag === 'div' && n.getAttribute('role') === 'alertdialog');
+
+test(['AN-7', 'NF-7'], 'a director ends a pinned alert from News after a confirm; it moves into the feed marked Ended', async () => {
+  const w = await world();
+  const { t } = w;
+  t.clock.set(at(LA, '2026-10-14', '17:30'));
+  const id = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  const tab = alertTab(t, '#/news');
+  tab.signIn(w.dirA);
+  await tab.start();
+  const end = button(tab.main(), 'End alert');
+  assert.ok(end, 'the pinned alert offers End alert');
+  assert.equal(end.getAttribute('aria-label'), 'End alert: Power outage');
+  // Keeping it changes nothing.
+  end.focus();
+  end.click();
+  await tab.settle();
+  let box = confirmBox(tab);
+  assert.ok(box, 'it asks first');
+  assert.ok(box.cls.includes('confirm-danger'), 'as a danger confirm');
+  assert.ok(textOf(box).startsWith('End this alert now?It stops being pinned and everyone it went to is told it has ended.'), textOf(box));
+  button(box, 'Keep alert active').click();
+  await tab.settle();
+  assert.deepEqual(await pinnedIds(t, w.famA.parent), [id]);
+  assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM announcement_ends').get().n, 0);
+  // Ending it.
+  t.clock.set(at(LA, '2026-10-14', '19:42'));
+  button(tab.main(), 'End alert').click();
+  await tab.settle();
+  box = confirmBox(tab);
+  button(box, 'End alert').click();
+  await tab.settle();
+  assert.deepEqual(await pinnedIds(t, w.famA.parent), []);
+  assert.equal(endedNotices(t, id).length, 6);
+  const card = articles(tab.main()).find(a => a.getAttribute('aria-label') === 'Emergency alert: Power outage');
+  assert.ok(textOf(card).includes('Emergency alert · Ended 7:42 PM'), textOf(card));
+  assert.ok(textOf(card).includes('Ended by ' + w.dirA.name + ' · Oct 14, 7:42 PM'), textOf(card));
+  assert.ok(!textOf(card).includes('active now'), textOf(card));
+  assert.equal(button(tab.main(), 'End alert'), undefined, 'nothing left to end');
+});
+
+test(['AN-7'], 'End alert shows only to those who can end it, and families see an ended alert marked Ended', async () => {
+  const w = await world();
+  const { t } = w;
+  t.clock.set(at(LA, '2026-10-14', '17:30'));
+  await t.as(w.hq).post(API + '/emergency', alert({ title: 'Network outage', locations: [w.A.id, w.B.id] }));
+  const id = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  const endButtons = async (u, hash = '#/news') => {
+    const tab = alertTab(t, hash);
+    tab.signIn(u);
+    await tab.start();
+    return tab.main().findAll(n => n.tag === 'button' && n.textContent === 'End alert').map(n => n.getAttribute('aria-label'));
+  };
+  assert.deepEqual(await endButtons(w.dirA), ['End alert: Power outage'], 'not the alert that also went to Toronto');
+  assert.deepEqual((await endButtons(w.hq)).sort(), ['End alert: Network outage', 'End alert: Power outage']);
+  assert.deepEqual(await endButtons(w.staffA), []);
+  assert.deepEqual(await endButtons(w.famA.parent), []);
+  assert.deepEqual(await endButtons(w.dirA, ''), [], 'News only, not Home');
+  t.clock.set(at(LA, '2026-10-14', '19:42'));
+  await t.as(w.dirA).post(API + '/' + id + '/end');
+  const tab = alertTab(t, '#/news');
+  tab.signIn(w.famA.parent);
+  await tab.start();
+  const card = articles(tab.main()).find(a => a.getAttribute('aria-label') === 'Emergency alert: Power outage');
+  assert.ok(textOf(card).includes('Emergency alert · Ended 7:42 PM'), textOf(card));
+  assert.ok(textOf(card).includes('Ended by ' + w.dirA.name), textOf(card));
+});
+
+test(['AN-7'], 'Home unpins an alert as soon as its "All clear" arrives', async () => {
+  const w = await world();
+  const { t } = w;
+  const id = (await t.as(w.dirA).post(API + '/emergency', alert())).body.announcement.id;
+  const tab = alertTab(t);
+  tab.signIn(w.famA.parent);
+  await tab.start();
+  const pinned = () => tab.main().findAll(n => n.tag === 'article' && n.getAttribute('aria-label') === 'Emergency alert: Power outage');
+  assert.equal(pinned().length, 1, 'pinned on Home');
+  await t.as(w.dirA).post(API + '/' + id + '/end');
+  await tab.arrive(t.fx.notifications(w.famA.parent, 'emergency_ended')[0]);
+  assert.equal(pinned().length, 0, 'gone without a reload');
 });
