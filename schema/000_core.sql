@@ -1,6 +1,10 @@
 -- Core tables shared by every module. These are the cross-module contract:
--- modules read and write them directly. A module that needs more columns or
--- private tables adds them in its own schema/<NNN>_<module>.sql file.
+-- modules read and write them directly. A module that needs more fields or
+-- private tables adds new tables in its own schema/<NNN>_<module>.sql file.
+-- Schema files hold new tables and indexes only, never ALTER TABLE (D-55):
+-- src/db.js re-runs every schema file on each open. CREATE TABLE IF NOT EXISTS
+-- never changes an existing database, so these columns stay as they are; v1.1
+-- gives some of them a new meaning, noted beside them.
 -- Times are UTC epoch milliseconds (INTEGER). Dates that belong to a location
 -- (local_date, closures, terms) are 'YYYY-MM-DD' in that location's time zone.
 -- Weekdays are ISO: 1 = Monday ... 7 = Sunday.
@@ -10,9 +14,11 @@ CREATE TABLE IF NOT EXISTS locations (
   name          TEXT NOT NULL,
   timezone      TEXT NOT NULL,                 -- IANA, e.g. America/Los_Angeles
   address       TEXT,
+  -- lat, lng, geofence_m: unused since v1.1 (S-5, D-49). Kept so existing databases
+  -- still open. New locations store 0, 0 and 150.
   lat           REAL NOT NULL,
   lng           REAL NOT NULL,
-  geofence_m    INTEGER NOT NULL DEFAULT 150,  -- CI-2 radius
+  geofence_m    INTEGER NOT NULL DEFAULT 150,
   qr_rotate_at  TEXT NOT NULL DEFAULT '04:00', -- CI-1 local rotation time
   open_time     TEXT NOT NULL DEFAULT '09:00',
   close_time    TEXT NOT NULL DEFAULT '20:00', -- CI-5 closing time
@@ -73,7 +79,9 @@ CREATE TABLE IF NOT EXISTS closures (
 );
 
 -- A session is a recurring study block, e.g. Mon/Wed/Fri 13:00-16:00.
--- Each (session, weekday) pair is one weekly slot; capacity applies per slot.
+-- A session is a schedule (D-41): fixed weekdays and times for the whole of its
+-- term (its period, a month or a semester). capacity is seats per meeting date.
+-- Single-date changes are in session_dates (030_sessions.sql).
 CREATE TABLE IF NOT EXISTS sessions (
   id            INTEGER PRIMARY KEY,
   location_id   INTEGER NOT NULL REFERENCES locations(id),
@@ -88,12 +96,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at    INTEGER NOT NULL
 );
 
--- Recurring enrollment in one weekly slot for the rest of the term (EN-1).
+-- Enrollment in one schedule for the rest of its period (EN-1).
+-- source keeps 'request' so v1 rows stay valid; v1.1 writes only 'parent',
+-- 'waitlist' and 'staff' (the v1.1 migration uses 'staff').
 CREATE TABLE IF NOT EXISTS enrollments (
   id            INTEGER PRIMARY KEY,
   student_id    INTEGER NOT NULL REFERENCES users(id),
   session_id    INTEGER NOT NULL REFERENCES sessions(id),
-  weekday       INTEGER NOT NULL,
+  weekday       INTEGER NOT NULL,              -- 0 = the whole schedule (v1.1, D-42). 1-7 = a v1 per-weekday row, which counts only on that weekday. Nothing writes 1-7 after v1.1.
   status        TEXT NOT NULL CHECK (status IN ('active','paused','dropped')),
   source        TEXT NOT NULL CHECK (source IN ('parent','request','waitlist','staff')),
   created_by    INTEGER REFERENCES users(id),
@@ -103,13 +113,13 @@ CREATE TABLE IF NOT EXISTS enrollments (
 CREATE UNIQUE INDEX IF NOT EXISTS enrollments_one_live
   ON enrollments(student_id, session_id, weekday) WHERE status IN ('active','paused');
 
--- Per-slot waitlist (EN-5). Shared because membership renewal (D-16) can put a
+-- Per-schedule waitlist (EN-5, D-44). Shared because membership renewal (D-16) can put a
 -- student back at the front. Order: priority DESC, created_at ASC, id ASC.
 CREATE TABLE IF NOT EXISTS waitlist (
   id            INTEGER PRIMARY KEY,
   student_id    INTEGER NOT NULL REFERENCES users(id),
   session_id    INTEGER NOT NULL REFERENCES sessions(id),
-  weekday       INTEGER NOT NULL,
+  weekday       INTEGER NOT NULL,              -- 0 = the whole schedule (v1.1, D-42). 1-7 = a v1 per-weekday row.
   status        TEXT NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting','enrolled','removed')),
   priority      INTEGER NOT NULL DEFAULT 0,    -- 1 = front of the line (renewed membership)
   created_by    INTEGER REFERENCES users(id),
@@ -124,7 +134,7 @@ CREATE TABLE IF NOT EXISTS visits (
   student_id      INTEGER NOT NULL REFERENCES users(id),
   location_id     INTEGER NOT NULL REFERENCES locations(id),
   session_id      INTEGER REFERENCES sessions(id),
-  weekday         INTEGER,
+  weekday         INTEGER,                     -- the ISO weekday of local_date. Informational only.
   local_date      TEXT NOT NULL,
   check_in_at     INTEGER NOT NULL,
   check_out_at    INTEGER,

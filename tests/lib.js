@@ -140,10 +140,24 @@ function fixtures(ctx) {
         VALUES (?,?,?,?,?,?,?,?)`, location.id, term.id, name, weekdays, start, end, capacity, now());
       return db.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
     },
-    enroll(student, session, weekday, { status = 'active', source = 'parent' } = {}) {
+    // weekday 0 = the whole schedule (D-42); 1-7 makes a v1 per-weekday row (history only).
+    enroll(student, session, weekday = 0, { status = 'active', source = 'parent' } = {}) {
       const id = ins('INSERT INTO enrollments (student_id, session_id, weekday, status, source, created_at) VALUES (?,?,?,?,?,?)',
         student.id, session.id, weekday, status, source, now());
       return db.prepare('SELECT * FROM enrollments WHERE id = ?').get(id);
+    },
+    // A whole-schedule waiting spot (D-44). priority 1 = front of the line (D-16).
+    waitlist(student, session, { weekday = 0, status = 'waiting', priority = 0, created_by = null } = {}) {
+      const id = ins('INSERT INTO waitlist (student_id, session_id, weekday, status, priority, created_by, created_at) VALUES (?,?,?,?,?,?,?)',
+        student.id, session.id, weekday, status, priority, created_by, now());
+      return db.prepare('SELECT * FROM waitlist WHERE id = ?').get(id);
+    },
+    // One schedule's date change (D-46): kind 'skip' or 'add'; a move is a skip plus an add carrying moved_from.
+    // Needs the session_dates table (schema/030_sessions.sql, v1.1 step 1).
+    sessionDate(session, date, kind, { moved_from = null, reason = null } = {}) {
+      const id = ins('INSERT INTO session_dates (session_id, date, kind, moved_from, reason, created_at) VALUES (?,?,?,?,?,?)',
+        session.id, date, kind, moved_from, reason, now());
+      return db.prepare('SELECT * FROM session_dates WHERE id = ?').get(id);
     },
     visit(student, location, { session = null, weekday = null, local_date = '2026-10-14', check_in_at, check_out_at = null,
       checkin_method = 'scan', checkout_method = null, flagged = 0, flag_reason = null, reviewed_by = null,

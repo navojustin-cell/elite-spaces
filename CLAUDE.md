@@ -51,9 +51,9 @@ with every module loaded, including in `node tests/run.js integration`.
 
 | Path | Owner |
 |---|---|
-| `schema/000_core.sql`, `schema/005_push.sql`, `src/{app,auth,db,clock,time,notify,push,audit,errors}.js`, `server.js`, `public/sw.js`, `render.yaml`, `src/modules/index.js`, `public/js/app.js`, `public/css/app.css`, `public/index.html`, `tests/{lib,run,mutate,coverage}.js`, `tests/integration.test.js`, `tests/mutations/{core,integration}.js`, `scripts/seed.js` | **foundation**: shared, change only when integrating |
+| `schema/000_core.sql`, `schema/005_push.sql`, `src/{app,auth,db,clock,time,notify,push,audit,errors}.js`, `server.js`, `public/sw.js`, `render.yaml`, `src/modules/index.js`, `public/js/app.js`, `public/css/app.css`, `public/index.html`, `tests/{lib,run,mutate,coverage}.js`, `tests/integration.test.js`, `tests/mutations/{core,integration}.js`, `scripts/seed.js`, `src/migrate-v1.1.js`, `scripts/migrate-v1.1.js` | **foundation**: shared, change only when integrating |
 | `src/modules/<m>/` (routes, services, jobs, optional `seed.js`) | module `<m>` |
-| `schema/NNN_<m>.sql` (additive only: new tables, `ALTER TABLE ... ADD COLUMN`) | module `<m>` |
+| `schema/NNN_<m>.sql` (new tables and indexes only, never `ALTER TABLE`: D-55) | module `<m>` |
 | `public/js/views/<m>.js` | module `<m>` |
 | `tests/<m>.test.js`, `tests/mutations/<m>.js` | module `<m>` |
 
@@ -62,7 +62,11 @@ Schema file numbers are `010_accounts 020_checkin 030_sessions 040_enrollment 05
 
 Modules talk through the **core tables** (`schema/000_core.sql`), not by importing each other.
 A module may `require('../<other>/...')` only for read-only helpers that the other module exports
-on purpose. Notifications go through `src/notify.js`, staff edits through `src/audit.js`, and scope
+on purpose, such as `src/modules/sessions/times.js` and `src/modules/sessions/dates.js`. Every module
+decides whether a schedule meets on a date through `sessions/dates.js` (`overrides`, `meets`, `datesOf`,
+`counts`, `daysPerWeek`; D-47, D-26 (6)), never with its own weekday check.
+Schema files add new tables and indexes only, never `ALTER TABLE` (D-55): `src/db.js` re-runs every
+schema file on each open, so new fields go in side tables. Notifications go through `src/notify.js`, staff edits through `src/audit.js`, and scope
 checks through `src/auth.js`. Sign-in sessions start with `auth.startSession(ctx, res, userId)`.
 The shared contracts between modules (membership audit rows, the enrollment status log, check-in
 notification kinds) are in `docs/decisions.md` D-26.
@@ -79,9 +83,10 @@ Shell hooks for views (`public/js/app.js`):
 - `App.inboxLink(refType, route)` makes Inbox items whose `ref_type` matches open a view. `route` is a
   view id with optional params (`'notes'`, `'schedule/12'`) or a function of the notification returning
   one. Several modules may register one ref type; the first route the signed-in role can open wins.
-  Ref types sent today: `visit` (checkin), `closure`, `session` (sessions), `enrollment`,
-  `enrollment_request` (enrollment), `membership` (membership), `announcement` (announcements),
-  `daily_note` (notes), `user`, `location` (accounts).
+  Ref types sent today: `visit` (checkin), `closure`, `session` (sessions), `enrollment` (enrollment),
+  `membership` (membership), `announcement` (announcements, including `emergency_ended`),
+  `daily_note` (notes), `missed_day` (attendance), `user`, `location` (accounts).
+  `enrollment_request` (enrollment) is no longer sent (D-48) but stays registered, so old Inbox items open Schedule.
 - `await App.confirm({ anchor | el, title, body, confirmLabel, cancelLabel, danger })` asks before a
   consequential action and resolves `true` or `false`. Labels are verb-first and name the thing
   (`confirmLabel: 'Deactivate Sam'`, `cancelLabel: 'Keep active'`); `danger: true` makes the confirm
