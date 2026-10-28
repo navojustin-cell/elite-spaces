@@ -1,8 +1,9 @@
 'use strict';
-// Module: enrollment - PRD 3. Enrollment and waitlists (EN-1..EN-7, NF-3).
+// Module: enrollment - PRD 3. Enrollment and waitlists (EN-1, EN-2, EN-4..EN-8, NF-3).
 // Mounted at /api/enrollment. Rules live in service.js; this file is routes
 // and scope. Families act only for their own linked students (NF-1); staff at
 // the student's location and HQ may read a student's catalog and schedule.
+// Student requests are gone in v1.1 (D-48): /requests answers 404.
 
 const express = require('express');
 const auth = require('../../auth');
@@ -12,7 +13,7 @@ const svc = require('./service');
 // can show it and (for full) offer the waitlist.
 function reply(res, out, okStatus = 201) {
   if (out.outcome === 'blocked' || out.outcome === 'full') {
-    return res.status(409).json({ error: out.code, outcome: out.outcome, message: out.message, waiting: out.waiting });
+    return res.status(409).json({ error: out.code, code: out.code, outcome: out.outcome, message: out.message, waiting: out.waiting });
   }
   res.status(okStatus).json(out);
 }
@@ -43,15 +44,8 @@ module.exports = {
     r.post('/waitlist/:id/leave', parent, (req, res) => res.json({ waitlist: svc.leaveWaitlist(ctx, req.user, req.params.id) }));
     r.post('/enrollments/:id/drop', parent, (req, res) => res.json({ enrollment: svc.drop(ctx, req.user, req.params.id) }));
 
-    r.get('/requests', family, (req, res) => res.json({ requests: svc.listRequests(ctx, req.user) }));
-    r.post('/requests', auth.requireRole('student'), (req, res) => res.status(201).json({ request: svc.createRequest(ctx, req.user, body(req)) }));
-    r.post('/requests/:id/approve', parent, (req, res) => res.json(svc.decide(ctx, req.user, req.params.id, true)));
-    r.post('/requests/:id/decline', parent, (req, res) => res.json(svc.decide(ctx, req.user, req.params.id, false)));
-
     return r;
   },
-  // EN-5: seats freed by membership pauses or capacity raises are filled too.
-  // A pending request whose session was cancelled, lost its day or whose term ended is closed with the real reason.
-  jobs: [{ name: 'promote-waitlists', run: ctx => svc.promoteAll(ctx) },
-    { name: 'close-gone-requests', run: ctx => svc.closeGoneRequests(ctx) }],
+  // EN-5 / D-44: seats freed by membership pauses or capacity raises are filled too.
+  jobs: [{ name: 'promote-waitlists', run: ctx => svc.promoteAll(ctx) }],
 };

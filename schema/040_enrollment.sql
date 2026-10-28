@@ -1,9 +1,9 @@
--- Module: enrollment (PRD 3, EN-1..EN-7, NF-3, D-17, D-18). Additive only.
--- Enrollments and the per-slot waitlist are core tables (000_core.sql).
+-- Module: enrollment (PRD 3, EN-1..EN-8, NF-3, D-42..D-44). Additive only (D-55).
+-- Enrollments and the per-schedule waitlist are core tables (000_core.sql); v1.1
+-- writes whole-schedule rows (weekday = 0, D-42).
 
--- Student requests (EN-3, D-17). Every active linked parent is notified and the
--- first parent to decide settles it. An approval then runs the same membership
--- and seat checks as a direct enrollment; `outcome` records what happened.
+-- Retired in v1.1 (D-48). Kept as history. Nothing writes it.
+-- (v1: student requests, EN-3, D-17. Old Inbox items still point at its rows.)
 CREATE TABLE IF NOT EXISTS enrollment_requests (
   id              INTEGER PRIMARY KEY,
   student_id      INTEGER NOT NULL REFERENCES users(id),
@@ -20,6 +20,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS enrollment_requests_one_pending
   ON enrollment_requests(student_id, session_id, weekday) WHERE status = 'pending';
 
 -- Seat counts and the waitlist line are read on every enroll, drop and job run.
+-- They serve weekday = 0 rows as they are.
 CREATE INDEX IF NOT EXISTS enrollment_seats ON enrollments(session_id, weekday, status);
 CREATE INDEX IF NOT EXISTS enrollment_waitlist_line ON waitlist(session_id, weekday, status);
 
