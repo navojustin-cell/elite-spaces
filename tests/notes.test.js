@@ -45,7 +45,7 @@ test(['DN-4', 'DN-1'], 'the day list shows exactly the students who checked in a
   w.visit(leo, w.A);                        // here today
   w.visit(sofia, w.A, YESTERDAY);           // here yesterday only
   w.visit(w.fc.student, w.B);               // at the other location today
-  w.t.fx.enroll(w.fb.student, w.sessA, 3);  // enrolled today but never came
+  w.t.fx.enroll(w.fb.student, w.sessA);     // enrolled (MWF, so today) but never came
   const r = await w.t.as(w.staffA).get('/api/notes/day');
   assert.equal(r.status, 200);
   assert.equal(r.body.date, TODAY);
@@ -619,9 +619,9 @@ test(['DN-5'], "the parent home's 'today' is the date at each student's home loc
 test(['DN-5'], "the parent home knows whether today's session is still to come, so a student isn't called absent before it ends", async () => {
   const w = await world();
   const [leo, sofia] = w.fa.students, anh = w.fb.student;
-  w.t.fx.enroll(leo, w.sessA, 3); // Wednesdays 1-4 PM
-  w.t.fx.enroll(anh, w.sessA, 3);
-  w.t.fx.enroll(sofia, w.sessA, 1); // Mondays only
+  w.t.fx.enroll(leo, w.sessA); // the whole MWF 1-4 PM schedule, so today (Wednesday)
+  w.t.fx.enroll(anh, w.sessA);
+  w.t.fx.enroll(sofia, w.t.fx.session(w.A, { name: 'Monday Study', weekdays: '1' })); // Mondays only
   const home = async parent => (await w.t.as(parent).get('/api/notes/today')).body.students
     .map(s => [s.name, s.visited, s.in_building, s.session_today, s.session_later]);
 
@@ -642,13 +642,15 @@ test(['DN-5'], "the parent home knows whether today's session is still to come, 
   assert.deepEqual((await home(w.fa.parent))[0], ['Leo Garcia', true, false, true, false]);
   assert.deepEqual(await home(w.fb.parent), [['Anh Nguyen', false, false, true, false]]);
 
-  // No session runs today on a closure day, or for a paused slot, a cancelled session or a term that has ended.
+  // No session runs today on a closure day, a date the director skipped, or for a paused schedule,
+  // a cancelled one or a term that has ended.
   w.t.clock.set(at(LA, TODAY, '10:00'));
   const anhDay = async () => (await home(w.fb.parent))[0].slice(3);
   assert.deepEqual(await anhDay(), [true, true]);
   for (const [why, set, undo] of [
     ['closed today', `INSERT INTO closures (location_id, date, reason) VALUES (${w.A.id}, '${TODAY}', 'Staff training')`, 'DELETE FROM closures'],
-    ['slot paused', "UPDATE enrollments SET status = 'paused'", "UPDATE enrollments SET status = 'active'"],
+    ['date skipped', `INSERT INTO session_dates (session_id, date, kind, created_at) VALUES (${w.sessA.id}, '${TODAY}', 'skip', 0)`, 'DELETE FROM session_dates'],
+    ['schedule paused', "UPDATE enrollments SET status = 'paused'", "UPDATE enrollments SET status = 'active'"],
     ['session cancelled', "UPDATE sessions SET status = 'cancelled'", "UPDATE sessions SET status = 'active'"],
     ['term ended', `UPDATE terms SET end_date = '${YESTERDAY}'`, "UPDATE terms SET end_date = '2026-12-18'"],
   ]) {
@@ -659,12 +661,40 @@ test(['DN-5'], "the parent home knows whether today's session is still to come, 
   assert.deepEqual(await anhDay(), [true, true]);
 });
 
+test(['DN-5'], "the parent home follows each schedule's meeting dates: an added date is a session today, a moved-away date isn't, and a v1 per-day row counts only on its weekday", async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students, anh = w.fb.student;
+  const monday = w.t.fx.session(w.A, { name: 'Monday Study', weekdays: '1', start: '09:00', end: '12:00' });
+  w.t.fx.enroll(leo, w.sessA); // MWF 1-4 PM
+  w.t.fx.enroll(sofia, monday);
+  const day = async parent => (await w.t.as(parent).get('/api/notes/today')).body.students.map(s => [s.name, s.session_today, s.session_later]);
+  assert.deepEqual(await day(w.fa.parent), [['Leo Garcia', true, true], ['Sofia Garcia', false, false]]);
+
+  // The director moves Leo's Wednesday to Thursday and adds this Wednesday to Monday Study (9-12).
+  w.t.fx.sessionDate(w.sessA, TODAY, 'skip');
+  w.t.fx.sessionDate(w.sessA, '2026-10-15', 'add', { moved_from: TODAY });
+  w.t.fx.sessionDate(monday, TODAY, 'add', { reason: 'Extra study morning' });
+  assert.deepEqual(await day(w.fa.parent), [['Leo Garcia', false, false], ['Sofia Garcia', true, true]]);
+  w.t.clock.set(at(LA, TODAY, '12:30'));
+  assert.deepEqual(await day(w.fa.parent), [['Leo Garcia', false, false], ['Sofia Garcia', true, false]], 'the added date ends at its own time');
+  w.t.clock.set(at(LA, '2026-10-15', '10:00'));
+  assert.deepEqual(await day(w.fa.parent), [['Leo Garcia', true, true], ['Sofia Garcia', false, false]], 'the moved date meets Thursday');
+
+  // A v1 row (one weekday, history from before v1.1) counts only on its own weekday.
+  w.t.clock.set(at(LA, TODAY, '10:00'));
+  const anhDay = async () => (await day(w.fb.parent))[0].slice(1);
+  const v1 = w.t.fx.enroll(anh, w.t.fx.session(w.A, { name: 'Evening MWF', start: '16:00', end: '19:00' }), 1);
+  assert.deepEqual(await anhDay(), [false, false], 'a Monday row is not a Wednesday session');
+  w.t.db.prepare('UPDATE enrollments SET weekday = 3 WHERE id = ?').run(v1.id);
+  assert.deepEqual(await anhDay(), [true, true]);
+});
+
 test(['DN-5'], "whether today's session has ended is worked out in the student's location zone", async () => {
   const w = await world();
   const TOR = 'America/Toronto';
   const T = w.t.fx.location({ name: 'Toronto', timezone: TOR });
   const ft = w.t.fx.family(T);
-  w.t.fx.enroll(ft.student, w.t.fx.session(T, { name: 'Toronto Study' }), 3); // Wednesdays 1-4 PM Toronto time
+  w.t.fx.enroll(ft.student, w.t.fx.session(T, { name: 'Toronto Study' })); // MWF 1-4 PM Toronto time
   const day = async () => (await w.t.as(ft.parent).get('/api/notes/today')).body.students.map(s => [s.date, s.session_today, s.session_later]);
   w.t.clock.set(at(TOR, TODAY, '15:30')); // 12:30 PM in Los Angeles
   assert.deepEqual(await day(), [[TODAY, true, true]]);
@@ -710,6 +740,218 @@ test(['DN-5', 'NF-1'], 'students cannot see daily notes in v1, not even their ow
   }
   assert.equal((await me.put(`/api/notes/students/${leo.id}/${TODAY}`, { ratings: w.all(1) })).status, 403);
   assert.deepEqual(w.ratingsOf(w.notes()[0].id).map(x => x.rating), [3, 3, 3, 3]);
+});
+
+// ---------------------------------------------------------------- DG-1, DG-2: daily goals
+
+const SUBJECTS = [['math', 'Math'], ['english', 'English'], ['science', 'Science'], ['history', 'History'], ['language', 'Language'],
+  ['art', 'Art'], ['test_prep', 'Test prep'], ['other', 'Other']];
+const goalRows = (w, s) => w.t.db.prepare('SELECT local_date, position, subject, text FROM daily_goals WHERE student_id = ? ORDER BY local_date, position').all(s.id)
+  .map(r => [r.local_date, r.position, r.subject, r.text]);
+const goalDays = (w, s) => w.t.db.prepare('SELECT local_date, location_id, status FROM daily_goal_days WHERE student_id = ? ORDER BY local_date').all(s.id)
+  .map(r => [r.local_date, r.location_id, r.status]);
+
+test(['DG-1'], 'the goal subjects are fixed: eight subjects, each with three example goals, up to 3 goals of 280 characters', async () => {
+  const w = await world();
+  for (const u of [w.fa.students[0], w.fa.parent, w.staffA, w.hq]) {
+    const r = await w.t.as(u).get('/api/notes/goals/subjects');
+    assert.equal(r.status, 200, u.role);
+    assert.deepEqual(r.body.subjects.map(s => [s.id, s.label]), SUBJECTS);
+    assert.ok(r.body.subjects.every(s => s.examples.length === 3 && s.examples.every(x => typeof x === 'string' && x.length > 0)));
+    assert.deepEqual([r.body.max_goals, r.body.text_max], [3, 280]);
+  }
+  const r = await w.t.as(w.fa.students[0]).get('/api/notes/goals/subjects');
+  assert.deepEqual(r.body.subjects[0].examples, ['Finish the practice set for my current lesson', 'Review for my next quiz', 'Take notes on the new lesson video']);
+  assert.deepEqual(r.body.subjects[2].examples, ['Finish my lab write-up', "Study this chapter's vocabulary", 'Watch the lesson video and answer the review questions']);
+  assert.equal((await w.t.anon.get('/api/notes/goals/subjects')).status, 401);
+});
+
+test(['DG-1', 'DG-2'], "a student sets today's goals only after checking in today at their home location, and can edit them that day", async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  const me = w.t.as(leo);
+  const two = [{ subject: 'math', text: 'Finish the practice set for my current lesson' }, { subject: 'science', text: '  Finish my lab write-up  ' }];
+
+  // Before any check-in today: not answered, and nothing can be set or skipped.
+  w.visit(leo, w.A, YESTERDAY);
+  w.visit(leo, w.B); // a visit somewhere else isn't a check-in at his home location
+  assert.deepEqual((await me.get('/api/notes/goals/today')).body, { date: TODAY, checked_in: false, status: 'none', goals: [] });
+  for (const r of [await me.put('/api/notes/goals/today', { goals: two }), await me.post('/api/notes/goals/today/skip')]) {
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'no_visit_today');
+    assert.equal(r.body.message, "Check in first, then set today's goals.");
+  }
+  assert.deepEqual(goalDays(w, leo), []);
+
+  // He checks in (and even out again): now he can set them.
+  w.visit(leo, w.A);
+  assert.deepEqual((await me.get('/api/notes/goals/today')).body, { date: TODAY, checked_in: true, status: 'none', goals: [] });
+  const set = await me.put('/api/notes/goals/today', { goals: two });
+  assert.equal(set.status, 200);
+  assert.deepEqual(set.body, { date: TODAY, checked_in: true, status: 'set', goals: [
+    { position: 1, subject: 'math', subject_label: 'Math', text: 'Finish the practice set for my current lesson' },
+    { position: 2, subject: 'science', subject_label: 'Science', text: 'Finish my lab write-up' }] });
+  assert.deepEqual((await me.get('/api/notes/goals/today')).body, set.body);
+  assert.deepEqual(goalDays(w, leo), [[TODAY, w.A.id, 'set']]);
+
+  // Editing replaces the day's goals.
+  const edit = await me.put('/api/notes/goals/today', { goals: [{ subject: 'test_prep', text: 'Do one timed practice section' }] });
+  assert.equal(edit.status, 200);
+  assert.deepEqual(edit.body.goals.map(g => [g.position, g.subject_label, g.text]), [[1, 'Test prep', 'Do one timed practice section']]);
+  assert.deepEqual(goalRows(w, leo), [[TODAY, 1, 'test_prep', 'Do one timed practice section']]);
+
+  // Bad goals are refused and change nothing.
+  const tooLong = 'x'.repeat(281);
+  for (const [goals, error, message] of [
+    [[], 'no_goals', 'Add at least one goal, or skip today.'],
+    [undefined, 'no_goals', 'Add at least one goal, or skip today.'],
+    [[...two, two[0], two[1]], 'too_many_goals', 'Set up to 3 goals for today.'],
+    [[two[0], { subject: 'music', text: 'Practice scales' }], 'bad_subject', 'Choose a subject for goal 2.'],
+    [[{ text: 'No subject' }], 'bad_subject', 'Choose a subject for goal 1.'],
+    [[{ subject: 'math', text: '   ' }], 'goal_text', "Write what you're working on for goal 1."],
+    [[two[0], { subject: 'art', text: 42 }], 'goal_text', "Write what you're working on for goal 2."],
+    [[{ subject: 'math', text: tooLong }], 'goal_text', 'Keep goal 1 to 280 characters or fewer.'],
+  ]) {
+    const r = await me.put('/api/notes/goals/today', { goals });
+    assert.equal(r.status, 400, JSON.stringify(goals));
+    assert.deepEqual([r.body.error, r.body.message], [error, message]);
+  }
+  assert.deepEqual(goalRows(w, leo), [[TODAY, 1, 'test_prep', 'Do one timed practice section']]);
+
+  // Three goals, one exactly 280 characters, are fine.
+  const full = 'y'.repeat(280);
+  const three = await me.put('/api/notes/goals/today', { goals: [two[0], two[1], { subject: 'other', text: full }] });
+  assert.equal(three.status, 200);
+  assert.deepEqual(three.body.goals.map(g => g.text), ['Finish the practice set for my current lesson', 'Finish my lab write-up', full]);
+
+  // The next day starts unanswered; yesterday's goals stay with yesterday.
+  w.t.clock.set(at(LA, '2026-10-15', '09:00'));
+  assert.deepEqual((await me.get('/api/notes/goals/today')).body, { date: '2026-10-15', checked_in: false, status: 'none', goals: [] });
+  assert.equal((await me.put('/api/notes/goals/today', { goals: two })).status, 400, 'no check-in yet on the new day');
+  assert.equal(goalRows(w, leo).length, 3);
+});
+
+test(['DG-2'], 'a student can skip a day while it is not answered; set goals can be edited but not skipped', async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students;
+  w.visit(leo, w.A); w.visit(sofia, w.A);
+  const me = w.t.as(leo);
+
+  const skip = await me.post('/api/notes/goals/today/skip');
+  assert.equal(skip.status, 200);
+  assert.deepEqual(skip.body, { status: 'skipped' });
+  assert.deepEqual((await me.get('/api/notes/goals/today')).body, { date: TODAY, checked_in: true, status: 'skipped', goals: [] });
+  assert.equal((await me.post('/api/notes/goals/today/skip')).status, 200, 'skipping again changes nothing');
+  assert.deepEqual(goalDays(w, leo), [[TODAY, w.A.id, 'skipped']]);
+
+  // Setting goals later that day turns the skip into set.
+  const set = await me.put('/api/notes/goals/today', { goals: [{ subject: 'english', text: 'Write the first draft of my essay' }] });
+  assert.equal(set.status, 200);
+  assert.equal(set.body.status, 'set');
+  assert.deepEqual(goalDays(w, leo), [[TODAY, w.A.id, 'set']]);
+
+  // Once set, skip is refused.
+  const late = await me.post('/api/notes/goals/today/skip');
+  assert.equal(late.status, 409);
+  assert.equal(late.body.error, 'already_set');
+  assert.equal(late.body.message, "You already set today's goals. You can edit them instead.");
+  assert.deepEqual((await me.get('/api/notes/goals/today')).body.goals.map(g => g.text), ['Write the first draft of my essay']);
+  assert.deepEqual(goalDays(w, sofia), [], "Sofia's day is her own");
+});
+
+test(['DG-1'], "a student's goal day is their home location's date", async () => {
+  const w = await world();
+  const TOR = 'America/Toronto', OCT15 = '2026-10-15';
+  const T = w.t.fx.location({ name: 'Toronto', timezone: TOR });
+  const eli = w.t.fx.family(T).student;
+  const me = w.t.as(eli);
+  w.visit(eli, T); // Wednesday in Toronto
+  // 22:30 in Los Angeles is 01:30 on Thursday in Toronto: Wednesday's check-in no longer counts.
+  w.t.clock.set(at(LA, TODAY, '22:30'));
+  assert.deepEqual((await me.get('/api/notes/goals/today')).body, { date: OCT15, checked_in: false, status: 'none', goals: [] });
+  assert.equal((await me.post('/api/notes/goals/today/skip')).status, 400);
+  w.visit(eli, T, OCT15, { check_in_at: at(TOR, OCT15, '01:00'), check_out_at: null, checkout_method: null });
+  assert.equal((await me.put('/api/notes/goals/today', { goals: [{ subject: 'history', text: 'Prepare notes for my essay' }] })).status, 200);
+  assert.deepEqual(goalDays(w, eli), [[OCT15, T.id, 'set']]);
+});
+
+test(['DG-2', 'DN-4'], 'staff see each student\'s goals and status on the day list, with counts of set, skipped and not answered', async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students, anh = w.fb.student;
+  for (const s of [leo, sofia, anh]) w.visit(s, w.A);
+  w.visit(leo, w.A, YESTERDAY);
+  assert.equal((await w.t.as(leo).put('/api/notes/goals/today', { goals: [
+    { subject: 'math', text: 'Review for my next quiz' }, { subject: 'art', text: 'Plan my next portfolio piece' }] })).status, 200);
+  assert.equal((await w.t.as(sofia).post('/api/notes/goals/today/skip')).status, 200);
+
+  for (const u of [w.staffA, w.dirA]) {
+    const r = await w.t.as(u).get('/api/notes/day');
+    assert.deepEqual(r.body.goal_counts, { set: 1, skipped: 1, none: 1 }, u.role);
+    const by = Object.fromEntries(r.body.students.map(s => [s.name, s.goals]));
+    assert.deepEqual(by['Leo Garcia'], { status: 'set', items: [
+      { position: 1, subject: 'math', subject_label: 'Math', text: 'Review for my next quiz' },
+      { position: 2, subject: 'art', subject_label: 'Art', text: 'Plan my next portfolio piece' }] });
+    assert.deepEqual(by['Sofia Garcia'], { status: 'skipped', items: [] });
+    assert.deepEqual(by['Anh Nguyen'], { status: 'none', items: [] });
+  }
+  // Another day shows that day's record: Leo set nothing yesterday.
+  const y = await w.t.as(w.staffA).get('/api/notes/day?date=' + YESTERDAY);
+  assert.deepEqual(y.body.students.map(s => [s.name, s.goals.status]), [['Leo Garcia', 'none']]);
+  assert.deepEqual(y.body.goal_counts, { set: 0, skipped: 0, none: 1 });
+  // HQ too, for the location it picks; staff elsewhere see their own list only.
+  assert.deepEqual((await w.t.as(w.hq).get('/api/notes/day?location=' + w.A.id)).body.goal_counts, { set: 1, skipped: 1, none: 1 });
+  assert.equal((await w.t.as(w.staffB).get('/api/notes/day?location=' + w.A.id)).status, 403);
+});
+
+test(['DG-2', 'DN-2', 'DN-5'], 'parents see the goals only inside the posted note, read live; skipped or unanswered days show none', async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students, anh = w.fb.student;
+  for (const s of [leo, sofia, anh]) w.visit(s, w.A);
+  assert.equal((await w.t.as(leo).put('/api/notes/goals/today', { goals: [{ subject: 'english', text: 'Revise a paragraph for grammar' }] })).status, 200);
+  assert.equal((await w.t.as(sofia).post('/api/notes/goals/today/skip')).status, 200);
+  const p = w.t.as(w.fa.parent);
+  assert.deepEqual((await p.get('/api/notes/feed')).body.notes, [], 'no note posted yet, so no goals');
+
+  for (const s of [leo, sofia, anh]) assert.equal((await w.save(w.staffA, s, TODAY, { ratings: w.all(3), comment: 'Good work on your goals.', post: true })).status, 200);
+  const feed = await p.get('/api/notes/feed');
+  const by = Object.fromEntries(feed.body.notes.map(n => [n.student_name, n.goals]));
+  assert.deepEqual(by, { 'Leo Garcia': [{ position: 1, subject: 'english', subject_label: 'English', text: 'Revise a paragraph for grammar' }], 'Sofia Garcia': [] });
+  assert.deepEqual((await w.t.as(w.fb.parent).get('/api/notes/feed')).body.notes[0].goals, [], 'unanswered shows nothing');
+
+  // Leo edits his goals later that day: the posted note shows the edit.
+  assert.equal((await w.t.as(leo).put('/api/notes/goals/today', { goals: [
+    { subject: 'english', text: 'Revise two paragraphs for grammar' }, { subject: 'math', text: 'Review for my next quiz' }] })).status, 200);
+  const today = await p.get('/api/notes/today');
+  assert.deepEqual(today.body.students.find(s => s.id === leo.id).note.goals.map(g => [g.subject_label, g.text]),
+    [['English', 'Revise two paragraphs for grammar'], ['Math', 'Review for my next quiz']]);
+  const [n] = w.t.fx.notifications(w.fa.parent, 'note').filter(x => w.notes().find(y => y.id === x.ref_id).student_id === leo.id);
+  assert.deepEqual((await p.get('/api/notes/note/' + n.ref_id)).body.note.goals.map(g => g.text), ['Revise two paragraphs for grammar', 'Review for my next quiz']);
+  assert.equal(w.t.fx.notifications(w.fa.parent, 'note').length, 2, 'goals send no notice of their own');
+});
+
+test(['NF-1', 'DG-2'], "only a student reads or writes goals, and only their own: parents, staff and HQ can't use the goal routes", async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students;
+  w.visit(leo, w.A); w.visit(sofia, w.A);
+  assert.equal((await w.t.as(leo).put('/api/notes/goals/today', { goals: [{ subject: 'math', text: "Leo's goal" }] })).status, 200);
+  for (const u of [w.fa.parent, w.fb.parent, w.staffA, w.dirA, w.staffB, w.hq]) {
+    const c = w.t.as(u);
+    const get = await c.get('/api/notes/goals/today');
+    assert.equal(get.status, 403, u.role + ' read');
+    assert.equal(get.body.goals, undefined);
+    assert.equal((await c.put('/api/notes/goals/today', { goals: [{ subject: 'math', text: 'Not mine' }] })).status, 403, u.role + ' write');
+    assert.equal((await c.post('/api/notes/goals/today/skip')).status, 403, u.role + ' skip');
+  }
+  for (const [m, url] of [['get', '/api/notes/goals/today'], ['put', '/api/notes/goals/today'], ['post', '/api/notes/goals/today/skip']]) {
+    assert.equal((await w.t.anon[m](url)).status, 401, m + ' ' + url);
+  }
+  // Sofia sees and changes only her own day.
+  const sof = w.t.as(sofia);
+  assert.deepEqual((await sof.get('/api/notes/goals/today')).body.status, 'none');
+  assert.equal((await sof.post('/api/notes/goals/today/skip')).status, 200);
+  assert.deepEqual(goalRows(w, leo), [[TODAY, 1, 'math', "Leo's goal"]]);
+  assert.deepEqual(goalDays(w, leo), [[TODAY, w.A.id, 'set']]);
+  assert.deepEqual(goalDays(w, sofia), [[TODAY, w.A.id, 'skipped']]);
 });
 
 // ---------------------------------------------------------------- NF-1
@@ -936,8 +1178,8 @@ const postedLines = root => root.findAll(n => n.tag === 'p' && n.textContent.sta
 test(['DN-5'], "a parent's Home card says a student wasn't in only after the day's last session has ended", async () => {
   const w = await world();
   const [leo] = w.fa.students;
-  w.t.fx.enroll(leo, w.sessA, 3); // Wednesdays 1-4 PM; Sofia has nothing on Wednesdays
-  w.t.fx.enroll(w.fb.student, w.sessA, 3);
+  w.t.fx.enroll(leo, w.sessA); // MWF 1-4 PM; Sofia has nothing today
+  w.t.fx.enroll(w.fb.student, w.sessA);
   const tab = notesTab(w.t);
   const lines = async parent => {
     await tab.signIn(parent);
@@ -1326,4 +1568,191 @@ test(['DN-4', 'NF-7'], 'the note hint reserves the height of its longest wording
   assert.deepEqual(fit(), [everyItem + 'save.', 'Ready to save. Parents see the change but are not notified again.']);
   await c.tap('Focused', 'Good');
   assert.equal(live(), 'Ready to save. Parents see the change but are not notified again.');
+});
+
+// ---------------------------------------------------------------- daily goals on the screens
+
+test(['DG-2', 'DN-4', 'DN-3'], "a staff note card shows the student's goals between the visit line and the ratings, and the comment invites a reply to them", async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students, anh = w.fb.student, mia = w.t.fx.family(w.A).student;
+  for (const s of [leo, sofia, anh, mia]) w.visit(s, w.A);
+  assert.equal((await w.t.as(leo).put('/api/notes/goals/today', { goals: [
+    { subject: 'math', text: 'Review for my next quiz' }, { subject: 'art', text: 'Plan my next portfolio piece' }] })).status, 200);
+  assert.equal((await w.t.as(sofia).post('/api/notes/goals/today/skip')).status, 200);
+  const tab = notesTab(w.t);
+  await tab.signIn(w.staffA);
+  const view = await tab.open('daily-notes');
+  const goalsOf = s => noteCard(tab, s).card().find(n => n.cls.includes('note-goals'));
+  const order = s => noteCard(tab, s).card().childNodes.map(n => n.cls.find(c => ['note-head', 'note-goals', 'note-rates', 'note-summary'].includes(c))).filter(Boolean);
+
+  assert.equal(words(goalsOf(leo)), 'Goals Math Review for my next quiz Art Plan my next portfolio piece');
+  assert.deepEqual(goalsOf(leo).findAll(n => n.tag === 'li').map(li => li.find(n => n.cls.includes('badge')).textContent), ['Math', 'Art']);
+  assert.equal(words(goalsOf(sofia)), 'Goals Skipped goals');
+  assert.equal(words(goalsOf(anh)), 'Goals No goals set');
+  assert.deepEqual(order(leo), ['note-head', 'note-goals', 'note-rates']);
+  assert.ok(view.find(n => n.tag === 'p' && n.textContent === 'Goals: 1 set · 1 skipped · 2 not answered'));
+
+  const c = noteCard(tab, leo);
+  assert.equal(c.comment().getAttribute('placeholder'), "How did today's goals go?");
+  const label = view.find(n => n.tag === 'label' && n.getAttribute('for') === 'dn-c-' + leo.id);
+  assert.equal(words(label), "Comment (optional) · reply to today's goals or anything else");
+
+  // A posted note's summary keeps the goals in the same place.
+  for (const l of PRD_ITEMS) await c.tap(l, 'Great');
+  c.type('Nice work on the quiz review.');
+  await tab.click(c.button('Post note'));
+  assert.deepEqual(order(leo), ['note-head', 'note-goals', 'note-summary']);
+  assert.equal(words(goalsOf(leo)), 'Goals Math Review for my next quiz Art Plan my next portfolio piece');
+});
+
+test(['DG-2', 'DN-5'], "a parent's note and Home card show the student's goals above the ratings when they were set, and nothing for a skipped day", async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students;
+  w.visit(leo, w.A); w.visit(sofia, w.A);
+  assert.equal((await w.t.as(leo).put('/api/notes/goals/today', { goals: [{ subject: 'science', text: 'Finish my lab write-up' }] })).status, 200);
+  assert.equal((await w.t.as(sofia).post('/api/notes/goals/today/skip')).status, 200);
+  for (const s of [leo, sofia]) assert.equal((await w.save(w.staffA, s, TODAY, { ratings: w.all(3), post: true })).status, 200);
+  const tab = notesTab(w.t);
+  await tab.signIn(w.fa.parent);
+
+  const notes = await tab.open('notes');
+  const cards = notes.findAll(n => n.tag === 'article');
+  const nameOf = a => a.childNodes[0].find(n => n.cls.includes('badge-accent')).textContent;
+  const leoCard = cards.find(a => nameOf(a) === 'Leo'), sofiaCard = cards.find(a => nameOf(a) === 'Sofia');
+  const goals = leoCard.find(n => n.cls.includes('note-goals'));
+  assert.equal(words(goals), "Leo's goals today Science Finish my lab write-up");
+  assert.equal(goals.find(n => n.tag === 'h3').textContent, "Leo's goals today");
+  const kids = leoCard.childNodes;
+  assert.ok(kids.indexOf(goals) < kids.findIndex(n => n.tag === 'ul' && n.cls.includes('list')), 'the goals come before the ratings');
+  assert.equal(sofiaCard.find(n => n.cls.includes('note-goals')), undefined, 'a skipped day shows nothing');
+
+  const home = await tab.card('notes-today');
+  const lis = home.findAll(n => n.tag === 'li' && n.parentNode.cls.includes('list'));
+  const leoLi = lis.find(li => li.find(n => n.tag === 'strong').textContent === 'Leo Garcia');
+  assert.equal(words(leoLi.find(n => n.cls.includes('note-goals'))), "Leo's goals today Science Finish my lab write-up");
+  const grow = leoLi.find(n => n.cls.includes('grow')).childNodes;
+  assert.ok(grow.findIndex(n => n.cls.includes('note-goals')) < grow.findIndex(n => n.cls.includes('note-summary')));
+  assert.equal(lis.find(li => li.find(n => n.tag === 'strong').textContent === 'Sofia Garcia').find(n => n.cls.includes('note-goals')), undefined);
+});
+
+test(['DG-1', 'DG-2', 'NF-7'], "a student's Today's goals screen: subject, example chips, up to three goals, save or skip", async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students;
+  const tab = notesTab(w.t);
+  await tab.signIn(leo);
+  const button = (box, label) => box.find(n => n.tag === 'button' && n.textContent === label);
+  const blocks = box => box.findAll(n => n.tag === 'fieldset');
+
+  // Before checking in: the message and no form.
+  let view = await tab.open('goals');
+  assert.match(words(view), /Check in first, then set today's goals\./);
+  assert.equal(view.find(n => n.tag === 'select' || n.tag === 'textarea'), undefined);
+  assert.equal(button(view, 'Save goals'), undefined);
+
+  w.visit(leo, w.A);
+  view = await tab.open('goals');
+  assert.equal(blocks(view).length, 1);
+  assert.equal(blocks(view)[0].find(n => n.tag === 'legend').textContent, 'Goal 1');
+  const subject = byId(view, 'goal-1-subject');
+  assert.equal(view.find(n => n.tag === 'label' && n.getAttribute('for') === 'goal-1-subject').childNodes[0].textContent, 'Subject');
+  assert.equal(view.find(n => n.tag === 'label' && n.getAttribute('for') === 'goal-1-text').textContent, 'What are you working on?');
+  assert.deepEqual(subject.findAll(n => n.tag === 'option').map(o => o.textContent), ['Choose a subject', ...SUBJECTS.map(s => s[1])]);
+  assert.ok(button(view, 'Skip today') && button(view, 'Save goals') && button(view, 'Add another goal'));
+  assert.equal(button(view, 'Remove'), undefined, "one goal can't be removed");
+  assert.equal(view.find(n => n.cls.includes('goal-examples')), undefined, 'examples follow the subject');
+
+  // Choosing Science offers its three examples; tapping one fills the text, which stays editable.
+  subject.value = 'science'; subject.dispatch('change');
+  const chips = view.find(n => n.cls.includes('goal-examples'));
+  assert.equal(chips.getAttribute('role'), 'group');
+  assert.deepEqual(chips.findAll(n => n.tag === 'button').map(b => b.textContent),
+    ['Finish my lab write-up', "Study this chapter's vocabulary", 'Watch the lesson video and answer the review questions']);
+  await tab.click(button(chips, 'Finish my lab write-up'));
+  const text = byId(view, 'goal-1-text');
+  assert.equal(text.value, 'Finish my lab write-up');
+  assert.equal(text.getAttribute('maxlength'), '280');
+  assert.equal(byId(view, 'goal-1-count').textContent, '22 of 280 characters');
+  assert.equal(text.getAttribute('aria-describedby'), 'goal-1-count');
+  text.value = 'Finish my lab write-up and the graph'; text.dispatch('input');
+  assert.equal(byId(view, 'goal-1-count').textContent, '36 of 280 characters');
+
+  // Up to three goals.
+  await tab.click(button(view, 'Add another goal'));
+  assert.equal(blocks(view).length, 2);
+  await tab.click(button(view, 'Add another goal'));
+  assert.equal(blocks(view).length, 3);
+  assert.equal(button(view, 'Add another goal'), undefined);
+  assert.match(words(view), /That makes 3 goals, the most for one day\./);
+  assert.deepEqual(view.findAll(n => n.tag === 'button' && n.textContent === 'Remove').map(b => b.getAttribute('aria-label')), ['Remove goal 1', 'Remove goal 2', 'Remove goal 3']);
+  const second = byId(view, 'goal-2-subject');
+  second.value = 'math'; second.dispatch('change');
+  const t2 = byId(view, 'goal-2-text');
+  t2.value = 'Quiz review'; t2.dispatch('input');
+  await tab.click(view.find(n => n.getAttribute('aria-label') === 'Remove goal 3'));
+  assert.equal(blocks(view).length, 2);
+  assert.ok(button(view, 'Add another goal'));
+  assert.equal(byId(view, 'goal-1-text').value, 'Finish my lab write-up and the graph', 'the goals kept are the ones not removed');
+  assert.equal(byId(view, 'goal-2-text').value, 'Quiz review');
+
+  await tab.click(button(view, 'Save goals'));
+  assert.deepEqual(goalRows(w, leo), [[TODAY, 1, 'science', 'Finish my lab write-up and the graph'], [TODAY, 2, 'math', 'Quiz review']]);
+  assert.deepEqual(lastToast(tab), ["Saved today's goals.", false]);
+  assert.equal(tab.hash(), '#/home');
+
+  // Opening it again edits the goals set; Skip is gone once they are set.
+  view = await tab.open('goals');
+  assert.equal(blocks(view).length, 2);
+  assert.equal(byId(view, 'goal-2-subject').find(o => o.getAttribute('selected') !== null).textContent, 'Math');
+  assert.equal(button(view, 'Skip today'), undefined);
+  await tab.click(view.find(n => n.getAttribute('aria-label') === 'Remove goal 1'));
+  assert.equal(byId(view, 'goal-1-text').value, 'Quiz review');
+  await tab.click(button(view, 'Save goals'));
+  assert.deepEqual(goalRows(w, leo), [[TODAY, 1, 'math', 'Quiz review']]);
+
+  // Sofia skips; a goal with no subject is refused with the reason.
+  w.visit(sofia, w.A);
+  await tab.signIn(sofia);
+  view = await tab.open('goals');
+  const st = byId(view, 'goal-1-text');
+  st.value = 'Something'; st.dispatch('input');
+  await tab.click(button(view, 'Save goals'));
+  assert.deepEqual(lastToast(tab), ['Choose a subject for goal 1.', true]);
+  assert.deepEqual(goalDays(w, sofia), []);
+  await tab.click(button(view, 'Skip today'));
+  assert.deepEqual(goalDays(w, sofia), [[TODAY, w.A.id, 'skipped']]);
+  assert.deepEqual(lastToast(tab), ['Skipped. You can still add goals from Home today.', false]);
+  assert.equal(tab.hash(), '#/home');
+  view = await tab.open('goals');
+  assert.equal(button(view, 'Skip today'), undefined, 'a skipped day can still be set, not skipped again');
+  assert.ok(button(view, 'Save goals'));
+});
+
+test(['DG-1', 'DG-2'], "a student's Home card asks for today's goals after a check-in, shows them once set, and says when the day was skipped", async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students;
+  const tab = notesTab(w.t);
+  await tab.signIn(leo);
+  const link = (box, label) => box.find(n => n.tag === 'a' && n.textContent === label);
+
+  assert.equal((await tab.card('notes-goals')).childNodes.length, 0, 'hidden on a day without a check-in');
+  w.visit(leo, w.A);
+  let box = await tab.card('notes-goals');
+  assert.equal(box.find(n => n.tag === 'h2').textContent, "Today's goals");
+  assert.match(words(box), /What are you working on today\?/);
+  assert.equal(link(box, 'Set goals').getAttribute('href'), '#/goals');
+  await tab.click(box.find(n => n.tag === 'button' && n.textContent === 'Skip today'));
+  assert.deepEqual(goalDays(w, leo), [[TODAY, w.A.id, 'skipped']]);
+  assert.match(words(box), /You skipped goals today\./);
+  assert.ok(link(box, 'Set goals'));
+  assert.equal(box.find(n => n.tag === 'button' && n.textContent === 'Skip today'), undefined);
+  assert.deepEqual(lastToast(tab), ["Skipped today's goals. You can still set them here today.", false]);
+
+  w.visit(sofia, w.A);
+  assert.equal((await w.t.as(sofia).put('/api/notes/goals/today', { goals: [{ subject: 'math', text: 'Review for my next quiz' }] })).status, 200);
+  await tab.signIn(sofia);
+  box = await tab.card('notes-goals');
+  assert.equal(words(box.find(n => n.cls.includes('note-goal-list'))), 'Math Review for my next quiz');
+  const edit = link(box, 'Edit');
+  assert.deepEqual([edit.getAttribute('href'), edit.getAttribute('aria-label')], ['#/goals', "Edit today's goals"]);
+  assert.doesNotMatch(words(box), /What are you working on/);
 });

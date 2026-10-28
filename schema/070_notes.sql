@@ -49,3 +49,25 @@ CREATE TABLE IF NOT EXISTS daily_note_ratings (
   rating      INTEGER CHECK (rating IN (1, 2, 3)), -- 1 Needs work, 2 Good, 3 Great (D-8); NULL = not rated yet (DN-4)
   PRIMARY KEY (note_id, item_id)
 );
+
+-- S-8 / D-50: a student's goals for one location-local day. No row = not answered yet.
+-- 'set' has 1-3 rows in daily_goals; 'skipped' has none. Only the student writes them,
+-- on that day, after a check-in at their home location (location_id). Subjects and
+-- example goals are fixed in code (src/modules/notes/goals.js).
+CREATE TABLE IF NOT EXISTS daily_goal_days (
+  student_id  INTEGER NOT NULL REFERENCES users(id),
+  local_date  TEXT NOT NULL,
+  location_id INTEGER NOT NULL REFERENCES locations(id),
+  status      TEXT NOT NULL CHECK (status IN ('set','skipped')),
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (student_id, local_date)
+);
+CREATE TABLE IF NOT EXISTS daily_goals (
+  student_id  INTEGER NOT NULL,
+  local_date  TEXT NOT NULL,
+  position    INTEGER NOT NULL CHECK (position BETWEEN 1 AND 3),
+  subject     TEXT NOT NULL CHECK (subject IN ('math','english','science','history','language','art','test_prep','other')),
+  text        TEXT NOT NULL,                   -- 1-280 characters
+  PRIMARY KEY (student_id, local_date, position),
+  FOREIGN KEY (student_id, local_date) REFERENCES daily_goal_days(student_id, local_date)
+);

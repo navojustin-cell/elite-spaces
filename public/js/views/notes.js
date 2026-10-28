@@ -1,9 +1,12 @@
-/* Daily notes (PRD 6, DN-1..DN-5).
-   Staff:   "Daily notes" - the day's attendance list; rate each item Needs work / Good / Great,
-            add an optional comment, Post. Unfinished notes can be saved for later.
-   Parents: "Notes" - posted notes by date for each student. Students don't see notes in v1 (D-2).
-   HQ:      "Note checklist" - add, rename, reorder and retire the rating items.
-   Home:    parents see today's note; staff see how many notes are left. */
+/* Daily notes (PRD 6, DN-1..DN-5) and daily goals (S-8, D-50, D-51).
+   Staff:    "Daily notes" - the day's attendance list; each card shows the student's goals for the day,
+             then rate each item Needs work / Good / Great, add an optional comment (where staff reply
+             to the goals), Post. Unfinished notes can be saved for later.
+   Parents:  "Notes" - posted notes by date for each student, with that day's goals when they were set.
+             Students don't see notes in v1 (D-2).
+   Students: "Today's goals" (#/goals, not in the nav) - up to 3 goals after checking in, or skip the day.
+   HQ:       "Note checklist" - add, rename, reorder and retire the rating items.
+   Home:     parents see today's note; staff see how many notes are left; students see today's goals. */
 (function () {
   'use strict';
   const { h } = App;
@@ -39,6 +42,16 @@
     .note-item-edit input { flex: 1 1 6rem; min-width: 0; min-height: 44px; padding: .55rem .7rem; border-radius: var(--radius-sm);
       border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; }
     article.card:focus { outline: 3px solid var(--focus); outline-offset: 2px; }
+    .note-goals { margin-top: .6rem; }
+    .note-goals-label { margin: 0 0 .3rem; font-size: .9rem; font-weight: 600; }
+    .note-goal-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .3rem; }
+    .note-goal-list li { overflow-wrap: anywhere; }
+    .note-goal-list .badge { margin-right: .4rem; }
+    .goal-block { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .75rem; margin: 0 0 .75rem; min-width: 0; }
+    .goal-block legend { font-weight: 700; padding: 0 .3rem; }
+    .goal-label { display: block; font-weight: 600; font-size: .9rem; margin-bottom: .3rem; }
+    .goal-examples { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .85rem; }
+    .goal-examples .btn { min-height: 44px; font-size: .9rem; white-space: normal; text-align: left; }
     @media (min-width: 700px) {
       .note-rate { grid-template-columns: minmax(10rem, 1fr) minmax(0, 1.7fr); align-items: center; gap: 1rem; }
     }
@@ -56,6 +69,13 @@
     (v.check_out_at ? App.fmtTime(v.check_in_at, tz) + '–' + App.fmtTime(v.check_out_at, tz) : 'since ' + App.fmtTime(v.check_in_at, tz));
   const ratingSummary = ratings => h('ul', { class: 'note-summary' }, ratings.map(r =>
     h('li', null, r.label + ': ', h('strong', null, WORDS[r.rating] || 'Not rated'))));
+  // A day's goals: a subject badge, then the student's own words (D-50).
+  const goalList = items => h('ul', { class: 'note-goal-list' }, items.map(g =>
+    h('li', null, h('span', { class: 'badge badge-accent' }, g.subject_label), g.text)));
+  // Parents see goals only when they were set; skipped or unanswered shows nothing (D-50).
+  const parentGoals = (name, items) => items && items.length
+    ? h('div', { class: 'note-goals' }, h('h3', { class: 'note-goals-label' }, first(name) + "'s goals today"), goalList(items))
+    : null;
 
   // ======================================================== staff: Daily notes
   // Unsaved edits per (location, date, student), so leaving the screen doesn't lose them.
@@ -123,11 +143,14 @@
 
       function drawProgress() {
         const posted = students.filter(s => s.status === 'posted').length, total = students.length, left = total - posted;
+        const goalCount = st => students.filter(s => s.goals.status === st).length;
         progress.replaceChildren(
           h('div', { class: 'row between' },
             h('div', null, h('div', { class: 'stat' }, posted + ' of ' + total), h('div', { class: 'stat-label' }, 'notes posted')),
             h('div', { class: left ? 'muted' : 'badge badge-ok' }, left ? left + ' still to write' : 'All done. Thank you!')),
-          h('progress', { class: 'note-progress', max: total, value: posted, 'aria-hidden': 'true' }));
+          h('progress', { class: 'note-progress', max: total, value: posted, 'aria-hidden': 'true' }),
+          h('p', { class: 'muted small', style: 'margin:.5rem 0 0' },
+            'Goals: ' + goalCount('set') + ' set · ' + goalCount('skipped') + ' skipped · ' + goalCount('none') + ' not answered'));
       }
       function drawList() {
         students.sort((a, b) => (a.status === 'posted') - (b.status === 'posted') || a.name.localeCompare(b.name));
@@ -155,7 +178,11 @@
           h('div', { class: 'grow' }, h('h2', { id: 'dn-name-' + s.id }, s.name),
             h('div', { class: 'muted small' }, s.visits.map(v => visitText(v, tz)).join('; '))),
           h('span', { class: statusClass }, statusText));
-        const art = h('article', { class: 'card', id: 'dn-' + s.id, tabindex: '-1', 'aria-labelledby': 'dn-name-' + s.id }, head);
+        // The student's goals sit between the visit line and the ratings, so staff write the note with them in view (D-51).
+        const g = s.goals;
+        const goals = h('div', { class: 'note-goals' }, h('h3', { class: 'note-goals-label' }, 'Goals'),
+          g.status === 'set' ? goalList(g.items) : h('span', { class: 'badge' }, g.status === 'skipped' ? 'Skipped goals' : 'No goals set'));
+        const art = h('article', { class: 'card', id: 'dn-' + s.id, tabindex: '-1', 'aria-labelledby': 'dn-name-' + s.id }, head, goals);
 
         // A posted note shows as a summary until someone chooses to edit it.
         if (posted && !open.has(s.id) && !unsaved.has(key)) {
@@ -211,7 +238,7 @@
             h('span', { class: 'note-rate-label', id: labelId }, r.label), h('div', { class: 'note-scale' }, btns));
         }));
 
-        const comment = h('textarea', { id: 'dn-c-' + s.id, maxlength: '2000', rows: '3', placeholder: 'Anything worth sharing with the family today?' });
+        const comment = h('textarea', { id: 'dn-c-' + s.id, maxlength: '2000', rows: '3', placeholder: "How did today's goals go?" });
         comment.value = ed.comment;
         comment.addEventListener('input', () => { ed.comment = comment.value; keep(); refresh(); });
 
@@ -250,7 +277,7 @@
           postBtn);
         art.append(rates,
           h('label', { class: 'field', for: 'dn-c-' + s.id, style: 'margin:.75rem 0 0' },
-            h('span', null, 'Comment ', h('span', { class: 'muted', style: 'font-weight:400' }, '(optional)')), comment),
+            h('span', null, 'Comment ', h('span', { class: 'muted', style: 'font-weight:400' }, "(optional) · reply to today's goals or anything else")), comment),
           actions, hint);
         refresh();
         return art;
@@ -273,6 +300,7 @@
         h('h2', { style: 'margin:0' }, App.fmtDate(n.local_date, { weekday: 'long', month: 'short', day: 'numeric' })),
         showName && h('span', { class: 'badge badge-accent' }, first(n.student_name))),
       h('p', { class: 'muted small', style: 'margin:.25rem 0 .5rem' }, [n.location_name, ...n.visits.map(v => visitText(v, tz))].join(' · ')),
+      parentGoals(n.student_name, n.goals),
       h('ul', { class: 'list' }, n.ratings.map(r => h('li', null, h('span', { class: 'grow' }, r.label),
         h('span', { class: BADGE[r.rating] || 'badge' }, r.word || 'Not rated')))),
       n.comment && h('div', null, h('div', { class: 'muted small', style: 'margin-top:.5rem' }, 'Comment from ' + first(n.posted_by_name || 'staff')),
@@ -420,7 +448,108 @@
     },
   });
 
+  // ======================================================== students: Today's goals (#/goals)
+  // Up to three goals for the day, each a subject, an example to start from and the student's own
+  // words. Only after a check-in that day at their home location (D-50); Skip only while not answered.
+  App.register({
+    id: 'goals', title: "Today's goals", icon: '🎯', roles: ['student'], order: 16, nav: false,
+    async render(el) {
+      const [meta, today] = await Promise.all([App.api.get('/api/notes/goals/subjects'), App.api.get('/api/notes/goals/today')]);
+      el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, "Today's goals"),
+        h('p', null, App.fmtDate(today.date, { weekday: 'long', month: 'long', day: 'numeric' })))));
+      if (!today.checked_in) {
+        el.append(h('div', { class: 'card empty' }, "Check in first, then set today's goals."));
+        return;
+      }
+      const subjects = new Map(meta.subjects.map(s => [s.id, s]));
+      const goals = today.status === 'set' ? today.goals.map(g => ({ subject: g.subject, text: g.text })) : [{ subject: '', text: '' }];
+      const blocks = h('div');
+      const more = h('div', { class: 'row', style: 'margin-bottom:.75rem' });
+      const focus = id => { const t = document.getElementById(id); if (t) t.focus(); };
+
+      function block(g, i) {
+        const n = i + 1, base = 'goal-' + n;
+        const select = h('select', { id: base + '-subject' }, h('option', { value: '' }, 'Choose a subject'),
+          meta.subjects.map(s => h('option', { value: s.id, selected: s.id === g.subject }, s.label)));
+        const text = h('textarea', { id: base + '-text', maxlength: String(meta.text_max), rows: '3', 'aria-describedby': base + '-count' });
+        text.value = g.text;
+        const count = h('div', { class: 'hint', id: base + '-count' });
+        const setCount = () => { count.textContent = text.value.length + ' of ' + meta.text_max + ' characters'; };
+        text.addEventListener('input', () => { g.text = text.value; setCount(); });
+        setCount();
+        // Tapping an example fills the text, which stays editable.
+        const examples = h('div');
+        const drawExamples = () => {
+          const s = subjects.get(g.subject);
+          examples.replaceChildren(...(s ? [
+            h('p', { class: 'goal-label', id: base + '-ex' }, 'Start from an example'),
+            h('div', { class: 'goal-examples', role: 'group', 'aria-labelledby': base + '-ex' }, s.examples.map(x =>
+              h('button', { type: 'button', class: 'btn', onclick: () => { g.text = x; text.value = x; setCount(); text.focus(); } }, x))),
+          ] : []));
+        };
+        select.addEventListener('change', () => { g.subject = select.value; drawExamples(); });
+        drawExamples();
+        return h('fieldset', { class: 'goal-block' }, h('legend', null, 'Goal ' + n),
+          h('label', { class: 'field', for: base + '-subject' }, h('span', null, 'Subject'), select),
+          examples,
+          h('div', { class: 'field' }, h('label', { class: 'goal-label', for: base + '-text' }, 'What are you working on?'), text, count),
+          goals.length > 1 && h('button', { type: 'button', class: 'btn', 'aria-label': 'Remove goal ' + n,
+            onclick: () => { goals.splice(i, 1); draw(); focus('goal-' + Math.min(n, goals.length) + '-subject'); } }, 'Remove'));
+      }
+      function draw() {
+        blocks.replaceChildren(...goals.map(block));
+        more.replaceChildren(goals.length < meta.max_goals
+          ? h('button', { type: 'button', class: 'btn', onclick: () => { goals.push({ subject: '', text: '' }); draw(); focus('goal-' + goals.length + '-subject'); } }, 'Add another goal')
+          : h('p', { class: 'muted small', style: 'margin:0' }, 'That makes ' + meta.max_goals + ' goals, the most for one day.'));
+      }
+      draw();
+
+      const save = h('button', { type: 'button', class: 'btn btn-primary' }, 'Save goals');
+      save.addEventListener('click', () => App.run(save, async () => {
+        await App.api.put('/api/notes/goals/today', { goals: goals.map(g => ({ subject: g.subject, text: g.text })) });
+        App.toast("Saved today's goals.");
+        App.go('home');
+      }));
+      const skip = today.status === 'none' && h('button', { type: 'button', class: 'btn' }, 'Skip today');
+      if (skip) skip.addEventListener('click', () => App.run(skip, async () => {
+        await App.api.post('/api/notes/goals/today/skip');
+        App.toast('Skipped. You can still add goals from Home today.');
+        App.go('home');
+      }));
+      el.append(h('div', { class: 'card' },
+        h('p', { class: 'muted', style: 'margin-top:0' }, 'Pick a subject, then say what you want to get done today. Staff see your goals when they write your daily note.'),
+        blocks, more, h('div', { class: 'row' }, save, skip)));
+    },
+  });
+
   // ======================================================== Home cards
+  // Students: today's goals, only on a day they checked in (D-50).
+  async function goalsCard(el) {
+    const g = await App.api.get('/api/notes/goals/today');
+    el.replaceChildren();
+    if (!g.checked_in) return;
+    const card = h('div', { class: 'card' }, h('h2', null, "Today's goals"));
+    if (g.status === 'set') {
+      card.append(goalList(g.goals),
+        h('div', { class: 'row', style: 'margin-top:.75rem' }, h('a', { class: 'btn', href: '#/goals', 'aria-label': "Edit today's goals" }, 'Edit')));
+    } else {
+      const setLink = h('a', { class: 'btn btn-primary', href: '#/goals' }, 'Set goals');
+      const skip = g.status === 'none' && h('button', { type: 'button', class: 'btn' }, 'Skip today');
+      // Skipping redraws this card in place ("You skipped goals today.") and keeps focus on it.
+      if (skip) skip.addEventListener('click', () => App.run(skip, async () => {
+        await App.api.post('/api/notes/goals/today/skip');
+        App.toast("Skipped today's goals. You can still set them here today.");
+        await goalsCard(el);
+        const again = el.querySelector('a');
+        if (again) again.focus();
+      }));
+      card.append(h('p', null, g.status === 'skipped' ? 'You skipped goals today.' : 'What are you working on today?'),
+        h('div', { class: 'row' }, setLink, skip));
+    }
+    el.append(card);
+  }
+  App.card({ id: 'notes-goals', roles: ['student'], order: 15, render: goalsCard });
+
   App.card({
     id: 'notes-today', roles: ['parent'], order: 30,
     async render(el) {
@@ -441,7 +570,7 @@
               h('div', { class: 'grow' }, h('strong', null, s.name), h('div', { class: 'muted small' }, why)));
           }
           return h('li', { style: 'align-items:flex-start' }, h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(s.name)),
-            h('div', { class: 'grow' }, h('strong', null, s.name), ratingSummary(n.ratings),
+            h('div', { class: 'grow' }, h('strong', null, s.name), parentGoals(s.name, n.goals), ratingSummary(n.ratings),
               n.comment && h('p', { class: 'note-comment' }, n.comment.length > 160 ? n.comment.slice(0, 157) + '…' : n.comment),
               h('div', { class: 'muted small', style: 'margin-top:.4rem' }, 'Posted by ' + n.posted_by_name + ' at ' + App.fmtTime(n.posted_at, n.timezone) +
                 (n.edited_at ? ' · Edited' : ''))));
