@@ -8,9 +8,11 @@
 //   GET /student/:id   anyone who may see the student (NF-1); staff+ also get the change history
 //   PUT /student/:id   staff+ at the student's location, HQ any: create or replace the record (MB-2).
 //                      Audited with before/after (NF-2). Unknown fields, such as payment details,
-//                      are refused and never stored (D-22). Pauses or restores enrollments (MB-5).
+//                      are refused and never stored (D-22). Pauses or restores whole schedules (MB-5,
+//                      D-16, D-16a); the weekly cap can't go below a held schedule's days a week (D-27).
+// Every read carries active_schedules, paused_schedules, held_days and the schedules themselves.
 // Job: expiry - reminders 14 and 3 days ahead, and pausing once the last day has passed.
-// Job: starts - on a membership's start date, sessions paused until then come back (D-32).
+// Job: starts - on a membership's start date, schedules paused until then come back (D-32).
 
 const express = require('express');
 const { DateTime } = require('luxon');
@@ -69,7 +71,7 @@ function summary(ctx, student) {
   const today = svc.todayAt(ctx, loc);
   return {
     student: { id: student.id, name: student.name }, location: loc, today,
-    membership: svc.describe(membershipOf(ctx, student.id), today), ...svc.slotCounts(ctx, student.id, today),
+    membership: svc.describe(membershipOf(ctx, student.id), today), ...svc.scheduleCounts(ctx, student.id, today),
   };
 }
 
@@ -104,7 +106,7 @@ module.exports = {
             // The account's state, decided the way People's roster decides it (accounts):
             // a parent approved the link, or the student set a password and waits for that, or not even that yet.
             account: ps.length ? 'active' : s.accepted ? 'awaiting_approval' : 'invited',
-            membership: svc.describe(membershipOf(ctx, s.id), today), ...svc.slotCounts(ctx, s.id, today) };
+            membership: svc.describe(membershipOf(ctx, s.id), today), ...svc.scheduleCounts(ctx, s.id, today) };
         });
       res.json({ location: loc, today, soon_days: svc.SOON_DAYS, students });
     });
@@ -126,13 +128,13 @@ module.exports = {
         const before = membershipOf(ctx, student.id);
         const changed = !before || FIELDS.some(k => before[k] !== input[k]);
         const today = svc.todayAt(ctx, svc.studentLocation(ctx, student.id));
-        // R1 / D-3: the weekly cap is a hard cap, so it can't be lowered below the
-        // weekly slots the student holds while those slots stay active.
-        const held = svc.heldSlots(ctx, student.id, today);
-        if (svc.isValid(input, today) && input.weekly_cap < held && (!before || input.weekly_cap < before.weekly_cap)) {
+        // D-27: the weekly cap is days a week, so it can't be lowered below the days a
+        // week of a schedule the student holds while that schedule stays active.
+        const held = svc.heldDays(ctx, student.id, today);
+        if (svc.isValid(input, today) && input.weekly_cap < held.days && (!before || input.weekly_cap < before.weekly_cap)) {
           const first = String(student.name).split(' ')[0];
-          throw conflict('weekly_cap_below_held', `${first} holds ${held} weekly session${held === 1 ? '' : 's'}, so the weekly limit can't go below ${held}. ` +
-            'A parent can drop sessions on Schedule first, then you can lower the limit.');
+          throw conflict('weekly_cap_below_held', `${first} holds ${held.name} (${held.days} day${held.days === 1 ? '' : 's'} a week), ` +
+            `so the weekly limit can't go below ${held.days}. A parent can switch to a schedule with fewer days, or drop it, first.`);
         }
         if (changed) {
           db.prepare(`INSERT INTO memberships (student_id, status, weekly_cap, start_date, expires_on, updated_by, updated_at)
@@ -148,24 +150,24 @@ module.exports = {
           });
         }
         // MB-5 / D-16: no longer valid -> pause; valid again -> restore or front of the waitlist,
-        // up to the weekly cap (D-3); slots over the cap stay paused. D-32: before its start
-        // date it isn't valid yet, so slots stay paused (or are paused) until that day.
-        let paused = 0, restored = { back: [], waitlisted: [], kept: [] };
+        // for each schedule whose days fit the weekly cap (D-16a); one over the cap stays paused.
+        // D-32: before its start date it isn't valid yet, so schedules stay paused (or are paused) until that day.
+        let paused = [], restored = { back: [], waitlisted: [], kept: [] };
         if (svc.isValid(after, today)) {
           restored = svc.restore(ctx, after, today, req.user.id);
           svc.notifyRestored(ctx, student, after, restored);
         } else {
           paused = svc.pause(ctx, student.id, today);
-          if (paused) {
+          if (paused.length) {
             svc.notifyPaused(ctx, student, after, paused, today);
             // L57: a last day already past: this is the family's one notice that it ended, so the
-            // daily job doesn't send a second one that leaves out the paused sessions.
+            // daily job doesn't send a second one that leaves out the paused schedules.
             if (after.status === 'active' && after.expires_on < today) svc.claim(ctx, after, 'expired');
           }
         }
-        // D-32: not started yet -> the daily job brings the sessions back on the start date.
+        // D-32: not started yet -> the daily job brings the schedules back on the start date.
         svc.markStart(ctx, after, today);
-        return { changed, paused, restored: restored.back.length, waitlisted: restored.waitlisted.length, kept_paused: restored.kept.length };
+        return { changed, paused: paused.length, restored: restored.back.length, waitlisted: restored.waitlisted.length, kept_paused: restored.kept.length };
       });
       res.json(Object.assign(summary(ctx, student), result));
     });

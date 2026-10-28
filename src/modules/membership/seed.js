@@ -20,7 +20,7 @@ module.exports = (ctx, demo) => {
     const when = new Date(m.expires_on + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
     db.prepare(`INSERT INTO notifications (user_id, kind, title, body, ref_type, ref_id, created_at, delivered_at)
       VALUES (?, 'membership_reminder', ?, ?, 'membership', ?, ?, ?)`).run(parent.id, `Isha's membership ends ${when}`,
-      `That's in 14 days. Renew with the front desk at ${loc.name} to keep Isha's weekly sessions.`, m.id, sent, sent);
+      `That's in 14 days. Renew with the front desk at ${loc.name} to keep Isha's schedule.`, m.id, sent, sent);
   }
 
   const daniel = student('Daniel Kim');
