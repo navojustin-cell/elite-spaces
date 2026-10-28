@@ -2,7 +2,7 @@
    Parents: "Hours" - each student's visits, hours and absences by week, month or
    term (AT-1, AT-2), and a PDF or CSV log for any date range (AT-3).
    Directors and HQ: "Reports" - visits, hours and absences filtered by location,
-   session and dates, with CSV and PDF downloads (AT-4). Staff don't get reports.
+   schedule and dates, with CSV and PDF downloads (AT-4). Staff don't get reports.
    Visit times always show in the location's own zone. */
 (function () {
   'use strict';
@@ -94,12 +94,32 @@
   const hoursState = { owner: null, studentId: null, period: 'week', date: null, from: null, to: null };
   const PERIODS = [['week', 'Week'], ['month', 'Month'], ['term', 'Term']];
 
+  // A missed-day Inbox item opens #/hours/missed/<noticeId> (D-53).
+  App.inboxLink('missed_day', n => 'hours/missed/' + n.ref_id);
+
   App.register({
     id: 'hours', title: 'Hours', icon: '⏱️', roles: ['parent'], order: 40,
-    async render(el) {
+    async render(el, params = []) {
       // Someone else signed in on this tab: start from this week and this month.
       if (hoursState.owner !== App.me.user.id) {
         Object.assign(hoursState, { owner: App.me.user.id, studentId: null, period: 'week', date: null, from: null, to: null });
+      }
+      // #/hours/missed/<id>: find the notice's student and date, then open that week
+      // in its place (replace, so Back doesn't come here again).
+      if (params[0] === 'missed') {
+        try {
+          const n = await App.api.get(`${API}/missed/${encodeURIComponent(params[1] || '')}`);
+          location.replace('#/hours/' + n.student_id + '/' + n.local_date);
+          return;
+        } catch (e) {
+          if (e.accountChanged) return;
+          App.toast('That notice isn\'t available.', 'error');
+          params = [];
+        }
+      }
+      // #/hours/<studentId>/<date>: that student's week holding the date.
+      if (params[0] && /^\d{4}-\d{2}-\d{2}$/.test(params[1] || '')) {
+        Object.assign(hoursState, { studentId: Number(params[0]), period: 'week', date: params[1] });
       }
       const { students } = await App.api.get(API + '/students');
       el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Hours'),
@@ -182,7 +202,9 @@
         return h('li', null,
           h('div', { class: 'grow' },
             h('div', null, h('strong', null, App.fmtDate(a.date)), ' · ', a.session_name),
-            h('div', { class: 'muted small' }, 'Scheduled ' + App.hhmm(a.start_time) + '–' + App.hhmm(a.end_time) + ' · no check-in')),
+            h('div', { class: 'muted small' }, 'Scheduled ' + App.hhmm(a.start_time) + '–' + App.hhmm(a.end_time) + ' · no check-in'),
+            // D-53: the parents got a missed-day notice for this date.
+            a.parents_notified ? h('div', { class: 'muted small' }, 'Parents notified') : ''),
           h('span', { class: 'badge badge-danger' }, 'Absent'));
       }
 
@@ -255,7 +277,7 @@
     async render(el) {
       const opts = await App.api.get(API + '/report/options');
       el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Attendance reports'),
-        h('p', null, 'Visits, hours and absences by location, session and dates.'))));
+        h('p', null, 'Visits, hours and absences by location, schedule and dates.'))));
       if (!opts.locations.length) {
         el.append(h('div', { class: 'card empty' }, 'There are no locations to report on yet.'));
         return;
@@ -296,7 +318,7 @@
         const options = repState.location === 'all'
           ? opts.locations.flatMap(l => l.sessions.map(s => sessionOption(s, l)))
           : locOf().sessions.map(s => sessionOption(s));
-        pickSession.replaceChildren(h('option', { value: '' }, 'All sessions'), ...options);
+        pickSession.replaceChildren(h('option', { value: '' }, 'All schedules'), ...options);
         pickSession.value = repState.session;
         if (pickSession.value !== String(repState.session)) { repState.session = ''; pickSession.value = ''; }
       };
@@ -328,7 +350,7 @@
 
       const results = h('section', { 'aria-busy': 'false', 'aria-label': 'Report' });
       const form = h('form', { class: 'card', onsubmit: e => { e.preventDefault(); draw(); } },
-        h('div', { class: 'att-filters' }, locationField, h('label', { class: 'field' }, h('span', null, 'Session'), pickSession)),
+        h('div', { class: 'att-filters' }, locationField, h('label', { class: 'field' }, h('span', null, 'Schedule'), pickSession)),
         range,
         h('button', { type: 'submit', class: 'btn btn-primary' }, 'Show report'));
       el.append(form, status, results);
@@ -350,7 +372,7 @@
         if (mine !== seq) return;
         results.setAttribute('aria-busy', 'false');
         const all = !rep.filters.location;
-        const where = (all ? 'All locations' : rep.filters.location.name) + ' · ' + (rep.filters.session ? rep.filters.session.label : 'All sessions');
+        const where = (all ? 'All locations' : rep.filters.location.name) + ' · ' + (rep.filters.session ? rep.filters.session.label : 'All schedules');
         const t = rep.totals;
         const file = ext => `${API}/report.${ext}?` + qs(filter);
         // App.run turns a button back on when it's done; a report gone out of date meanwhile turns it off again.

@@ -1,19 +1,24 @@
 'use strict';
-// Module: attendance - PRD 7. Attendance and hours export (AT-1..AT-4).
+// Module: attendance - PRD 7. Attendance and hours export (AT-1..AT-4), and the
+// missed-day notice (AT-5, S-12, D-53).
 //
 // Routes, mounted at /api/attendance:
 //   Family side: parents only, and only for students they are actively linked to (NF-1).
 //   GET /students                 linked students with this week's and month's totals, terms and range shortcuts
-//   GET /students/:id/history     ?period=week|month|term&date=YYYY-MM-DD   visits, absences and totals (AT-1, AT-2)
+//   GET /students/:id/history     ?period=week|month|term&date=YYYY-MM-DD   visits, absences and totals (AT-1, AT-2);
+//                                 each absence says whether parents got a missed-day notice for that date
 //   GET /students/:id/log         ?from&to   the same for a chosen date range (the export preview)
 //   GET /students/:id/log.csv     ?from&to   download as CSV (AT-3)
 //   GET /students/:id/log.pdf     ?from&to   download as PDF (AT-3)
+//   GET /missed/:id               a missed-day notice's { student_id, local_date, sessions }, so its Inbox item opens that week
 //   Operations side: directors for their own location, HQ for any one location or all (AT-4).
-//   Staff are not given reports.
-//   GET /report/options           the locations, sessions and range shortcuts the caller may report on
+//   Staff are not given reports. Reports call sessions schedules (D-41).
+//   GET /report/options           the locations, schedules and range shortcuts the caller may report on
 //   GET /report                   ?location=<id|all>&session=<id>&from&to   (`timing`: upcoming, current or past)
 //   GET /report.csv, /report.pdf  the same report as a download
-// No scheduled jobs: absences are computed on every read (D-15), never stored.
+// Absences are computed on every read (D-15), never stored. One scheduled job,
+// `missed-day`, tells each active parent once when a student's whole scheduled
+// day went by with no check-in (D-53).
 
 const express = require('express');
 const auth = require('../../auth');
@@ -137,7 +142,11 @@ module.exports = {
     r.get('/students/:id/history', (req, res) => {
       const s = ownStudent(ctx, req);
       const p = svc.period(ctx, s.location, String(req.query.period || 'week'), String(req.query.date || s.today), s.today);
-      res.json(Object.assign({ student: publicStudent(s), period: p }, svc.log(ctx, { studentId: s.id, from: p.from, to: p.to })));
+      const log = svc.log(ctx, { studentId: s.id, from: p.from, to: p.to });
+      // D-53: Hours marks an absence on a day the parents were sent a missed-day notice.
+      const told = svc.notifiedDates(ctx, s.id, p.from, p.to);
+      log.absences = log.absences.map(a => Object.assign(a, { parents_notified: told.has(a.date) }));
+      res.json(Object.assign({ student: publicStudent(s), period: p }, log));
     });
 
     r.get('/students/:id/log', (req, res) => {
@@ -155,6 +164,17 @@ module.exports = {
       const l = studentLog(ctx, req);
       const pdf = await files.familyPdf({ student: l.student, from: l.from, to: l.to, label: l.label, log: l.log, now: ctx.clock.now() });
       download(res, 'application/pdf', l.filename('pdf'), pdf);
+    });
+
+    // ---------- the missed-day notice (D-53): where its Inbox item opens ----------
+    // A parent's own linked student only (NF-1); a seed placeholder was never sent, so it isn't found.
+    r.get('/missed/:id', auth.requireRole('parent'), (req, res) => {
+      const n = ctx.db.prepare('SELECT student_id FROM missed_day_notices WHERE id = ?').get(Number(req.params.id));
+      if (!n) throw notFound('No such notice.');
+      if (!auth.linkedStudentIds(ctx, req.user.id).includes(n.student_id)) throw forbidden('You can only see your own students\' notices.');
+      const notice = svc.missedNotice(ctx, Number(req.params.id));
+      if (!notice) throw notFound('No such notice.');
+      res.json({ student_id: notice.student_id, local_date: notice.local_date, sessions: notice.sessions });
     });
 
     // ---------- operations side (AT-4) ----------
@@ -187,7 +207,7 @@ module.exports = {
       const rep = report(ctx, scope);
       download(res, 'text/csv; charset=utf-8', reportFilename(scope, 'csv'),
         files.csv(rep, { staff: true, range: { from: scope.from, to: scope.to },
-          who: { location: scope.location ? scope.location.name : 'All locations', session: scope.session ? scope.session.label : 'All sessions' } }));
+          who: { location: scope.location ? scope.location.name : 'All locations', session: scope.session ? scope.session.label : 'All schedules' } }));
     });
 
     r.get('/report.pdf', reportsOnly, async (req, res) => {
@@ -200,5 +220,5 @@ module.exports = {
 
     return r;
   },
-  jobs: [],
+  jobs: [{ name: 'missed-day', run: ctx => svc.runMissedDays(ctx) }],
 };

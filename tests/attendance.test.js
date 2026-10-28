@@ -107,8 +107,8 @@ function parseCsv(text) {
   return rows;
 }
 
-// One Irvine location with a Fall term and an afternoon Mon/Wed/Fri session
-// (1-4pm). One family whose student holds all three weekly slots since Mon Sep 28.
+// One Irvine location with a Fall term and an afternoon Mon/Wed/Fri schedule
+// (1-4pm). One family whose student has held the whole schedule (D-42) since Mon Sep 28.
 async function world({ term } = {}) {
   const t = await makeApp();
   const loc = t.fx.location({ name: 'Irvine', timezone: LA });
@@ -116,8 +116,7 @@ async function world({ term } = {}) {
   const pm = t.fx.session(loc, { term: fall, name: 'Afternoon Study', weekdays: '1,3,5', start: '13:00', end: '16:00' });
   const fam = t.fx.family(loc);
   const kid = rename(t, fam.student, 'Maya Johnson');
-  const slots = {};
-  for (const wd of [1, 3, 5]) slots[wd] = enrollSince(t, kid, pm, wd, at(LA, '2026-09-28', '08:00'));
+  const enr = enrollSince(t, kid, pm, 0, at(LA, '2026-09-28', '08:00'));
   // A visit to the afternoon session: visit('2026-10-12', '13:02', '15:58')
   const visit = (date, inAt, outAt, o = {}) => {
     const { checked_in_by = null, checked_out_by = null, flag_reason = null, ...extra } = o.extra || {};
@@ -130,7 +129,7 @@ async function world({ term } = {}) {
       .run(checked_in_by, checked_out_by, flag_reason, v.id);
     return v;
   };
-  return { t, loc, term: fall, pm, fam, kid, parent: fam.parent, slots, visit };
+  return { t, loc, term: fall, pm, fam, kid, parent: fam.parent, enr, visit };
 }
 
 function rename(t, u, name) {
@@ -145,8 +144,8 @@ function enrollSince(t, student, session, weekday, createdAt) {
 const closure = (t, loc, date) => t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(loc.id, date, 'Closed');
 // What a staff change to a membership leaves in the core tables at `when`: the
 // record rewritten, and an audit row with the record before and after (MB-2, NF-2).
-// The clock moves to `when` too, so the slot changes the membership module makes
-// in the same request (setSlots) are stamped at that instant in the status log (D-26).
+// The clock moves to `when` too, so the enrollment changes the membership module makes
+// in the same request (setStatus) are stamped at that instant in the status log (D-26).
 function staffSetsMembership(t, student, changes, when) {
   t.clock.set(when);
   const keep = m => ({ status: m.status, weekly_cap: m.weekly_cap, start_date: m.start_date, expires_on: m.expires_on });
@@ -157,8 +156,8 @@ function staffSetsMembership(t, student, changes, when) {
   t.db.prepare(`INSERT INTO audit_log (action, target_type, target_id, location_id, detail, at) VALUES ('membership.update', 'membership', ?, ?, ?, ?)`)
     .run(m.id, student.location_id, JSON.stringify({ student_id: student.id, before: keep(m), after }), when);
 }
-// MB-5: the membership module pauses a student's slots, or brings some back.
-const setSlots = (t, status, slots) => slots.forEach(e => t.db.prepare('UPDATE enrollments SET status = ? WHERE id = ?').run(status, e.id));
+// MB-5: the membership module pauses a student's schedule, or brings it back.
+const setStatus = (t, status, e) => t.db.prepare('UPDATE enrollments SET status = ? WHERE id = ?').run(status, e.id);
 const pick = (rows, keys) => rows.map(r => Object.fromEntries(keys.map(k => [k, r[k]])));
 
 // ---------------------------------------------------------------- AT-1
@@ -348,7 +347,7 @@ test(['AT-2', 'AT-3', 'AT-4'], 'a staff check-in with no session that covers an 
 test(['AT-2'], 'another visit clears an absence only if it overlaps the session at that location: a check-in with no session, or (R2) a visit for another enrolled session that runs into it', async () => {
   const w = await world();
   const lunch = w.t.fx.session(w.loc, { term: w.term, name: 'Lunch Club', weekdays: '1', start: '12:00', end: '13:30' });
-  enrollSince(w.t, w.kid, lunch, 1, at(LA, '2026-09-28', '08:00'));
+  enrollSince(w.t, w.kid, lunch, 0, at(LA, '2026-09-28', '08:00'));
   const arcadia = w.t.fx.location({ name: 'Arcadia', lat: 34.14, lng: -118.03 });
   w.visit('2026-10-05', '12:00', '16:00', { session: null, location: arcadia }); // at another location
   w.visit('2026-10-07', '16:00', '17:00', { session: null });  // came just as the session ended
@@ -376,35 +375,34 @@ test(['AT-2'], 'absences count only sessions that have ended, and only after the
   assert.deepEqual((await w.t.as(w.parent).get(url('2026-09-30'))).body.absences.map(a => a.date), ['2026-09-28', '2026-09-30', '2026-10-02']);
 });
 
-test(['AT-2'], 'absences stop at the end of the term and at the day a slot was dropped', async () => {
+test(['AT-2'], 'absences stop at the end of the term and when the schedule was dropped', async () => {
   const w = await world({ term: { name: 'Short term', start: '2026-08-17', end: '2026-10-07' } });
   const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=week&date=2026-10-07`);
   assert.deepEqual(r.body.absences.map(a => a.date), ['2026-10-05', '2026-10-07']);
 
   const w2 = await world();
-  w2.t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(at(LA, '2026-10-06', '12:00'), w2.slots[3].id);
+  w2.t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(at(LA, '2026-10-06', '12:00'), w2.enr.id);
   const r2 = await w2.t.as(w2.parent).get(`${A}/students/${w2.kid.id}/history?period=week&date=2026-10-07`);
-  assert.deepEqual(r2.body.absences.map(a => a.date), ['2026-10-05', '2026-10-09']);
+  assert.deepEqual(r2.body.absences.map(a => a.date), ['2026-10-05']);
 });
 
 test(['AT-2'], 'absences around an expired membership (D-15, D-16): misses before it lapsed still count; the paused weeks never do, even after renewal', async () => {
   const w = await world();
   const { t, kid } = w;
-  const all = Object.values(w.slots);
   t.fx.membership(kid, { expires: '2026-10-02' });   // the last valid day is Fri Oct 2
   w.visit('2026-09-30', '13:00', '16:00');
-  // Just after midnight the expiry job pauses all three slots.
+  // Just after midnight the expiry job pauses the schedule.
   t.clock.set(at(LA, '2026-10-03', '00:05'));
-  setSlots(t, 'paused', all);
+  setStatus(t, 'paused', w.enr);
   const url = `${A}/students/${kid.id}/log?from=2026-09-28&to=2026-10-16`;
   t.clock.set(at(LA, '2026-10-08', '18:00'));
   const paused = await t.as(w.parent).get(url);
   assert.deepEqual(paused.body.absences.map(a => a.date), ['2026-09-28', '2026-10-02']);
   assert.equal(paused.body.totals.absences, 2);
 
-  // Renewed Mon Oct 12 at 9am: the slots come back, and Maya comes that afternoon.
+  // Renewed Mon Oct 12 at 9am: the schedule comes back, and Maya comes that afternoon.
   staffSetsMembership(t, kid, { expires_on: '2027-06-30' }, at(LA, '2026-10-12', '09:00'));
-  setSlots(t, 'active', all);
+  setStatus(t, 'active', w.enr);
   w.visit('2026-10-12', '13:00', '16:00');
   t.clock.set(at(LA, '2026-10-16', '17:00'));
   const back = await t.as(w.parent).get(url);
@@ -414,71 +412,70 @@ test(['AT-2'], 'absences around an expired membership (D-15, D-16): misses befor
   assert.deepEqual(week.body.absences, []);
 });
 
-test(['AT-2'], 'absences around a membership set inactive (D-15, D-16): count up to that moment; a slot still paused after reactivation adds none', async () => {
+test(['AT-2'], 'absences around a membership set inactive (D-15, D-16): count up to that moment; a schedule still paused after reactivation adds none', async () => {
   const w = await world();
   const { t, kid } = w;
   w.visit('2026-09-30', '13:00', '16:00');
   // Staff set it inactive on Wed Oct 7 at 2pm, in the middle of that afternoon's session.
-  // That session began while the slot was active, so it counts like the ones before (D-26).
+  // That session began while the schedule was active, so it counts like the ones before (D-26).
   staffSetsMembership(t, kid, { status: 'inactive' }, at(LA, '2026-10-07', '14:00'));
-  setSlots(t, 'paused', Object.values(w.slots));
+  setStatus(t, 'paused', w.enr);
   const url = `${A}/students/${kid.id}/log?from=2026-09-28&to=2026-10-16`;
   t.clock.set(at(LA, '2026-10-08', '12:00'));
   assert.deepEqual((await t.as(w.parent).get(url)).body.absences.map(a => a.date), ['2026-09-28', '2026-10-02', '2026-10-05', '2026-10-07']);
 
-  // Active again Fri Oct 9 at 8am with a weekly limit of 2: Monday and Wednesday
-  // come back; Friday stays paused (over the limit), so its Oct 9 and Oct 16 are not absences.
+  // Active again Fri Oct 9 at 8am with a weekly limit of 2: the schedule meets 3 days a
+  // week, so it stays paused (D-16a), and none of its dates after the pause are absences.
   staffSetsMembership(t, kid, { status: 'active', weekly_cap: 2 }, at(LA, '2026-10-09', '08:00'));
-  setSlots(t, 'active', [w.slots[1], w.slots[3]]);
   t.clock.set(at(LA, '2026-10-16', '17:00'));
   const r = await t.as(w.parent).get(url);
   assert.deepEqual(r.body.absences.map(a => [a.date, a.session_name]), [['2026-09-28', 'Afternoon Study'], ['2026-10-02', 'Afternoon Study'],
-    ['2026-10-05', 'Afternoon Study'], ['2026-10-07', 'Afternoon Study'], ['2026-10-12', 'Afternoon Study'], ['2026-10-14', 'Afternoon Study']]);
-  assert.equal(r.body.totals.absences, 6);
+    ['2026-10-05', 'Afternoon Study'], ['2026-10-07', 'Afternoon Study']]);
+  assert.equal(r.body.totals.absences, 4);
 });
 
-test(['AT-2'], 'a slot kept paused over the weekly limit adds no absences until it comes back, as the status log records it (D-16a, D-26)', async () => {
+test(['AT-2'], 'a schedule kept paused over the weekly limit adds no absences until it comes back, as the status log records it (D-16a, D-26)', async () => {
   const w = await world();
   const { t, kid } = w;
   // Inactive Wed Oct 7 at 2pm. Active again Fri Oct 9 at 8am with a weekly limit of 2:
-  // Monday and Wednesday come back, Friday is kept paused.
+  // the schedule meets 3 days a week, so it is kept paused.
   staffSetsMembership(t, kid, { status: 'inactive' }, at(LA, '2026-10-07', '14:00'));
-  setSlots(t, 'paused', Object.values(w.slots));
+  setStatus(t, 'paused', w.enr);
   staffSetsMembership(t, kid, { status: 'active', weekly_cap: 2 }, at(LA, '2026-10-09', '08:00'));
-  setSlots(t, 'active', [w.slots[1], w.slots[3]]);
-  // Tue Oct 13 at 9am the limit goes back to 3, and Friday comes back.
+  // Tue Oct 13 at 9am the limit goes back to 3, and the schedule comes back.
   staffSetsMembership(t, kid, { weekly_cap: 3 }, at(LA, '2026-10-13', '09:00'));
-  setSlots(t, 'active', [w.slots[5]]);
+  setStatus(t, 'active', w.enr);
   t.clock.set(at(LA, '2026-10-16', '17:00'));
   const r = await t.as(w.parent).get(`${A}/students/${kid.id}/log?from=2026-10-05&to=2026-10-16`);
-  // Wed Oct 7 began before the pause, so it was missed. Fri Oct 9 was on hold, not missed,
-  // though the membership was valid that day. Fri Oct 16 was missed.
-  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-10-05', '2026-10-07', '2026-10-12', '2026-10-14', '2026-10-16']);
-  assert.equal(r.body.totals.absences, 5);
-  // The director's report counts the same weeks.
+  // Wed Oct 7 began before the pause, so it was missed. Fri Oct 9 and Mon Oct 12 were on
+  // hold, not missed, though the membership was valid those days. Oct 14 and 16 were missed.
+  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-10-05', '2026-10-07', '2026-10-14', '2026-10-16']);
+  assert.equal(r.body.totals.absences, 4);
+  // The director's report counts the same dates.
   const rep = await t.as(t.fx.director(w.loc)).get(`${A}/report?from=2026-10-05&to=2026-10-16`);
-  assert.deepEqual(rep.body.absences.map(a => a.date), ['2026-10-05', '2026-10-07', '2026-10-12', '2026-10-14', '2026-10-16']);
+  assert.deepEqual(rep.body.absences.map(a => a.date), ['2026-10-05', '2026-10-07', '2026-10-14', '2026-10-16']);
 });
 
-test(['AT-2'], 'a slot paused with nothing in the status log (data from before the log) stops counting when the membership last lapsed', async () => {
+test(['AT-2'], 'a schedule paused with nothing in the status log (data from before the log) stops counting when the membership last lapsed', async () => {
   const w = await world();
   const { t } = w;
   const fam = t.fx.family(w.loc);
   const leo = rename(t, fam.student, 'Leo Garcia');
   // Imported already paused, so no status change was ever logged for it.
-  const mon = t.fx.enroll(leo, w.pm, 1, { status: 'paused' });
-  t.db.prepare('UPDATE enrollments SET created_at = ? WHERE id = ?').run(at(LA, '2026-09-28', '08:00'), mon.id);
+  const held = t.fx.enroll(leo, w.pm, 0, { status: 'paused' });
+  t.db.prepare('UPDATE enrollments SET created_at = ? WHERE id = ?').run(at(LA, '2026-09-28', '08:00'), held.id);
   staffSetsMembership(t, leo, { status: 'inactive' }, at(LA, '2026-10-07', '14:00'));
-  staffSetsMembership(t, leo, { status: 'active' }, at(LA, '2026-10-09', '08:00')); // valid again; the slot stays paused
+  staffSetsMembership(t, leo, { status: 'active' }, at(LA, '2026-10-09', '08:00')); // valid again; the schedule stays paused
   t.clock.set(at(LA, '2026-10-16', '17:00'));
   const r = await t.as(fam.parent).get(`${A}/students/${leo.id}/log?from=2026-09-28&to=2026-10-16`);
-  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-09-28', '2026-10-05']);
+  // Wed Oct 7 began at 1pm, before the 2pm lapse, so it is still owed.
+  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-09-28', '2026-09-30', '2026-10-02', '2026-10-05', '2026-10-07']);
 });
 
-test(['AT-2'], 'a slot with nothing in the status log that came back after a lapse: the membership\'s history alone says which weeks were paused, each judged when it began (D-16, D-26)', async () => {
+test(['AT-2'], 'a schedule with nothing in the status log that came back after a lapse: the membership\'s history alone says which weeks were paused, each judged when it began (D-16, D-26)', async () => {
   const w = await world();
   const { t, kid } = w;
-  // Paused and restored before the status log existed, so the slots read active throughout.
+  // Paused and restored before the status log existed, so the enrollment reads active throughout.
   // Inactive Wed Oct 7 at 2pm and active again Mon Oct 12 at 2pm, both partway through a session:
   // Wednesday began while valid, so it's missed; Monday began while not valid, so it isn't.
   staffSetsMembership(t, kid, { status: 'inactive' }, at(LA, '2026-10-07', '14:00'));
@@ -490,17 +487,16 @@ test(['AT-2'], 'a slot with nothing in the status log that came back after a lap
 });
 
 // D-32: a membership is not active before its start date, so nothing before it is missed.
-test(['AT-2'], 'a membership renewed on Oct 14 to start Mon Nov 2: no absences before Nov 2, even for slots left active, and the weeks from Nov 2 count (D-32)', async () => {
+test(['AT-2'], 'a membership renewed on Oct 14 to start Mon Nov 2: no absences before Nov 2, even for a schedule left active, and the dates from Nov 2 count (D-32)', async () => {
   const w = await world();
   const { t, kid } = w;
-  const all = Object.values(w.slots);
   t.fx.membership(kid, { expires: '2026-10-05' }); // the last valid day is Mon Oct 5
   t.clock.set(at(LA, '2026-10-06', '00:05'));
-  setSlots(t, 'paused', all);
-  // Wed Oct 14 at 10am staff renew it from Mon Nov 2; the slots read active from then on
-  // (as a save before this rule left them), though the membership hasn't started.
+  setStatus(t, 'paused', w.enr);
+  // Wed Oct 14 at 10am staff renew it from Mon Nov 2; the schedule reads active from then on
+  // (as a save before this rule left it), though the membership hasn't started.
   staffSetsMembership(t, kid, { start_date: '2026-11-02', expires_on: '2027-06-30' }, at(LA, '2026-10-14', '10:00'));
-  setSlots(t, 'active', all);
+  setStatus(t, 'active', w.enr);
   t.clock.set(at(LA, '2026-11-06', '17:00'));
   const url = `${A}/students/${kid.id}/log?from=2026-09-28&to=2026-11-06`;
   const r = await t.as(w.parent).get(url);
@@ -510,7 +506,7 @@ test(['AT-2'], 'a membership renewed on Oct 14 to start Mon Nov 2: no absences b
   assert.deepEqual(rep.body.absences, []);
 });
 
-test(['AT-2'], 'a membership set up with a start date after the slots were made counts no absences before that day, and counts the start date itself (D-32)', async () => {
+test(['AT-2'], 'a membership set up with a start date after the schedule was chosen counts no absences before that day, and counts the start date itself (D-32)', async () => {
   const w = await world();
   const { t, kid } = w;
   t.fx.membership(kid, { start: '2026-10-12', expires: '2027-06-30' }); // no change logged: the record alone says when it starts
@@ -532,13 +528,13 @@ test(['AT-2'], 'a start date moved ahead and then back: only the days it was rea
   assert.deepEqual(r.body.absences.map(a => a.date), ['2026-09-28', '2026-09-30', '2026-10-02', '2026-10-12', '2026-10-14', '2026-10-16']);
 });
 
-// D-26: the enrollment schedule judges each week by the slot's state when it began,
+// D-26: the enrollment schedule judges each date by the enrollment's state when it began,
 // so a session that was under way when the slot was paused is absent if missed.
 test(['AT-2', 'AT-3', 'AT-4'], 'a membership set inactive at 2pm during a 1-4pm session she missed: that day is absent once the session ends, in history, files and reports (D-15, D-26)', async () => {
   const w = await world();
   const { t, kid } = w;
   staffSetsMembership(t, kid, { status: 'inactive' }, at(LA, '2026-10-07', '14:00'));
-  setSlots(t, 'paused', Object.values(w.slots));
+  setStatus(t, 'paused', w.enr);
   const p = t.as(w.parent), d = t.as(t.fx.director(w.loc));
   const week = `${A}/students/${kid.id}/history?period=week&date=2026-10-07`;
   const q = 'from=2026-10-05&to=2026-10-09';
@@ -565,13 +561,13 @@ test(['AT-2', 'AT-3', 'AT-4'], 'a membership set inactive at 2pm during a 1-4pm 
   assert.deepEqual(rep.body.by_student.map(s => [s.student_name, s.visits, s.absences]), [['Maya Johnson', 0, 2]]);
 });
 
-// A drop is different: the slot ends then, and the schedule shows no week it didn't last through.
-test(['AT-2'], 'a slot dropped at 2pm during a 1-4pm session owes no absence for that day', async () => {
+// A drop is different: the enrollment ends then, and the schedule shows no date it didn't last through.
+test(['AT-2'], 'a schedule dropped at 2pm during a 1-4pm session owes no absence for that day or after', async () => {
   const w = await world();
-  w.t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(at(LA, '2026-10-07', '14:00'), w.slots[3].id);
+  w.t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(at(LA, '2026-10-07', '14:00'), w.enr.id);
   const r = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=week&date=2026-10-07`);
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-10-05', '2026-10-09']);
+  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-10-05']);
 });
 
 test(['AT-2', 'NF-1'], 'the Hours list shows each linked student with this week\'s and this month\'s totals and range shortcuts', async () => {
@@ -673,7 +669,7 @@ test(['AT-3', 'AT-4'], 'PDFs print names outside Windows-1252 (Vietnamese, Polis
   assert.deepEqual(pdfGlyphs(rep.body).filter(g => [...g].length !== 1), []);
   const rtext = pdfText(rep.body);
   for (const want of [
-    'Location: Łódź Study Hall', 'Session: Ελληνικά и Русский · Mon/Wed/Fri 1:00 PM–4:00 PM',
+    'Location: Łódź Study Hall', 'Schedule: Ελληνικά и Русский · Mon/Wed/Fri 1:00 PM–4:00 PM',
     'Nguyễn Thị Ánh 3 7.93 1',
     'Fri, Oct 9, 2026 Nguyễn Thị Ánh Ελληνικά и Русский 1:15 PM 3:15 PM 2h 0m By staff (Zoë Šťastná)',
     'Wed, Oct 7, 2026 Nguyễn Thị Ánh Ελληνικά и Русский 1:00 PM – 4:00 PM',
@@ -751,8 +747,8 @@ test(['AT-3', 'NF-1'], 'an export holds only that student: a sibling\'s and anot
   const other = w.t.fx.family(w.loc);
   const sib = w.t.fx.user('student', { location: w.loc });
   w.t.fx.link(w.parent, sib);
-  // The sibling and the other family's student also hold the Wednesday afternoon slot, and also missed Wed Oct 7.
-  for (const s of [other.student, sib]) enrollSince(w.t, s, w.pm, 3, at(LA, '2026-09-28', '08:00'));
+  // The sibling and the other family's student also hold the afternoon schedule, and also missed Oct 5, 7 and 9.
+  for (const s of [other.student, sib]) enrollSince(w.t, s, w.pm, 0, at(LA, '2026-09-28', '08:00'));
   w.visit('2026-10-12', '13:00', '16:00');
   w.visit('2026-10-12', '13:05', '16:00', { student: other.student });
   w.visit('2026-10-12', '13:10', '16:00', { student: sib });
@@ -783,20 +779,21 @@ test(['AT-3', 'NF-1'], 'an export holds only that student: a sibling\'s and anot
 
 // ---------------------------------------------------------------- AT-4
 
-// Irvine: afternoon Mon/Wed/Fri (Maya) and Morning Focus Tue 9:30-12 (Ben).
+// Irvine: Afternoon Study Mon/Wed/Fri (Maya) and Morning Focus Tue 9:30-12 (Ben).
+// Arcadia: Arcadia Study Mon/Wed (Zoe).
 // Arcadia: Zoe, whose Mon Oct 5 visit and Wed Oct 7 absence must never show in Irvine's report.
 async function reportWorld() {
   const w = await world();
   const t = w.t;
-  const am = t.fx.session(w.loc, { term: w.term, name: 'Morning Focus', weekdays: '2,4', start: '09:30', end: '12:00' });
+  const am = t.fx.session(w.loc, { term: w.term, name: 'Morning Focus', weekdays: '2', start: '09:30', end: '12:00' });
   const ben = rename(t, t.fx.family(w.loc).student, 'Ben Cole');
-  enrollSince(t, ben, am, 2, at(LA, '2026-09-28', '08:00'));
+  enrollSince(t, ben, am, 0, at(LA, '2026-09-28', '08:00'));
   const staff = rename(t, t.fx.staff(w.loc), 'Chris Ortiz');
   const director = t.fx.director(w.loc);
   const arcadia = t.fx.location({ name: 'Arcadia', lat: 34.14, lng: -118.03 });
-  const arcSession = t.fx.session(arcadia, { name: 'Arcadia Study' });
+  const arcSession = t.fx.session(arcadia, { name: 'Arcadia Study', weekdays: '1,3' });
   const zoe = rename(t, t.fx.family(arcadia).student, 'Zoe Park');
-  enrollSince(t, zoe, arcSession, 3, at(LA, '2026-09-28', '08:00'));
+  enrollSince(t, zoe, arcSession, 0, at(LA, '2026-09-28', '08:00'));
   w.visit('2026-10-05', '13:00', '16:00');
   w.visit('2026-10-07', '13:00', '16:00', { extra: { checkout_method: 'auto', flagged: 1, flag_reason: 'Did not scan out' } });
   w.visit('2026-10-06', '09:30', '12:00', { student: ben, session: am, extra: { checkin_method: 'staff', checked_in_by: staff.id, checkout_method: 'staff', checked_out_by: staff.id } });
@@ -832,7 +829,7 @@ test(['AT-4'], 'filtering by session narrows visits, absences and totals to that
   const w = await reportWorld();
   const r = await w.t.as(w.director).get(`${A}/report?location=${w.loc.id}&session=${w.am.id}&from=2026-10-05&to=2026-10-09`);
   assert.equal(r.status, 200);
-  assert.equal(r.body.filters.session.label, 'Morning Focus · Tue/Thu 9:30 AM–12:00 PM');
+  assert.equal(r.body.filters.session.label, 'Morning Focus · Tue 9:30 AM–12:00 PM');
   assert.deepEqual(r.body.visits.map(v => v.student_name), ['Ben Cole']);
   assert.deepEqual(r.body.absences, []);
   assert.deepEqual([r.body.totals.visits, r.body.totals.minutes, r.body.totals.absences], [1, 150, 0]);
@@ -848,7 +845,7 @@ test(['AT-4'], 'a session report includes staff check-ins with no session that c
   const w = await reportWorld();
   const { t } = w;
   const ava = rename(t, t.fx.family(w.loc).student, 'Ava Diaz');
-  enrollSince(t, ava, w.pm, 3, at(LA, '2026-09-28', '08:00')); // Wednesdays; never came
+  enrollSince(t, ava, w.pm, 0, at(LA, '2026-09-28', '08:00')); // the afternoon schedule; never came
   closure(t, w.loc, '2026-10-02');
   const byStaff = { checkin_method: 'staff', checked_in_by: w.staff.id, checkout_method: 'staff', checked_out_by: w.staff.id };
   const noSession = (student, date, inAt, outAt, location = w.loc) => w.visit(date, inAt, outAt, { student, location, session: null, extra: byStaff });
@@ -870,23 +867,25 @@ test(['AT-4'], 'a session report includes staff check-ins with no session that c
     const r = await t.as(w[who]).get(url);
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.visits.map(v => [v.date, v.student_name, v.session_name, v.minutes, v.checkout_method]), want, who);
-    assert.deepEqual(r.body.absences.map(a => [a.date, a.student_name]), [['2026-10-07', 'Ava Diaz']], who);
-    assert.deepEqual(r.body.totals, { visits: 3, minutes: 600, hours: 10, absences: 1, students: 2, needs_review: 1 }, who);
+    assert.deepEqual(r.body.absences.map(a => [a.date, a.student_name]), [['2026-10-05', 'Ava Diaz'], ['2026-10-07', 'Ava Diaz'], ['2026-10-09', 'Ava Diaz']], who);
+    assert.deepEqual(r.body.totals, { visits: 3, minutes: 600, hours: 10, absences: 3, students: 2, needs_review: 1 }, who);
     assert.deepEqual(r.body.by_student.map(s => [s.student_name, s.visits, s.minutes, s.absences]),
-      [['Ava Diaz', 0, 0, 1], ['Maya Johnson', 3, 600, 0]], who);
+      [['Ava Diaz', 0, 0, 3], ['Maya Johnson', 3, 600, 0]], who);
   }
 
   const csv = parseCsv((await t.as(w.director).get(`${A}/report.csv?session=${w.pm.id}&${q}`)).body);
   assert.deepEqual(csv.filter(x => x[0] !== 'record').map(x => [x[0], x[1], x[2], x[4], x[7], x[11]]), [
     ['visit', '2026-10-05', 'Maya Johnson', 'Afternoon Study', '180', ''],
+    ['absent', '2026-10-05', 'Ava Diaz', 'Afternoon Study', '', ''],
     ['visit', '2026-10-07', 'Maya Johnson', 'Afternoon Study', '180', ''],
     ['absent', '2026-10-07', 'Ava Diaz', 'Afternoon Study', '', ''],
     ['visit', '2026-10-09', 'Maya Johnson', '', '240', 'Chris Ortiz'],
+    ['absent', '2026-10-09', 'Ava Diaz', 'Afternoon Study', '', ''],
     ['total', '2026-10-02 to 2026-10-09', '', 'Afternoon Study · Mon/Wed/Fri 1:00 PM–4:00 PM', '600', ''],
   ]);
 
   const pdf = pdfText((await t.as(w.director).get(`${A}/report.pdf?session=${w.pm.id}&${q}`)).body);
-  for (const want of ['3 Visits 10.00 Total hours · 10h 0m 2 Students 1 Absences 1 Needs review', 'Ava Diaz 0 0.00 1', 'Maya Johnson 3 10.00 0',
+  for (const want of ['3 Visits 10.00 Total hours · 10h 0m 2 Students 3 Absences 1 Needs review', 'Ava Diaz 0 0.00 3', 'Maya Johnson 3 10.00 0',
     'Fri, Oct 9, 2026 Maya Johnson No session 12:30 PM 4:30 PM 4h 0m By staff (Chris Ortiz)']) assert.ok(pdf.includes(want), `missing "${want}" in: ${pdf}`);
   assert.ok(!pdf.includes('Ben Cole') && !pdf.includes('Zoe Park'), pdf);
 
@@ -898,12 +897,13 @@ test(['AT-4'], 'a session report includes staff check-ins with no session that c
 // SC-3: a closure is one location's. Arcadia closing Fri Oct 9 leaves Irvine's Friday
 // an ordinary day: Maya's missed afternoon there is still an absence, and Ben's staff
 // check-in with no session that afternoon still counts for Irvine's session (D-15a).
-// At Arcadia the closure holds: Zoe's Friday slot isn't missed and her check-in covers nothing.
+// At Arcadia the closure holds: Zoe's Friday schedule isn't missed and her check-in covers nothing.
 test(['AT-2', 'AT-3', 'AT-4'], 'a closure at one location leaves another location\'s day alone: its absences, files and session reports still count that date', async () => {
   const w = await reportWorld();
   const { t } = w;
   closure(t, w.arcadia, '2026-10-09');
-  enrollSince(t, w.zoe, w.arcSession, 5, at(LA, '2026-09-28', '08:00')); // Zoe holds Arcadia's Friday too
+  const fridays = t.fx.session(w.arcadia, { name: 'Arcadia Fridays', weekdays: '5' });
+  enrollSince(t, w.zoe, fridays, 0, at(LA, '2026-09-28', '08:00')); // Zoe holds Arcadia's Friday schedule too
   const arcStaff = t.fx.staff(w.arcadia);
   w.visit('2026-10-09', '13:00', '16:00', { student: w.ben, session: null,
     extra: { checkin_method: 'staff', checked_in_by: w.staff.id, checkout_method: 'staff', checked_out_by: w.staff.id } });
@@ -981,7 +981,7 @@ test(['AT-4'], 'report options: a director gets their own location and sessions;
   assert.equal(d.status, 200);
   assert.equal(d.body.all_locations, false);
   assert.deepEqual(d.body.locations.map(l => l.name), ['Irvine']);
-  assert.deepEqual(d.body.locations[0].sessions.map(s => s.label), ['Afternoon Study · Mon/Wed/Fri 1:00 PM–4:00 PM', 'Morning Focus · Tue/Thu 9:30 AM–12:00 PM']);
+  assert.deepEqual(d.body.locations[0].sessions.map(s => s.label), ['Afternoon Study · Mon/Wed/Fri 1:00 PM–4:00 PM', 'Morning Focus · Tue 9:30 AM–12:00 PM']);
   assert.equal(d.body.locations[0].today, '2026-10-14');
   assert.deepEqual(d.body.locations[0].presets.find(p => p.id === 'this_week'), { id: 'this_week', label: 'This week', from: '2026-10-12', to: '2026-10-18' });
   const h = await w.t.as(w.hq).get(`${A}/report/options`);
@@ -1002,14 +1002,14 @@ test(['AT-4'], 'report CSV: the family columns plus who checked students in or o
     ['visit', '2026-10-07', 'Maya Johnson', 'Irvine', 'Afternoon Study', '13:00', '16:00', '180', '3.00', 'auto', LA, '', '', 'yes'],
     ['absent', '2026-10-09', 'Maya Johnson', 'Irvine', 'Afternoon Study', '', '', '', '', '', LA, '', '', ''],
     // The total row carries the report's filters: dates, location and session.
-    ['total', '2026-10-05 to 2026-10-09', '', 'Irvine', 'All sessions', '', '', '510', '8.50', '', '', '', '', ''],
+    ['total', '2026-10-05 to 2026-10-09', '', 'Irvine', 'All schedules', '', '', '510', '8.50', '', '', '', '', ''],
   ]);
   const s = await w.t.as(w.director).get(`${A}/report.csv?session=${w.am.id}&from=2026-10-05&to=2026-10-09`);
   assert.equal(s.headers.get('content-disposition'), 'attachment; filename="attendance-report-irvine-morning-focus-2026-10-05-to-2026-10-09.csv"');
   assert.deepEqual(parseCsv(s.body).map(x => x[2]), ['student', 'Ben Cole', '']);
-  assert.deepEqual(parseCsv(s.body).pop().slice(0, 5), ['total', '2026-10-05 to 2026-10-09', '', 'Irvine', 'Morning Focus · Tue/Thu 9:30 AM–12:00 PM']);
+  assert.deepEqual(parseCsv(s.body).pop().slice(0, 5), ['total', '2026-10-05 to 2026-10-09', '', 'Irvine', 'Morning Focus · Tue 9:30 AM–12:00 PM']);
   const all = parseCsv((await w.t.as(w.hq).get(`${A}/report.csv?location=all&from=2026-10-05&to=2026-10-09`)).body).pop();
-  assert.deepEqual(all.slice(0, 5), ['total', '2026-10-05 to 2026-10-09', '', 'All locations', 'All sessions']);
+  assert.deepEqual(all.slice(0, 5), ['total', '2026-10-05 to 2026-10-09', '', 'All locations', 'All schedules']);
 });
 
 test(['AT-4'], 'report PDF: filters, totals including needs review, per-student hours, visits and absences', async () => {
@@ -1020,7 +1020,7 @@ test(['AT-4'], 'report PDF: filters, totals including needs review, per-student 
   assert.equal(r.headers.get('content-disposition'), 'attachment; filename="attendance-report-irvine-2026-10-05-to-2026-10-09.pdf"');
   const text = pdfText(r.body);
   for (const want of [
-    'Attendance report', 'Location: Irvine', 'Session: All sessions', 'Dates: Oct 5 – Oct 9, 2026',
+    'Attendance report', 'Location: Irvine', 'Schedule: All schedules', 'Dates: Oct 5 – Oct 9, 2026',
     '3 Visits 8.50 Total hours · 8h 30m 2 Students 1 Absences 1 Needs review',
     'Ben Cole 1 2.50 0', 'Maya Johnson 2 6.00 1',
     'Tue, Oct 6, 2026 Ben Cole Morning Focus 9:30 AM 12:00 PM 2h 30m By staff (Chris Ortiz)',
@@ -1043,7 +1043,7 @@ test(['AT-4'], 'an all-locations report PDF names the location of every absence 
   const text = pdfText((await w.t.as(w.hq).get(`${A}/report.pdf?${q}`)).body);
   for (const want of [
     'By student Student Location Visits Hours Absences Ben Cole Irvine 1 2.50 0 Maya Johnson Arcadia, Irvine 3 7.00 1 Zoe Park Arcadia 1 2.00 1',
-    'Absences Date Student Location Session Scheduled Wed, Oct 7, 2026 Zoe Park Arcadia Arcadia Study 1:00 PM – 4:00 PM ' +
+    'Absences Date Student Location Schedule Scheduled Wed, Oct 7, 2026 Zoe Park Arcadia Arcadia Study 1:00 PM – 4:00 PM ' +
       'Fri, Oct 9, 2026 Maya Johnson Irvine Afternoon Study 1:00 PM – 4:00 PM',
   ]) assert.ok(text.includes(want), `missing "${want}" in: ${text}`);
   const csv = parseCsv((await w.t.as(w.hq).get(`${A}/report.csv?${q}`)).body);
@@ -1064,7 +1064,7 @@ test(['AT-4'], 'HQ choosing one session with all locations gets a report that na
   const pdf = await hq.get(`${A}/report.pdf?${q}`);
   assert.equal(pdf.headers.get('content-disposition'), 'attachment; filename="attendance-report-irvine-afternoon-study-2026-10-05-to-2026-10-09.pdf"');
   const text = pdfText(pdf.body);
-  assert.ok(text.includes(`Location: Irvine Session: ${label} Dates: Oct 5 – Oct 9, 2026`), text);
+  assert.ok(text.includes(`Location: Irvine Schedule: ${label} Dates: Oct 5 – Oct 9, 2026`), text);
   assert.ok(!text.includes('All locations'), text);
 
   const csv = await hq.get(`${A}/report.csv?${q}`);
@@ -1182,7 +1182,9 @@ function browserTab(t) {
     createElement: tag => new FakeNode(tag), createTextNode: s => new FakeNode(null, String(s)),
     getElementById: id => (ids[id] = ids[id] || new FakeNode('div')),
   };
-  const win = { document, Node: FakeNode, fetch: fetchAs, Response, URL, console, navigator: {}, location: { hash: '' },
+  const replaced = []; // every location.replace(url), as a browser would follow it
+  const win = { document, Node: FakeNode, fetch: fetchAs, Response, URL, console, navigator: {},
+    location: { hash: '', replace(url) { replaced.push(url); this.hash = String(url).slice(String(url).indexOf('#')); } },
     history: { replaceState() {} }, addEventListener() {}, setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
   win.window = win;
   vm.createContext(win);
@@ -1195,7 +1197,7 @@ function browserTab(t) {
     } while (pending.size);
   };
   return {
-    requests, settle, toasts: () => document.getElementById('toasts'), hash: () => win.location.hash,
+    requests, replaced, settle, toasts: () => document.getElementById('toasts'), hash: () => win.location.hash,
     // As App.boot() does after a sign-in, App.me says who is signed in.
     signIn(user) {
       const token = crypto.randomBytes(16).toString('hex');
@@ -1203,9 +1205,9 @@ function browserTab(t) {
       cookie = 'sid=' + token;
       win.App.me = { user: { id: user.id, role: user.role, name: user.name, location_id: user.location_id } };
     },
-    async open(id) {
+    async open(id, params = []) {
       const el = new FakeNode('div');
-      await win.App.views.find(v => v.id === id).render(el);
+      await win.App.views.find(v => v.id === id).render(el, params);
       await settle();
       return el;
     },
@@ -1246,7 +1248,7 @@ test(['AT-4'], 'Reports in a tab HQ used first: the director who signs in next g
   hq.find(n => n.tag === 'form').dispatch('submit');
   await tab.settle();
   assert.deepEqual(tab.requests.at(-1), { url: `${R}?location=${w.arcadia.id}&session=${w.arcSession.id}&from=2026-10-05&to=2026-10-09`, status: 200 });
-  assert.equal(words(reportBox(hq)), 'Oct 5 – Oct 9, 2026 Arcadia · Arcadia Study · Mon/Wed/Fri 1:00 PM–4:00 PM Download CSV Download PDF ' +
+  assert.equal(words(reportBox(hq)), 'Oct 5 – Oct 9, 2026 Arcadia · Arcadia Study · Mon/Wed 1:00 PM–4:00 PM Download CSV Download PDF ' +
     '1 visit 2.00 hours 1 student 1 absence By student Visits Absences Student Visits Hours Absences Zoe Park 1 2.00 1');
 
   // Same tab ("Switch user"): the Irvine director signs in and opens Reports.
@@ -1256,11 +1258,13 @@ test(['AT-4'], 'Reports in a tab HQ used first: the director who signs in next g
   assert.deepEqual(tab.requests.slice(-2), [{ url: `${R}/options`, status: 200 }, { url: `${R}?${mine}`, status: 200 }]);
   assert.match(words(view), /Location: Irvine/);
   assert.equal(byId(view, 'rep-session').value, '');
+  // Reports call sessions schedules (D-41).
+  assert.equal(field(view, 'Schedule'), byId(view, 'rep-session'));
   assert.deepEqual([field(view, 'From').value, field(view, 'To').value], ['2026-10-01', '2026-10-31']);
   const box = reportBox(view);
   assert.ok(!box.find(n => n.getAttribute('role') === 'alert'), words(box));
   // This month so far: Maya missed Fri Oct 2, Fri Oct 9 and Mon Oct 12; Ben missed Tue Oct 13.
-  const head = 'Oct 1 – Oct 31, 2026 Irvine · All sessions Download CSV Download PDF 3 visits 8.50 hours 2 students 4 absences ';
+  const head = 'Oct 1 – Oct 31, 2026 Irvine · All schedules Download CSV Download PDF 3 visits 8.50 hours 2 students 4 absences ';
   const byStudent = 'By student Visits Absences Student Visits Hours Absences Ben Cole 1 2.50 1 Maya Johnson 2 6.00 3';
   assert.equal(words(box), head + '1 visit needs review. These students didn\'t scan out and were checked out automatically. ' +
     'Confirm or fix the times from the In the building list. ' + byStudent);
@@ -1384,10 +1388,10 @@ test(['AT-4'], 'Reports: HQ signing in after a director starts over on all locat
 
   // With all locations, every session says where it is; with one location chosen, it needn't.
   const sessions = () => byId(view, 'rep-session').all().filter(n => n.tag === 'option').map(o => o.textContent);
-  assert.deepEqual(sessions(), ['All sessions', 'Arcadia · Arcadia Study · Mon/Wed/Fri 1:00 PM–4:00 PM',
-    'Irvine · Afternoon Study · Mon/Wed/Fri 1:00 PM–4:00 PM', 'Irvine · Morning Focus · Tue/Thu 9:30 AM–12:00 PM']);
+  assert.deepEqual(sessions(), ['All schedules', 'Arcadia · Arcadia Study · Mon/Wed 1:00 PM–4:00 PM',
+    'Irvine · Afternoon Study · Mon/Wed/Fri 1:00 PM–4:00 PM', 'Irvine · Morning Focus · Tue 9:30 AM–12:00 PM']);
   choose(view, { Location: String(w.arcadia.id) });
-  assert.deepEqual(sessions(), ['All sessions', 'Arcadia Study · Mon/Wed/Fri 1:00 PM–4:00 PM']);
+  assert.deepEqual(sessions(), ['All schedules', 'Arcadia Study · Mon/Wed 1:00 PM–4:00 PM']);
   // A new location leaves the report on screen out of date too, until Show report.
   assert.equal(statusOf(view), STALE);
   submit(view);
@@ -1572,12 +1576,12 @@ test(['NF-1'], 'a parent cannot see or export another family\'s student, even wi
   }
   assert.equal((await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log.csv?${q}`)).status, 200);
 
-  // The other family's student holds the same Wednesday slot. Each parent's own
-  // records carry only their own student's absences, never the other family's.
+  // The other family's student holds the same afternoon schedule since Wed Oct 7. Each parent's
+  // own records carry only their own student's absences, never the other family's.
   const theirs = rename(w.t, strangers.student, 'Zoe Park');
-  enrollSince(w.t, theirs, w.pm, 3, at(LA, '2026-09-28', '08:00'));
+  enrollSince(w.t, theirs, w.pm, 0, at(LA, '2026-10-07', '08:00'));
   const week = 'period=week&date=2026-10-07', range = 'from=2026-10-05&to=2026-10-09';
-  for (const [parent, kid, name, dates] of [[stranger, theirs, 'Zoe Park', ['2026-10-07']],
+  for (const [parent, kid, name, dates] of [[stranger, theirs, 'Zoe Park', ['2026-10-07', '2026-10-09']],
     [w.parent, w.kid, 'Maya Johnson', ['2026-10-05', '2026-10-07', '2026-10-09']]]) {
     const p = w.t.as(parent);
     const own = dates.map(d => [d, kid.id]);
@@ -1662,32 +1666,32 @@ test(['NF-1'], 'a director cannot report on another location, on all locations, 
 
 // ---------------------------------------------------------------- Round-1 sweep rules (R2, R8) and the report chips (S8)
 
-test(['AT-2', 'AT-4'], 'R2: back-to-back sessions are one visit, and it counts for every enrolled slot it overlaps at that location that day', async () => {
+test(['AT-2', 'AT-4'], 'R2: back-to-back sessions are one visit, and it counts for every enrolled schedule it overlaps at that location that day', async () => {
   const w = await world();
   const evening = w.t.fx.session(w.loc, { term: w.term, name: 'Evening Study', weekdays: '1', start: '16:00', end: '19:00' });
-  enrollSince(w.t, w.kid, evening, 1, at(LA, '2026-09-28', '08:00'));
-  // Ben holds only the afternoon slot on Mondays.
+  enrollSince(w.t, w.kid, evening, 0, at(LA, '2026-09-28', '08:00'));
+  // Ben holds only the afternoon schedule.
   const ben = rename(w.t, w.t.fx.family(w.loc).student, 'Ben Cole');
-  enrollSince(w.t, ben, w.pm, 1, at(LA, '2026-09-28', '08:00'));
-  // Kai held both Monday slots, but his evening one ended Wed Sep 30, and his
+  enrollSince(w.t, ben, w.pm, 0, at(LA, '2026-09-28', '08:00'));
+  // Kai held both schedules, but his evening one ended Wed Sep 30, and his
   // evening one again from Oct 6 on: neither was his on Oct 5.
   const kai = rename(w.t, w.t.fx.family(w.loc).student, 'Kai Lee');
-  enrollSince(w.t, kai, w.pm, 1, at(LA, '2026-09-28', '08:00'));
-  const kaiOld = enrollSince(w.t, kai, evening, 1, at(LA, '2026-09-28', '08:00'));
+  enrollSince(w.t, kai, w.pm, 0, at(LA, '2026-09-28', '08:00'));
+  const kaiOld = enrollSince(w.t, kai, evening, 0, at(LA, '2026-09-28', '08:00'));
   w.t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(at(LA, '2026-09-30', '12:00'), kaiOld.id);
-  enrollSince(w.t, kai, evening, 1, at(LA, '2026-10-06', '08:00'));
+  enrollSince(w.t, kai, evening, 0, at(LA, '2026-10-06', '08:00'));
   const director = w.t.fx.director(w.loc);
   w.visit('2026-10-05', '12:55', '18:55');                   // Maya stays from the afternoon through the evening
   w.visit('2026-10-12', '13:00', '15:30');                   // and leaves before the evening one week later
   w.visit('2026-10-05', '13:00', '17:00', { student: ben }); // Ben stays past his session
   w.visit('2026-10-05', '13:00', '17:30', { student: kai }); // so does Kai
-  w.visit('2026-10-12', '13:00', '18:50', { student: kai }); // and on Oct 12 he holds the evening slot too
+  w.visit('2026-10-12', '13:00', '18:50', { student: kai }); // and on Oct 12 he holds the evening schedule too
 
   const log = await w.t.as(w.parent).get(`${A}/students/${w.kid.id}/log?from=2026-10-05&to=2026-10-12`);
   assert.deepEqual(log.body.absences.map(a => [a.date, a.session_name]),
     [['2026-10-07', 'Afternoon Study'], ['2026-10-09', 'Afternoon Study'], ['2026-10-12', 'Evening Study']]);
   // The evening session's report lists Maya's visit, which covered it, and Kai's on Oct 12; Ben was
-  // never enrolled there, and on Oct 5 Kai's evening slot had ended and not yet started again.
+  // never enrolled there, and on Oct 5 Kai's evening schedule had ended and not yet started again.
   const rep = await w.t.as(director).get(`${A}/report?session=${evening.id}&from=2026-10-05&to=2026-10-12`);
   assert.equal(rep.status, 200);
   assert.deepEqual(rep.body.visits.map(v => [v.date, v.student_name, v.session_name, v.minutes]),
@@ -1704,10 +1708,10 @@ test(['AT-2', 'AT-4'], 'an open visit covers only sessions already under way, ne
   const director = w.t.fx.director(w.loc);
   const morning = w.t.fx.session(w.loc, { term: w.term, name: 'Morning Focus', weekdays: '3', start: '09:30', end: '12:00' });
   const midday = w.t.fx.session(w.loc, { term: w.term, name: 'Midday Lab', weekdays: '3', start: '12:00', end: '13:00' });
-  enrollSince(w.t, w.kid, morning, 3, at(LA, '2026-09-28', '08:00'));
+  enrollSince(w.t, w.kid, morning, 0, at(LA, '2026-09-28', '08:00'));
   const ben = rename(w.t, w.t.fx.family(w.loc).student, 'Ben Cole'); // Morning Focus then Midday Lab, back to back
-  enrollSince(w.t, ben, morning, 3, at(LA, '2026-09-28', '08:00'));
-  enrollSince(w.t, ben, midday, 3, at(LA, '2026-09-28', '08:00'));
+  enrollSince(w.t, ben, morning, 0, at(LA, '2026-09-28', '08:00'));
+  enrollSince(w.t, ben, midday, 0, at(LA, '2026-09-28', '08:00'));
   const d = '2026-10-14';
   w.visit(d, '09:55', null, { session: morning });                // Maya scanned in for Morning Focus, still in
   w.visit(d, '09:55', null, { session: morning, student: ben });  // so did Ben
@@ -1734,11 +1738,11 @@ test(['AT-2', 'AT-4'], 'R8: after a session\'s times change, past dates keep the
   const director = w.t.fx.director(w.loc);
   // Leo enrolled on Mon Oct 5 at 2pm, with that day's 1-4pm session already under way.
   const leoFam = w.t.fx.family(w.loc), leo = rename(w.t, leoFam.student, 'Leo Garcia');
-  enrollSince(w.t, leo, w.pm, 1, at(LA, '2026-10-05', '14:00'));
+  enrollSince(w.t, leo, w.pm, 0, at(LA, '2026-10-05', '14:00'));
   w.visit('2026-10-12', '13:02', '15:58', { student: leo });
-  // Ava has held Mondays since Sep 28: she missed Sep 28, came Oct 5, and on Oct 12 staff checked her in with no session.
+  // Ava has held the schedule since Sep 28: on Mondays she missed Sep 28, came Oct 5, and on Oct 12 staff checked her in with no session.
   const avaFam = w.t.fx.family(w.loc), ava = rename(w.t, avaFam.student, 'Ava Brown');
-  enrollSince(w.t, ava, w.pm, 1, at(LA, '2026-09-28', '08:00'));
+  enrollSince(w.t, ava, w.pm, 0, at(LA, '2026-09-28', '08:00'));
   w.visit('2026-10-05', '13:00', '16:00', { student: ava });
   w.visit('2026-10-12', '13:05', '14:50', { student: ava, session: null, extra: { checkin_method: 'staff', checkout_method: 'staff' } });
   // Tue Oct 13: the director moves the session to 3-6pm from that day on, as the sessions module records it.
@@ -1752,8 +1756,9 @@ test(['AT-2', 'AT-4'], 'R8: after a session\'s times change, past dates keep the
     .run(other.id, w.t.clock.now());
   w.t.clock.set(at(LA, '2026-10-19', '19:00'));
 
+  // Their Mondays (the other days hold no visits).
   const abs = async (fam, s) => (await w.t.as(fam.parent).get(`${A}/students/${s.id}/log?from=2026-09-28&to=2026-10-19`))
-    .body.absences.map(a => [a.date, a.start_time, a.end_time]);
+    .body.absences.filter(a => weekdayOf(a.date) === 1).map(a => [a.date, a.start_time, a.end_time]);
   // Oct 5 was never owed (he enrolled after 1pm); Oct 19 is under the new hours.
   assert.deepEqual(await abs(leoFam, leo), [['2026-10-19', '15:00', '18:00']]);
   // Sep 28 shows the hours it had; the staff check-in on Oct 12 overlapped that day's 1-4pm.
@@ -1763,6 +1768,9 @@ test(['AT-2', 'AT-4'], 'R8: after a session\'s times change, past dates keep the
   assert.deepEqual(rep.body.visits.map(v => [v.student_name, v.session_name, v.check_in_local]).sort(),
     [['Ava Brown', null, '13:05'], ['Leo Garcia', 'Afternoon Study', '13:02']]);
   assert.deepEqual(rep.body.absences.map(a => [a.student_name, a.start_time]), [['Maya Johnson', '13:00']]);
+  // A Wednesday after the change is judged by the new hours too.
+  assert.deepEqual((await w.t.as(leoFam.parent).get(`${A}/students/${leo.id}/log?from=2026-10-14&to=2026-10-14`)).body.absences
+    .map(a => [a.date, a.start_time, a.end_time]), [['2026-10-14', '15:00', '18:00']]);
 });
 
 test(['AT-4'], 'Reports: HQ choosing another location gets that location\'s range shortcuts, and a chosen shortcut becomes the same one there (its own term and week)', async () => {
@@ -1849,4 +1857,317 @@ test(['AT-1', 'AT-3', 'AT-4'], 'hours add up: per-visit and per-student hours su
   const reports = await tab.open('reports');
   // This month: Maya 3.00 + 3.00 + 3 x 3.02 = 15.06 (903 minutes alone: 15.05); with Ben's 5.52 and Ava's 3.02, 23.60.
   assert.match(words(reportBox(reports)), /^Oct 1 – Oct 31, 2026 .* 8 visits 23\.60 hours .* Ava Diaz 1 3\.02 0 Ben Cole 2 5\.52 1 Maya Johnson 5 15\.06 2$/);
+});
+
+// ---------------------------------------------------------------- SC-5: date changes (D-46, D-47)
+
+// The afternoon schedule skips Mon Oct 5, adds Tue Oct 6, and moves Fri Oct 9 to Sat Oct 10.
+// Attendance follows the changed dates: skipped and moved-away dates are never absent, added
+// and moved-to dates are, and a session report counts a visit on an added date, not on a skipped one.
+test(['SC-5', 'AT-2', 'AT-4'], 'attendance follows a schedule\'s skipped, added and moved dates in absences, files and session reports', async () => {
+  const w = await world();
+  const { t } = w;
+  t.fx.sessionDate(w.pm, '2026-10-05', 'skip', { reason: 'Staff training day' });
+  t.fx.sessionDate(w.pm, '2026-10-06', 'add');
+  t.fx.sessionDate(w.pm, '2026-10-09', 'skip');
+  t.fx.sessionDate(w.pm, '2026-10-10', 'add', { moved_from: '2026-10-09' });
+  // An added date that turns out to be a closure: the closure wins.
+  t.fx.sessionDate(w.pm, '2026-10-11', 'add');
+  closure(t, w.loc, '2026-10-11');
+  const p = t.as(w.parent), q = 'from=2026-10-05&to=2026-10-11';
+  const week = await p.get(`${A}/students/${w.kid.id}/history?period=week&date=2026-10-07`);
+  assert.deepEqual(week.body.absences.map(a => a.date), ['2026-10-06', '2026-10-07', '2026-10-10']);
+  const csv = parseCsv((await p.get(`${A}/students/${w.kid.id}/log.csv?${q}`)).body);
+  assert.deepEqual(csv.filter(x => x[0] === 'absent').map(x => x[1]), ['2026-10-06', '2026-10-07', '2026-10-10']);
+
+  // Staff check her in with no session on the added Tuesday and on the skipped Monday.
+  const staff = t.fx.staff(w.loc);
+  const byStaff = { checkin_method: 'staff', checked_in_by: staff.id, checkout_method: 'staff', checked_out_by: staff.id };
+  w.visit('2026-10-05', '12:55', '16:00', { session: null, extra: byStaff });
+  w.visit('2026-10-06', '12:55', '16:00', { session: null, extra: byStaff });
+  const after = await p.get(`${A}/students/${w.kid.id}/log?${q}`);
+  assert.deepEqual(after.body.absences.map(a => a.date), ['2026-10-07', '2026-10-10']);
+  const rep = await t.as(t.fx.director(w.loc)).get(`${A}/report?session=${w.pm.id}&${q}`);
+  assert.equal(rep.status, 200);
+  assert.deepEqual(rep.body.visits.map(v => v.date), ['2026-10-06']);
+  assert.deepEqual(rep.body.absences.map(a => a.date), ['2026-10-07', '2026-10-10']);
+});
+
+// R2 on an added date: an open visit to a morning schedule runs on into the afternoon
+// schedule's added Tuesday, which it would not on an ordinary Tuesday.
+test(['SC-5', 'AT-2'], 'an open visit runs on into a back-to-back schedule on that schedule\'s added date', async () => {
+  const w = await world();
+  const { t } = w;
+  const morning = t.fx.session(w.loc, { term: w.term, name: 'Morning Focus', weekdays: '2', start: '10:00', end: '12:30' });
+  enrollSince(t, w.kid, morning, 0, at(LA, '2026-09-28', '08:00'));
+  t.fx.sessionDate(w.pm, '2026-10-13', 'add');
+  w.visit('2026-10-13', '10:00', null, { session: morning }); // never scanned out
+  t.clock.set(at(LA, '2026-10-13', '17:00'));
+  const r = await t.as(w.parent).get(`${A}/students/${w.kid.id}/log?from=2026-10-13&to=2026-10-13`);
+  assert.deepEqual(r.body.absences, []);
+});
+
+// D-42: rows with a weekday 1-7 are v1 history. Their past dates count only on that weekday.
+test(['AT-2'], 'a v1 per-weekday enrollment (history) owes only its own weekday, until it ended', async () => {
+  const w = await world();
+  const { t } = w;
+  const fam = t.fx.family(w.loc);
+  const leo = rename(t, fam.student, 'Leo Garcia');
+  // v1: Mondays only, ended by the v1.1 move on Wed Oct 7 at 2pm, when the whole schedule began.
+  const v1 = enrollSince(t, leo, w.pm, 1, at(LA, '2026-09-28', '08:00'));
+  t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(at(LA, '2026-10-07', '14:00'), v1.id);
+  enrollSince(t, leo, w.pm, 0, at(LA, '2026-10-07', '14:00'));
+  const r = await t.as(fam.parent).get(`${A}/students/${leo.id}/log?from=2026-09-28&to=2026-10-12`);
+  assert.deepEqual(r.body.absences.map(a => a.date), ['2026-09-28', '2026-10-05', '2026-10-09', '2026-10-12']);
+});
+
+// ---------------------------------------------------------------- AT-5: the missed-day notice (D-53)
+
+const missedRows = t => t.db.prepare('SELECT * FROM missed_day_notices ORDER BY id').all();
+const MISSED = 'missed_day';
+const placeholder = (t, student, location, date) => Number(t.db.prepare(`INSERT INTO missed_day_notices
+  (student_id, location_id, local_date, sessions, sent_at, notified) VALUES (?, ?, ?, '[]', ?, 0)`)
+  .run(student.id, location.id, date, t.clock.now()).lastInsertRowid);
+
+test(['AT-5'], 'a scheduled day with no check-in tells each active parent once, 30 minutes after it ends, and never again', async () => {
+  const w = await world(); // Maya: Afternoon Study Mon/Wed/Fri 1-4pm
+  const { t } = w;
+  const second = t.fx.user('parent', { location: w.loc });
+  t.fx.link(second, w.kid);
+  const pending = t.fx.user('parent', { location: w.loc });
+  t.fx.link(pending, w.kid, 'pending');
+  // Mon Oct 12, 4:20pm: 20 minutes after the end, staff still have time to fix a forgotten check-in.
+  t.clock.set(at(LA, '2026-10-12', '16:20'));
+  t.jobs();
+  assert.deepEqual(missedRows(t), []);
+  assert.deepEqual(t.fx.notifications(w.parent, MISSED), []);
+
+  t.clock.set(at(LA, '2026-10-12', '16:31'));
+  t.jobs();
+  const rows = missedRows(t);
+  assert.deepEqual(rows.map(r => [r.student_id, r.location_id, r.local_date, r.notified, r.sent_at]),
+    [[w.kid.id, w.loc.id, '2026-10-12', 1, at(LA, '2026-10-12', '16:31')]]);
+  assert.deepEqual(JSON.parse(rows[0].sessions), [{ session_id: w.pm.id, name: 'Afternoon Study', start_time: '13:00', end_time: '16:00' }]);
+  for (const parent of [w.parent, second]) {
+    assert.deepEqual(t.fx.notifications(parent, MISSED).map(n => [n.title, n.body, n.ref_type, n.ref_id, n.priority]), [[
+      'Maya didn\'t check in today',
+      'Afternoon Study, Mon, Oct 12, 1:00-4:00 PM at Irvine. No check-in was recorded. If Maya was there, the front desk can add the visit.',
+      'missed_day', rows[0].id, 'normal']]);
+  }
+  // Only active parents: not the pending one, and not the student.
+  assert.deepEqual(t.fx.notifications(pending, MISSED), []);
+  assert.deepEqual(t.fx.notifications(w.kid, MISSED), []);
+  // Older days she missed (Fri Oct 9) are never looked at.
+  assert.deepEqual(missedRows(t).map(r => r.local_date), ['2026-10-12']);
+
+  // Again later, and after staff add the visit she forgot: nothing more, and nothing taken back.
+  t.jobs();
+  w.visit('2026-10-12', '13:00', '16:00', { session: null, extra: { checkin_method: 'staff', checkout_method: 'staff' } });
+  t.clock.set(at(LA, '2026-10-12', '19:00'));
+  t.jobs();
+  assert.equal(missedRows(t).length, 1);
+  assert.equal(t.fx.notifications(w.parent, MISSED).length, 1);
+  assert.equal(t.fx.notifications(second, MISSED).length, 1);
+});
+
+// The job looks at each location's today and yesterday by the location's own date (NF-4).
+test(['AT-5'], 'the job covers each location\'s today and yesterday by its own date, and no older day', async () => {
+  // Tue Oct 13, 5:30pm in Irvine is already Wed Oct 14 in UTC: Monday is still Irvine's yesterday.
+  const w = await world();
+  w.t.clock.set(at(LA, '2026-10-13', '17:30'));
+  w.t.jobs();
+  assert.deepEqual(missedRows(w.t).map(r => r.local_date), ['2026-10-12']);
+  assert.deepEqual(w.t.fx.notifications(w.parent, MISSED).map(n => n.title), ['Maya didn\'t check in yesterday']);
+
+  // Wed Oct 14 at 4:31pm: today only; Monday is two days back and is left alone.
+  const w2 = await world();
+  w2.t.clock.set(at(LA, '2026-10-14', '16:31'));
+  w2.t.jobs();
+  assert.deepEqual(missedRows(w2.t).map(r => r.local_date), ['2026-10-14']);
+
+  // Toronto: a 1-4pm schedule there ends at 1pm in Irvine. At 4:31pm Toronto time its day is missed.
+  const t = w2.t;
+  const tor = t.fx.location({ name: 'Toronto', timezone: TOR, lat: 43.65, lng: -79.38 });
+  const torPm = t.fx.session(tor, { term: t.fx.term(tor), name: 'Toronto Afternoons', weekdays: '1,3,5', start: '13:00', end: '16:00' });
+  const fam = t.fx.family(tor);
+  const noah = rename(t, fam.student, 'Noah Roy');
+  enrollSince(t, noah, torPm, 0, at(TOR, '2026-10-12', '08:00'));
+  t.clock.set(at(TOR, '2026-10-14', '16:20'));
+  t.jobs();
+  assert.deepEqual(t.fx.notifications(fam.parent, MISSED), []);
+  t.clock.set(at(TOR, '2026-10-14', '16:31'));
+  t.jobs();
+  assert.deepEqual(t.fx.notifications(fam.parent, MISSED).map(n => n.body),
+    ['Toronto Afternoons, Wed, Oct 14, 1:00-4:00 PM at Toronto. No check-in was recorded. If Noah was there, the front desk can add the visit.']);
+});
+
+// D-53: missed means every date owed that day went by with no visit at all at the location.
+test(['AT-5', 'AT-2'], 'no notice when the student came at all that day, was paused, had no valid membership or enrolled after it began; two missed schedules make one notice', async () => {
+  const w = await world(); // Maya misses Mon Oct 12's afternoon: notified
+  const { t } = w;
+  const morning = t.fx.session(w.loc, { term: w.term, name: 'Morning Focus', weekdays: '1', start: '09:00', end: '11:00' });
+  const kid = name => { const f = t.fx.family(w.loc); return Object.assign(f, { student: rename(t, f.student, name) }); };
+  const since = at(LA, '2026-09-28', '08:00');
+  // Ben came for an hour in the morning with no session: he came, so no notice.
+  const ben = kid('Ben Cole');
+  enrollSince(t, ben.student, w.pm, 0, since);
+  w.visit('2026-10-12', '09:00', '10:00', { student: ben.student, session: null });
+  // Kai holds both schedules and came to the morning one only: absent in the afternoon, no notice.
+  const kai = kid('Kai Lee');
+  enrollSince(t, kai.student, morning, 0, since);
+  enrollSince(t, kai.student, w.pm, 0, since);
+  w.visit('2026-10-12', '09:00', '11:00', { student: kai.student, session: morning });
+  // Ava holds both and came to neither: one notice naming both.
+  const ava = kid('Ava Diaz');
+  enrollSince(t, ava.student, morning, 0, since);
+  enrollSince(t, ava.student, w.pm, 0, since);
+  // Zoe's schedule was paused that morning (logged, D-26); Leo's membership ended Fri Oct 9;
+  // Sam enrolled at 2pm, after the session began; Eli dropped on Sun Oct 11.
+  const zoe = kid('Zoe Park');
+  const zoeE = enrollSince(t, zoe.student, w.pm, 0, since);
+  t.clock.set(at(LA, '2026-10-12', '08:00'));
+  setStatus(t, 'paused', zoeE);
+  const leo = kid('Leo Garcia');
+  enrollSince(t, leo.student, w.pm, 0, since);
+  t.fx.membership(leo.student, { expires: '2026-10-09' });
+  const sam = kid('Sam Ito');
+  enrollSince(t, sam.student, w.pm, 0, at(LA, '2026-10-12', '14:00'));
+  const eli = kid('Eli Ross');
+  const eliE = enrollSince(t, eli.student, w.pm, 0, since);
+  t.db.prepare("UPDATE enrollments SET status = 'dropped', ended_at = ? WHERE id = ?").run(at(LA, '2026-10-11', '12:00'), eliE.id);
+
+  // 11:31am: the morning is over, but the afternoon isn't: nobody's day has gone by yet.
+  t.clock.set(at(LA, '2026-10-12', '11:31'));
+  t.jobs();
+  assert.deepEqual(missedRows(t), []);
+
+  t.clock.set(at(LA, '2026-10-12', '16:31'));
+  t.jobs();
+  const told = new Map(missedRows(t).map(r => [r.student_id, JSON.parse(r.sessions).map(s => s.name)]));
+  assert.deepEqual([...told.keys()].sort((a, b) => a - b), [w.kid.id, ava.student.id].sort((a, b) => a - b));
+  assert.deepEqual(told.get(ava.student.id), ['Morning Focus', 'Afternoon Study']);
+  assert.deepEqual(t.fx.notifications(ava.parent, MISSED).map(n => n.body), ['Morning Focus 9:00-11:00 AM and Afternoon Study 1:00-4:00 PM, ' +
+    'Mon, Oct 12 at Irvine. No check-in was recorded. If Ava was there, the front desk can add the visit.']);
+  for (const f of [ben, kai, zoe, leo, sam, eli]) assert.deepEqual(t.fx.notifications(f.parent, MISSED), [], f.student.name);
+  // Kai's afternoon is still an absence in Hours.
+  const kaiLog = await t.as(kai.parent).get(`${A}/students/${kai.student.id}/log?from=2026-10-12&to=2026-10-12`);
+  assert.deepEqual(kaiLog.body.absences.map(a => a.session_name), ['Afternoon Study']);
+});
+
+test(['AT-5', 'SC-5'], 'no notice on a closure day, a skipped date, at a closed location or past a seed placeholder', async () => {
+  const at12 = at(LA, '2026-10-12', '16:31');
+  // A closure at the location.
+  const a = await world();
+  closure(a.t, a.loc, '2026-10-12');
+  a.t.clock.set(at12);
+  a.t.jobs();
+  assert.deepEqual(missedRows(a.t), []);
+  // The schedule moves that Monday to Tuesday: Monday sends nothing; Tuesday's date does.
+  const b = await world();
+  b.t.fx.sessionDate(b.pm, '2026-10-12', 'skip');
+  b.t.fx.sessionDate(b.pm, '2026-10-13', 'add', { moved_from: '2026-10-12' });
+  b.t.clock.set(at12);
+  b.t.jobs();
+  assert.deepEqual(missedRows(b.t), []);
+  b.t.clock.set(at(LA, '2026-10-13', '16:31'));
+  b.t.jobs();
+  assert.deepEqual(missedRows(b.t).map(r => r.local_date), ['2026-10-13']);
+  assert.match(b.t.fx.notifications(b.parent, MISSED)[0].body, /^Afternoon Study, Tue, Oct 13, 1:00-4:00 PM at Irvine\./);
+  // A location marked closed (D-31) is not looked at.
+  const c = await world();
+  c.t.db.prepare('UPDATE locations SET active = 0 WHERE id = ?').run(c.loc.id);
+  c.t.clock.set(at12);
+  c.t.jobs();
+  assert.deepEqual(missedRows(c.t), []);
+  // A seed placeholder (notified = 0) for the day blocks the notice, and nobody is told.
+  const d = await world();
+  placeholder(d.t, d.kid, d.loc, '2026-10-12');
+  d.t.clock.set(at12);
+  d.t.jobs();
+  assert.deepEqual(missedRows(d.t).map(r => r.notified), [0]);
+  assert.deepEqual(d.t.fx.notifications(d.parent, MISSED), []);
+});
+
+// GET /missed/:id lets a missed-day Inbox item open the right student and week.
+test(['AT-5', 'NF-1'], 'a missed-day notice is readable only by the student\'s own active parents, and a placeholder by nobody', async () => {
+  const w = await world();
+  const { t } = w;
+  t.clock.set(at(LA, '2026-10-12', '16:31'));
+  t.jobs();
+  const id = missedRows(t)[0].id;
+  const own = await t.as(w.parent).get(`${A}/missed/${id}`);
+  assert.equal(own.status, 200);
+  assert.deepEqual(own.body, { student_id: w.kid.id, local_date: '2026-10-12',
+    sessions: [{ session_id: w.pm.id, name: 'Afternoon Study', start_time: '13:00', end_time: '16:00' }] });
+  const other = t.fx.family(w.loc);
+  const pending = t.fx.user('parent', { location: w.loc });
+  t.fx.link(pending, w.kid, 'pending');
+  for (const who of [other.parent, pending, w.kid, t.fx.staff(w.loc), t.fx.director(w.loc), t.fx.hq()]) {
+    const r = await t.as(who).get(`${A}/missed/${id}`);
+    assert.equal(r.status, 403, who.role);
+    assert.equal(r.body.error, 'forbidden', who.role);
+  }
+  assert.equal((await t.anon.get(`${A}/missed/${id}`)).status, 401);
+  assert.equal((await t.as(w.parent).get(`${A}/missed/99999`)).status, 404);
+  // A placeholder was never sent, so even the student's own parent can't open it.
+  const ph = placeholder(t, w.kid, w.loc, '2026-10-13');
+  assert.equal((await t.as(w.parent).get(`${A}/missed/${ph}`)).status, 404);
+});
+
+test(['AT-5', 'AT-2'], 'Hours marks an absence "Parents notified" only on a day a missed-day notice really went out', async () => {
+  const w = await world();
+  const { t } = w;
+  t.clock.set(at(LA, '2026-10-12', '16:31'));
+  t.jobs();
+  placeholder(t, w.kid, w.loc, '2026-10-09'); // told nobody
+  const week = await t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=week&date=2026-10-05`);
+  assert.deepEqual(week.body.absences.map(a => [a.date, a.parents_notified]), [['2026-10-05', false], ['2026-10-07', false], ['2026-10-09', false]]);
+  const now = await t.as(w.parent).get(`${A}/students/${w.kid.id}/history?period=week&date=2026-10-12`);
+  assert.deepEqual(now.body.absences.map(a => [a.date, a.parents_notified]), [['2026-10-12', true]]);
+});
+
+test(['AT-5', 'AT-2'], 'Hours in a browser tab: the missed-day Inbox item opens the student\'s week; another family\'s or a placeholder says it isn\'t available', async () => {
+  const w = await world();
+  const { t } = w;
+  const ava = rename(t, t.fx.user('student', { location: w.loc }), 'Ava Johnson'); // sorts first, so plain Hours shows her
+  t.fx.link(w.parent, ava);
+  t.clock.set(at(LA, '2026-10-12', '16:31'));
+  t.jobs();
+  const id = missedRows(t)[0].id;
+  const tab = browserTab(t);
+  tab.signIn(w.parent);
+
+  // The Inbox item links to #/hours/missed/<id>.
+  const inbox = await tab.open('inbox');
+  const link = inbox.find(n => n.tag === 'a' && /didn't check in/.test(n.textContent));
+  assert.equal(link.getAttribute('href'), `#/hours/missed/${id}`);
+
+  // That route finds the student and date, and replaces itself with #/hours/<student>/<date>.
+  await tab.open('hours', ['missed', String(id)]);
+  assert.deepEqual(tab.replaced, [`#/hours/${w.kid.id}/2026-10-12`]);
+  assert.deepEqual(tab.requests.at(-1), { url: `${A}/missed/${id}`, status: 200 });
+  const asked = tab.requests.length;
+  const view = await tab.open('hours', [String(w.kid.id), '2026-10-12']);
+  assert.ok(tab.requests.slice(asked).some(r => r.url === `${A}/students/${w.kid.id}/history?period=week&date=2026-10-12`),
+    JSON.stringify(tab.requests.slice(asked)));
+  assert.equal(field(view, 'Student').value, String(w.kid.id));
+  assert.match(words(byId(view, 'att-history')),
+    /^‹ Oct 12 – Oct 18, 2026 › 0 visits 0\.00 hours 1 absence Mon, Oct 12 · Afternoon Study Scheduled .* · no check-in Parents notified Absent /);
+
+  // Another family's notice, or a placeholder: a toast, then the plain Hours page.
+  const other = t.fx.family(w.loc);
+  const leo = rename(t, other.student, 'Leo Garcia');
+  enrollSince(t, leo, w.pm, 0, at(LA, '2026-09-28', '08:00'));
+  t.clock.set(at(LA, '2026-10-14', '16:31'));
+  t.jobs();
+  const notMine = t.db.prepare('SELECT id FROM missed_day_notices WHERE student_id = ?').get(leo.id).id;
+  const ph = placeholder(t, w.kid, w.loc, '2026-10-02');
+  let n = 0;
+  for (const bad of [notMine, ph]) {
+    const plain = await tab.open('hours', ['missed', String(bad)]);
+    assert.equal(tab.replaced.length, 1, String(bad));
+    assert.equal(tab.toasts().childNodes.filter(x => x.textContent === 'That notice isn\'t available.').length, ++n, String(bad));
+    assert.ok(field(plain, 'Student'), 'the plain Hours page');
+    assert.ok(byId(plain, 'att-history'));
+  }
 });

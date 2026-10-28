@@ -235,7 +235,7 @@ function familyPdf({ student, from, to, label, log, now }) {
   }));
 }
 
-// AT-4: a director/HQ report for a location (or all), a session (or all) and a date range.
+// AT-4: a director/HQ report for a location (or all), a schedule (or all) and a date range.
 // Across all locations, the By student, Visits and Absences tables each have a Location column.
 // `locations`: for an all-locations report, every location it covers, by name.
 function reportPdf({ filters, label, log, byStudent, now, locations = [] }) {
@@ -244,7 +244,7 @@ function reportPdf({ filters, label, log, byStudent, now, locations = [] }) {
     title: 'Attendance report',
     details: [
       ['Location', all ? 'All locations' : filters.location.name],
-      ['Session', filters.session ? filters.session.label : 'All sessions'],
+      ['Schedule', filters.session ? filters.session.label : 'All schedules'],
       ['Dates', label],
       ['Generated', all ? stampEach(now, locations) : stamp(now, filters.location.timezone)],
     ],
@@ -257,7 +257,7 @@ function reportPdf({ filters, label, log, byStudent, now, locations = [] }) {
         rows: byStudent.map(s => [s.student_name, ...(all ? [s.location_name] : []), s.visits, decimalHours(s.hours), s.absences]) },
       { heading: 'Visits', empty: `No visits ${between(filters.from, filters.to)}.`,
         columns: [{ label: 'Date', w: 0.15 }, { label: 'Student', w: 0.15 }, ...(all ? [{ label: 'Location', w: 0.1 }] : []),
-          { label: 'Session', w: all ? 0.14 : 0.17 }, { label: 'In', w: 0.09 }, { label: 'Out', w: 0.09 }, { label: 'Total', w: 0.08 },
+          { label: 'Schedule', w: all ? 0.14 : 0.17 }, { label: 'In', w: 0.09 }, { label: 'Out', w: 0.09 }, { label: 'Total', w: 0.08 },
           { label: 'Check-out', w: all ? 0.2 : 0.27 }],
         rows: log.visits.map(v => {
           const row = visitRow(v, true, all);
@@ -267,11 +267,11 @@ function reportPdf({ filters, label, log, byStudent, now, locations = [] }) {
         }) },
       { heading: 'Absences', empty: 'No absences in this range.',
         columns: [{ label: 'Date', w: all ? 0.2 : 0.25 }, { label: 'Student', w: all ? 0.2 : 0.25 }, ...(all ? [{ label: 'Location', w: 0.2 }] : []),
-          { label: 'Session', w: all ? 0.2 : 0.25 }, { label: 'Scheduled', w: all ? 0.2 : 0.25 }],
+          { label: 'Schedule', w: all ? 0.2 : 0.25 }, { label: 'Scheduled', w: all ? 0.2 : 0.25 }],
         rows: log.absences.map(a => absenceRow(a, true, all)) },
     ],
     note: (all ? 'Times are local time at each location. ' : `Times are local time at ${filters.location.name} (${filters.location.timezone}). `) +
-      'An absence is a scheduled session with no check-in; closure days and dates outside the term are not counted.',
+      'An absence is a scheduled date with no check-in; closure days, skipped dates and dates outside the period are not counted.',
     footer: `ELITE Spaces · Attendance report · ${label}`,
   }), { layout: 'landscape' });
 }
