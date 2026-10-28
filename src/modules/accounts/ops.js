@@ -14,7 +14,8 @@
 //   PATCH /locations/:id               HQ: any field; director: own location's radius, QR time and hours only (D-5).
 //                                      New hours must still cover every active session of a term that hasn't ended (R4)
 //   POST  /directors                   HQ: { name, email, phone?, location_id } -> director + temporary password
-//   POST  /directors/assign            HQ: { user_id, location_id } -> make an existing staff member or director the director there
+//   POST  /directors/assign            HQ: { user_id, location_id } -> make an existing staff member or director the director there.
+//                                      left_without_director names the location they leave with no active director, else null
 
 const crypto = require('crypto');
 const { tx } = require('../../db');
@@ -262,16 +263,22 @@ function routes(r, ctx) {
     const loc = db.prepare('SELECT id, name FROM locations WHERE id = ? AND active = 1').get(Number(b.location_id) || 0);
     if (!loc) throw bad('location', 'Choose an open location.');
     if (t.role === 'director' && t.location_id === loc.id) throw conflict('already_director', `${t.name} already leads ${loc.name}.`);
+    let leftWithout = null;
     tx(db, () => {
       db.prepare("UPDATE users SET role = 'director', location_id = ? WHERE id = ?").run(loc.id, t.id);
       audit.log(ctx, req.user, 'director.assign', { targetType: 'user', targetId: t.id, locationId: loc.id,
         detail: { name: t.name, from: { role: t.role, location_id: t.location_id }, to: { role: 'director', location_id: loc.id } } });
+      // Moving a location's only active director away leaves it with none; say which (fix list item 8).
+      if (t.role === 'director' && t.location_id != null) {
+        leftWithout = db.prepare(`SELECT id, name FROM locations l WHERE id = ?
+          AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'director' AND active = 1 AND location_id = l.id)`).get(t.location_id) || null;
+      }
     });
     notify.send(ctx, [t.id], {
       kind: 'account_role', title: `You're now the director at ${loc.name}`,
       body: 'Your director tools are in the menu now.', refType: 'location', refId: loc.id,
     });
-    res.json({ user: auth.getUser(ctx, t.id) });
+    res.json({ user: auth.getUser(ctx, t.id), left_without_director: leftWithout });
   });
 }
 

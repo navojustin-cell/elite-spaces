@@ -27,6 +27,12 @@
     .note-controls .field { margin: 0; }
     .note-actions { margin-top: .5rem; }
     .note-hint { min-height: 3em; }
+    /* The hint's longest wordings sit hidden in the same grid cell as the live text, so the
+       card is as tall as the longest hint at any width and never changes height as it changes. */
+    .note-hint { display: grid; grid-template-columns: minmax(0, 1fr); }
+    .note-hint > span, .note-hint::before, .note-hint::after { grid-area: 1 / 1; min-width: 0; overflow-wrap: anywhere; }
+    .note-hint::before { content: attr(data-fit-list); visibility: hidden; }
+    .note-hint::after { content: attr(data-fit-ready); visibility: hidden; }
     .note-move { min-width: 44px; min-height: 44px; }
     .note-item-body { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
     .note-item-edit { display: flex; gap: .5rem; flex: 1 1 15rem; min-width: 0; }
@@ -168,18 +174,23 @@
         // The form. Ratings start blank (DN-4); posting needs every item rated.
         const ed = unsaved.get(key) || { ratings: Object.fromEntries(s.ratings.map(r => [r.item_id, r.rating])), comment: s.comment || '' };
         const keep = () => unsaved.set(key, ed);
-        // The hint sits below the buttons and keeps its space even when empty, so a longer hint
-        // (three lines on a 320px phone) never pushes Post note or Save changes as it changes.
-        const hint = h('p', { class: 'muted small note-hint', 'aria-live': 'polite', style: 'margin:.25rem 0 0' });
+        // The hint sits below the buttons, so it never pushes Post note or Save changes. It also
+        // reserves the height of its two longest wordings (every item named, and "Ready to ..."),
+        // which every other wording fits inside, so the card's height stays put as it changes,
+        // even at 320px where a hint runs to several lines.
+        const verb = posted ? 'save' : 'post';
+        const ready = posted ? 'Ready to save. Parents see the change but are not notified again.' : 'Ready to post. Parents get a notification.';
+        const hintText = h('span');
+        const hint = h('p', { class: 'muted small note-hint', 'aria-live': 'polite', style: 'margin:.25rem 0 0',
+          'data-fit-list': 'Rate ' + listWords(s.ratings.map(r => r.label)) + ' to ' + verb + '.', 'data-fit-ready': ready }, hintText);
         const postBtn = h('button', { class: 'btn btn-primary', type: 'button' }, posted ? 'Save changes' : 'Post note');
         const refresh = () => {
           const missing = s.ratings.filter(r => ed.ratings[r.item_id] == null).map(r => r.label);
           postBtn.disabled = missing.length > 0;
-          const verb = posted ? 'save' : 'post';
-          hint.textContent = missing.length === s.ratings.length ? 'Rate each item to ' + verb + '.'
+          hintText.textContent = missing.length === s.ratings.length ? 'Rate each item to ' + verb + '.'
             : missing.length ? 'Rate ' + listWords(missing) + ' to ' + verb + '.'
-            : posted ? (unsaved.has(key) ? 'Ready to save. Parents see the change but are not notified again.' : '')
-            : 'Ready to post. Parents get a notification.';
+            : posted ? (unsaved.has(key) ? ready : '')
+            : ready;
         };
 
         const rates = h('div', { class: 'note-rates' }, s.ratings.map(r => {

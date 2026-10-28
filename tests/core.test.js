@@ -407,12 +407,24 @@ test(['CORE', 'NF-7'], 'navigation: Home is the current page right after sign-in
   await tab.go('#/news');
   assert.deepEqual(current(), ['#/news']);
   assert.equal(words(more()), '• News', 'More shows the page it holds');
-  assert.equal(more().getAttribute('aria-label'), 'More pages, current: News');
+  // WCAG 2.5.3 Label in Name (fix list 2026-10-21 item 17): the name starts with the words it shows.
+  assert.equal(more().getAttribute('aria-label'), 'News, more pages');
   assert.equal(more().getAttribute('aria-current'), 'page');
 
   await tab.go('#/scan/1/abc');
   assert.equal(tab.location.hash, '#/notes');
   assert.deepEqual(current(), ['#/notes'], 'the page it moved to is marked current');
+});
+
+test(['CORE', 'NF-7'], "the sign-out button's screen-reader name starts with the first name it shows (WCAG 2.5.3, fix list 2026-10-21 item 17)", async () => {
+  const t = await makeApp();
+  const morgan = t.fx.staff(t.fx.location(), { name: 'Morgan Lee' });
+  const tab = shellTab(t);
+  tab.signIn(morgan);
+  await tab.start();
+  const out = tab.doc.getElementById('topbar').find(n => n.tag === 'button' && n.getAttribute('title') === 'Sign out');
+  assert.equal(words(out), 'Morgan ⏻');
+  assert.equal(out.getAttribute('aria-label'), 'Morgan Lee, sign out');
 });
 
 test(['CORE', 'NF-7'], 'sign-in: the logo is the page heading, and a scan link says signing in finishes the check-in', async () => {
@@ -451,6 +463,36 @@ test('CORE', 'dev mode is off unless ELITE_DEV=1 is set explicitly (R9), and off
 
   const d = await makeApp({ dev: true });
   assert.equal((await d.anon.get('/api/dev/accounts')).status, 200, 'with dev mode on, the demo helpers are there');
+});
+
+test('CORE', 'dev mode: reading or moving the shared clock and running scheduled jobs need a signed-in user; the demo sign-in helpers stay open (fix list 2026-10-21 item 4)', async () => {
+  const d = await makeApp({ dev: true });
+  const p = d.fx.family(d.fx.location()).parent;
+  const before = d.ctx.clock.now();
+  for (const r of [await d.anon.get('/api/dev/clock'), await d.anon.post('/api/dev/clock', { now: before + 86400000 }),
+    await d.anon.post('/api/dev/clock', { now: null }), await d.anon.post('/api/dev/run-jobs')]) {
+    assert.equal(r.status, 401);
+    assert.equal(r.body.error, 'signin');
+  }
+  assert.equal(d.ctx.clock.now(), before, 'signed out, the clock did not move');
+  assert.equal(d.ctx.clock.isFixed(), true, 'signed out, the clock was not set back to live');
+
+  // The demo sign-in screen works signed out.
+  const list = await d.anon.get('/api/dev/accounts');
+  assert.equal(list.status, 200);
+  assert.ok(list.body.accounts.some(a => a.id === p.id));
+  assert.equal((await d.anon.post('/api/dev/login-as', { userId: p.id })).status, 200);
+
+  // Any signed-in user may use them.
+  const got = await d.as(p).get('/api/dev/clock');
+  assert.equal(got.status, 200);
+  assert.deepEqual(got.body, { now: before, fixed: true });
+  const set = await d.as(p).post('/api/dev/clock', { now: before + 86400000 });
+  assert.equal(set.status, 200);
+  assert.equal(d.ctx.clock.now(), before + 86400000);
+  const jobs = await d.as(p).post('/api/dev/run-jobs');
+  assert.equal(jobs.status, 200);
+  assert.ok(Array.isArray(jobs.body.ran));
 });
 
 // ---------------------------------------------------------------- hosting (render.yaml, docs/deploy.md)
@@ -828,7 +870,7 @@ test(['CORE', 'NF-8'], 'push on this device follows the account: notifications a
   assert.equal(b.calls.ask, 0);
   assert.deepEqual(subsOf(t, fam.parent), [EP('tab')]);
   assert.equal(bannerOf(tab), null, 'already on: no banner');
-  const out = tab.doc.getElementById('topbar').find(n => n.tag === 'button' && /^Sign out/.test(n.getAttribute('aria-label') || ''));
+  const out = tab.doc.getElementById('topbar').find(n => n.tag === 'button' && /, sign out$/.test(n.getAttribute('aria-label') || ''));
   out.click();
   await tab.settle();
   assert.deepEqual(subsOf(t, fam.parent), [], 'signed out: this device stops getting them');
@@ -935,8 +977,8 @@ test(['CORE', 'NF-7'], 'sign-in: the tab title names the screen, following a pan
 
 const signedInAs = tab => {
   const top = tab.doc.getElementById('topbar');
-  const out = top.find(n => n.tag === 'button' && /^Sign out /.test(n.getAttribute('aria-label') || ''));
-  return top.hidden || !out ? null : out.getAttribute('aria-label').replace(/^Sign out /, '');
+  const out = top.find(n => n.tag === 'button' && /, sign out$/.test(n.getAttribute('aria-label') || ''));
+  return top.hidden || !out ? null : out.getAttribute('aria-label').replace(/, sign out$/, '');
 };
 const toastsOf = tab => tab.doc.getElementById('toasts').childNodes.map(words);
 // A page holding a form, which notes whom it was drawn for.
@@ -1111,7 +1153,7 @@ test(['CORE'], 'signing in or out in one tab redraws the other tabs at once (Bro
     assert.deepEqual([signedInAs(a), signedInAs(b)], ['Dana Park', 'Dana Park'], transport);
 
     // Tab b signs out.
-    b.doc.getElementById('topbar').find(n => n.tag === 'button' && /^Sign out/.test(n.getAttribute('aria-label') || '')).click();
+    b.doc.getElementById('topbar').find(n => n.tag === 'button' && /, sign out$/.test(n.getAttribute('aria-label') || '')).click();
     await settleAll(a, b);
     assert.equal(signedInAs(a), null, transport + ': tab a shows the sign-in screen');
     assert.ok(byTag(a.main(), 'form').length, transport);

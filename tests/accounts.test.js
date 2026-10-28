@@ -757,6 +757,31 @@ test(['AC-5'], 'HQ creates a director at a location and assigns an existing staf
   assert.equal((await t.as(hq).post(A + '/directors/assign', { user_id: t.fx.family(a).parent.id, location_id: b.id })).status, 404);
 });
 
+test(['AC-5'], 'moving a location\'s only director away says which location now has no director (fix list item 8)', async () => {
+  const t = await makeApp();
+  const hq = t.fx.hq();
+  const a = t.fx.location({ name: 'Irvine' }), b = t.fx.location({ name: 'Arcadia' }), c = t.fx.location({ name: 'Tustin' });
+  const dana = t.fx.director(a, { name: 'Dana Park' });
+  // A deactivated co-director doesn't count: Irvine is left with no active director.
+  const gone = t.fx.director(a, { name: 'Old Boss' });
+  t.db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(gone.id);
+  const moved = await t.as(hq).post(A + '/directors/assign', { user_id: dana.id, location_id: b.id });
+  assert.equal(moved.status, 200);
+  assert.deepEqual(moved.body.left_without_director, { id: a.id, name: 'Irvine' });
+  assert.equal(userRow(t, dana.id).location_id, b.id);
+  // One of two active directors moving leaves the other in charge: nothing to report.
+  const lee = t.fx.director(c, { name: 'Lee Wong' });
+  t.fx.director(c, { name: 'Mo Diaz' });
+  const shared = await t.as(hq).post(A + '/directors/assign', { user_id: lee.id, location_id: a.id });
+  assert.equal(shared.status, 200);
+  assert.equal(shared.body.left_without_director, null);
+  // A staff member made director leaves no location without one, even one that has no director.
+  const s = t.fx.staff(t.fx.location({ name: 'Orange' }));
+  const promoted = await t.as(hq).post(A + '/directors/assign', { user_id: s.id, location_id: c.id });
+  assert.equal(promoted.status, 200);
+  assert.equal(promoted.body.left_without_director, null);
+});
+
 test(['AC-5', 'NF-1'], 'directors edit only their own location\'s radius, QR time and hours; HQ edits anything', async () => {
   const t = await makeApp();
   const a = t.fx.location({ name: 'Irvine' }), b = t.fx.location({ name: 'Arcadia' });
@@ -1416,4 +1441,32 @@ test(['AC-4', 'AC-6'], 'People: after a confirmed Deactivate, focus goes to the 
   const row = roster.find(n => n.tag === 'tr' && /Chidi Okafor/.test(n.textContent));
   assert.match(words(row), /^Chidi Okafor 555-0199 Invited, not set up yet Kemi Okafor/);
   assert.doesNotMatch(words(row), /not approved/);
+});
+
+test(['AC-5'], 'Locations: "Make someone director" asks first, naming the location, before moving its only director away (fix list item 8)', async () => {
+  const t = await makeApp();
+  const hq = t.fx.hq();
+  const a = t.fx.location({ name: 'Irvine' }), b = t.fx.location({ name: 'Arcadia' });
+  const dana = t.fx.director(a, { name: 'Dana Park' });
+  const tab = accountsTab(t);
+  await tab.signIn(hq);
+  const page = await tab.open('locations');
+  page.find(n => n.tag === 'button' && n.getAttribute('aria-label') === 'Make someone director of Arcadia').click();
+  await tab.settle();
+  const form = tab.main.find(n => n.tag === 'form' && /Make director/.test(n.textContent));
+  const who = form.find(n => n.tag === 'select');
+  const submit = () => { who.value = String(dana.id); form.dispatch('submit'); return tab.main.find(n => n.getAttribute('role') === 'alertdialog'); };
+  let box = submit();
+  assert.ok(box, 'a confirm box opened');
+  assert.match(words(box), /Leave Irvine with no director\?/);
+  assert.match(words(box), /Dana Park is the only director at Irvine/);
+  assert.deepEqual(box.findAll(n => n.tag === 'button').map(n => n.textContent), ['Keep Dana Park at Irvine', 'Move Dana Park to Arcadia']);
+  box.findAll(n => n.tag === 'button')[0].click();
+  await tab.settle();
+  assert.equal(userRow(t, dana.id).location_id, a.id, 'keeping her moves nobody');
+  box = submit();
+  box.findAll(n => n.tag === 'button')[1].click();
+  await tab.settle();
+  assert.equal(userRow(t, dana.id).location_id, b.id);
+  assert.match(tab.doc.getElementById('toasts').textContent, /Dana Park now leads Arcadia\. Irvine has no director now\./);
 });

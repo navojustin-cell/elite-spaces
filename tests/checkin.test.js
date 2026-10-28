@@ -454,7 +454,10 @@ test(['CI-5'], "the location's closing time wins when it comes first; a visit wi
     assert.equal(v.flagged, 1);
   }
   const [n] = t.fx.notifications(t.fam.parent, 'checkout_auto');
-  assert.equal(n.body, "Maya didn't scan out of Irvine, so the app checked them out when Irvine closed. Total time 1h 55m. Staff will review it.");
+  assert.equal(n.body, "Maya didn't scan out of Afternoon Study at Irvine, so the app checked them out when Irvine closed. Total time 1h 55m. Staff will review it.");
+  // a visit with no session names no session (F14)
+  const [w] = t.fx.notifications(walkIn.parent, 'checkout_auto');
+  assert.equal(w.body, "Wes didn't scan out of Irvine, so the app checked them out when Irvine closed. Total time 2h 0m. Staff will review it.");
 });
 
 test(['CI-5', 'NF-4', 'CI-3'], "check-in windows and auto-checkout run on each location's own clock (Toronto)", async () => {
@@ -531,7 +534,8 @@ test(['CI-6', 'CI-5'], 'an automatic check-out is labeled as automatic, once', a
   const auto = t.fx.notifications(t.fam.parent, 'checkout_auto');
   assert.equal(auto.length, 1);
   assert.equal(auto[0].title, 'Maya was checked out automatically · 4:00 PM');
-  assert.equal(auto[0].body, "Maya didn't scan out of Irvine, so the app checked them out when the session ended. Total time 2h 55m. Staff will review it.");
+  assert.equal(auto[0].body, "Maya didn't scan out of Afternoon Study at Irvine, so the app checked them out when the session ended. Total time 2h 55m. Staff will review it.",
+    'the automatic check-out names the session, as the scan and staff ones do (F14)');
   assert.equal(auto[0].ref_id, visitsOf(t, t.fam.student)[0].id);
   assert.equal(t.fx.notifications(t.fam.parent, 'checkout').length, 0);
 });
@@ -1200,7 +1204,8 @@ test(['CI-5', 'CI-6'], 'a stay is checked out automatically at the end of the la
   assert.equal(outAt(t.fam.student), null);
   const [ivyAuto] = t.fx.notifications(ivy.parent, 'checkout_auto');
   assert.equal(ivyAuto.title, 'Ivy was checked out automatically · 6:00 PM');
-  assert.equal(ivyAuto.body, "Ivy didn't scan out of Irvine, so the app checked them out when the session ended. Total time 2h 15m. Staff will review it.");
+  // it names the session the stay ended in, not the one it began in (F14)
+  assert.equal(ivyAuto.body, "Ivy didn't scan out of Late Study at Irvine, so the app checked them out when the session ended. Total time 2h 15m. Staff will review it.");
   setClock(t, '19:59');
   t.jobs();
   assert.equal(outAt(t.fam.student), null);
@@ -1210,7 +1215,7 @@ test(['CI-5', 'CI-6'], 'a stay is checked out automatically at the end of the la
   assert.deepEqual([v.check_out_at, v.checkout_method, v.flagged, v.flag_reason], [at(LA, '2026-10-14', '20:00'), 'auto', 1, 'Did not scan out']);
   const auto = t.fx.notifications(t.fam.parent, 'checkout_auto');
   assert.equal(auto.length, 1);
-  assert.equal(auto[0].body, "Maya didn't scan out of Irvine, so the app checked them out when Irvine closed. Total time 4h 15m. Staff will review it.");
+  assert.equal(auto[0].body, "Maya didn't scan out of Night Study at Irvine, so the app checked them out when Irvine closed. Total time 4h 15m. Staff will review it.");
 });
 
 test(['CI-7'], 'a staff check-in with no session counts toward the session it overlaps: after leaving, the student is not still expected (D-15a)', async () => {
@@ -1725,4 +1730,66 @@ test(['CI-6'], "check-in Inbox items open a screen: a parent's check-in opens Ho
   // with no Hours screen a check-out still opens Home
   assert.deepEqual((await links(t.fam.parent, false)).map(x => x[1]), ['#/home', '#/home', '#/home', '#/home']);
   assert.deepEqual(await links(t.staff, false), [['visit', '#/building']]);
+});
+
+// ---------------------------------------------------------------- fix list 2026-10-21 (F7, F12, F13)
+
+test(['CI-3', 'CI-5', 'CI-7'], 'once the first back-to-back session ends, the status and Home card name the session the student is in now, before it starts (F12)', async () => {
+  const t = await setup(); // Afternoon Study, Mon/Wed/Fri 13:00-16:00
+  // Late Study's check-in window opens at 15:50, before Afternoon Study ends, so the stay runs on into it
+  const late = t.fx.session(t.loc, { name: 'Late Study', weekdays: '3', start: '16:20', end: '18:00' });
+  t.fx.enroll(t.fam.student, late, 3);
+  const st = async who => { const s = (await t.as(who).get('/api/checkin/status')).body.students[0]; return [s.state, s.visit.session_name, s.visit.ends_at]; };
+  const here = async () => (await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`)).body.here.map(v => [v.session_name, v.ends_at]);
+  assert.equal((await t.scan()).body.action, 'checkin');
+  const afternoon = ['here', 'Afternoon Study', at(LA, '2026-10-14', '16:00')];
+  const lateNow = ['here', 'Late Study', at(LA, '2026-10-14', '18:00')];
+  setClock(t, '15:55');
+  assert.deepEqual(await st(t.fam.student), afternoon);
+  setClock(t, '16:00');
+  assert.deepEqual(await st(t.fam.student), afternoon, 'at the minute it ends the stay is still in Afternoon Study');
+  setClock(t, '16:05');
+  t.jobs();
+  assert.equal(visitsOf(t, t.fam.student)[0].check_out_at, null, 'still one open visit');
+  for (const who of [t.fam.student, t.fam.parent]) assert.deepEqual(await st(who), lateNow, who.role);
+  assert.deepEqual(await here(), [lateNow.slice(1)]);
+  // the Home card says so in words
+  const tab = shellTab(t);
+  await tab.open(t.fam.parent, '#/home');
+  assert.match(words(tab.main()), /Maya is at Irvine since 1:05 PM · Late Study until 6:00 PM/);
+  assert.doesNotMatch(words(tab.main()), /Afternoon Study until/);
+});
+
+test(['CI-4', 'CI-5'], 'after a refused scan the Check in screen refreshes its status card to match the message (F13)', async () => {
+  const t = await setup({ dev: true });
+  const tab = shellTab(t);
+  await tab.open(t.fam.student, '#/checkin');
+  const card = () => words(tab.main().find(n => n.cls.includes('card')));
+  const label = () => tab.main().find(n => n.cls.includes('ci-scan-label')).textContent;
+  const simulate = async () => {
+    byTag(tab.main(), 'button').find(b => /Simulate scan/.test(b.textContent)).click();
+    await tab.settle();
+    return words(tab.main().find(n => n.getAttribute('role') === 'status'));
+  };
+  assert.match(await simulate(), /^✓ Checked in 1:05 PM/, 'the first scan checks in');
+  assert.match(card(), /^You're checked in/);
+  // the screen stays open while the app checks Maya out automatically
+  setClock(t, '16:01');
+  t.jobs();
+  assert.match(card(), /^You're checked in/, 'nothing has refreshed the card yet');
+  assert.match(await simulate(), /^You're already checked out/);
+  assert.match(card(), /^You've checked out Left at 4:00 PM \(checked out automatically\)/);
+  assert.equal(label(), 'Scan to check in');
+});
+
+test(['CI-7'], "the Needs review buttons' screen-reader names contain their visible text (F7)", async () => {
+  const t = await setup();
+  await t.scan();
+  setClock(t, '16:30');
+  t.jobs();
+  const tab = shellTab(t);
+  await tab.open(t.staff, '#/building');
+  const buttons = byTag(tab.main(), 'button').filter(b => /^(Time is right|Fix time out)$/.test(b.textContent));
+  assert.deepEqual(buttons.map(b => [b.textContent, b.getAttribute('aria-label')]),
+    [['Time is right', 'Time is right for Maya Johnson'], ['Fix time out', 'Fix time out for Maya Johnson']]);
 });

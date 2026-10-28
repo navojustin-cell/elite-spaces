@@ -91,18 +91,27 @@
     const box = h('div', { class: 'ann-stats' });
     const live = h('span', { class: 'sr-only', 'aria-live': 'polite' });
     const item = (n, label) => h('div', null, h('b', null, String(n)), h('span', { class: 'stat-label' }, label));
-    const fill = s => box.replaceChildren(...[
-      item(s.recipients, 'Sent to'),
-      item(s.delivered, 'Delivered'),
-      item(s.read, 'Read'),
-      s.muted && item(s.muted, 'Notifications off'),
-      h('button', { class: 'btn btn-ghost', type: 'button', 'aria-label': 'Refresh numbers for ' + p.title, onclick: e => App.run(e.currentTarget, async () => {
+    // The button stays in place while the numbers change, and gets focus back after
+    // the refresh (a disabled button loses it), so keyboard users aren't sent to the top.
+    const refresh = h('button', { class: 'btn btn-ghost', type: 'button', 'aria-label': 'Refresh numbers for ' + p.title, onclick: async () => {
+      await App.run(refresh, async () => {
         const fresh = await App.api.get(API + '/' + p.id + '/stats');
         fill(fresh);
         live.textContent = 'Updated: ' + fresh.read + ' of ' + fresh.recipients + ' have read it.';
-      }) }, 'Refresh numbers'),
-      live,
-    ].filter(Boolean));
+      });
+      const a = document.activeElement;
+      if (refresh.isConnected && (!a || a === document.body || a === refresh)) refresh.focus();
+    } }, 'Refresh numbers');
+    const fill = s => {
+      for (const c of [...box.childNodes]) if (c !== refresh && c !== live) c.remove();
+      box.prepend(...[
+        item(s.recipients, 'Sent to'),
+        item(s.delivered, 'Delivered'),
+        item(s.read, 'Read'),
+        s.muted && item(s.muted, 'Notifications off'),
+      ].filter(Boolean));
+    };
+    box.append(refresh, live);
     fill(p.stats);
     return box;
   }
@@ -229,7 +238,8 @@
     const isHq = App.role() === 'hq';
     const [opts, locRes] = await Promise.all([App.api.get(API + '/options'), App.api.get('/api/locations')]);
     // Closed locations are listed too: HQ can still send them alerts and posts (R5).
-    const locations = locRes.locations.slice().sort((a, b) => a.id - b.id);
+    // In the order the rest of the app uses: by name, as on Locations.
+    const locations = locRes.locations;
     const draft = emergency ? {} : store.get(draftKey(), {});
 
     const form = h('form', { class: 'card', novalidate: true });
@@ -294,8 +304,10 @@
       const s = audience() === 'session' && chosenSession();
       if (s) return { name: s.location_name, timezone: s.timezone };
       if (!isHq) return App.me.location;
+      // The server times a post by its lowest-numbered location, whatever order the list shows.
       const ids = chosenLocIds();
-      return locations.find(l => ids.includes(l.id)) || locations[0] || null;
+      return locations.filter(l => ids.includes(l.id)).sort((a, b) => a.id - b.id)[0]
+        || locations.slice().sort((a, b) => a.id - b.id)[0] || null;
     };
 
     function sync() {

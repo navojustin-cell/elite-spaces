@@ -69,3 +69,25 @@ defaults, like the rest of this file, and ELITE can overturn any of them.
 | D-38 | **Posted notes stay posted** (D-25). "Save for later" on a note someone already posted is refused with a message naming who posted it, and nothing changes. A rating for a checklist item HQ has retired is dropped from an unposted note instead of failing the save. |
 | D-39 | **Requests for slots that no longer exist** (EN-3, D-17). When the session is cancelled, its weekday removed or its term over, a pending student request is closed as declined, with the real reason. Only the student is notified. |
 | D-40 | **The session audience picker** (AN-4) lists only active sessions in current or upcoming terms. Each option is labeled with name, days, times and term. |
+
+## Stephen's answers to the open questions (received Oct 28, 2026)
+
+These override the defaults above where they differ.
+
+| # | Question | Stephen's answer | Effect on the build |
+|---|---|---|---|
+| S-1 | More than one location? | No. One home location only. | Same as D-1. No change. |
+| S-2 | Students see their own notes? | No. Notes are parent-only. | Same as D-2. No change. |
+| S-3 | Weekly cap and holidays | v1 uses **fixed schedules**. Directors set a fixed calendar at the start of each month or semester (for example MWF 9:00-12:00 every week), and plan around holidays themselves (for example TWF in a week with a Monday holiday). Students commit to a fixed calendar for the month or semester and don't pick days or sessions week to week. | **Redesign of sessions and enrollment** (replaces the per-slot weekly model in D-3, D-10 and EN-1/EN-2 in practice). Details still to confirm. |
+| S-4 | Extra capacity for one day | Not in v1. Directors and staff set fixed schedules each month. | Same as D-4. |
+| S-5 | QR time and building radius | Keep the defaults for the QR code. **Drop the building radius**: a QR scan at the location counts as being there, so the app never asks for location permission. | Remove the radius check and the location permission (changes CI-2, D-23). |
+| S-6 | Canadian locations | Same rules, English only. No Canadian testing in v1. | No change. |
+| S-7 | Build approach | Default: in-house prototype. | No change. |
+| S-8 | Note checklist | The note should reference the **3 daily goals the student sets at the start of each day**, alongside the existing ratings. | New: students set daily goals at check-in; staff notes show them. |
+| S-9 | Pilot metrics | Keep the defaults. | No change. |
+| S-10 | Combined parent activity feed | Later (v2). | Not built. |
+| S-11 | End an emergency alert early | **Add for the pilot.** | Build. |
+| S-12 | Tell parents when a session is missed | **Add for the pilot (v1).** | Build. |
+| S-13 | Call button on announcements | Not needed. | Not built. |
+| S-14 | Staff edit log in exports | Not needed. | Not built. |
+| S-15 | More notification settings | Later (v2). | Not built. |

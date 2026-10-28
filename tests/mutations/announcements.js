@@ -40,7 +40,11 @@ module.exports = [
   { name: 'HQ is refused a location marked closed, as if it did not exist (R5)', covers: ['AN-2', 'AN-5'], file: F,
     find: "ctx.db.prepare('SELECT 1 FROM locations WHERE id = ?')", repl: "ctx.db.prepare('SELECT 1 FROM locations WHERE active = 1 AND id = ?')" },
   { name: 'HQ compose screen hides closed locations (R5)', covers: ['AN-2', 'AN-5'], file: V,
-    find: 'const locations = locRes.locations.slice().sort(', repl: 'const locations = locRes.locations.filter(l => l.active).sort(' },
+    find: 'const locations = locRes.locations;', repl: 'const locations = locRes.locations.filter(l => l.active);' },
+  { name: 'HQ compose screen lists locations by id, not by name as on Locations (fix list 10)', covers: ['AN-2'], file: V,
+    find: 'const locations = locRes.locations;', repl: 'const locations = locRes.locations.slice().sort((a, b) => a.id - b.id);' },
+  { name: 'the schedule hint names the first location by name, not the one the server times a post by (fix list 10)', covers: ['AN-2', 'AN-3'], file: V,
+    find: 'locations.filter(l => ids.includes(l.id)).sort((a, b) => a.id - b.id)[0]', repl: 'locations.filter(l => ids.includes(l.id))[0]' },
   { name: 'HQ compose screen does not mark a closed location as closed', covers: ['AN-2', 'AN-5'], file: V,
     find: "!c.l.active && h('span', { class: 'muted small' }, ' (closed)')", repl: 'null' },
   { name: 'HQ chosen set keeps only one location', covers: ['AN-2'], file: F,
@@ -257,6 +261,12 @@ module.exports = [
     find: "ops && h('p', { class: 'ann-meta' }, 'Sent to: '", repl: "App.isOps() && h('p', { class: 'ann-meta' }, 'Sent to: '" },
   { name: 'the review of an alert shows the staff-only "Sent to everyone" line', covers: ['AN-5'], file: V,
     find: "ops && h('p', { class: 'ann-meta' }, alertReach(p)", repl: "App.isOps() && h('p', { class: 'ann-meta' }, alertReach(p)" },
+
+  // ---- "Refresh numbers" keeps focus on its button (fix list 17)
+  { name: '"Refresh numbers" removes its button with the old numbers, so focus drops to the top of the page', covers: ['AN-6', 'NF-7'], file: V,
+    find: 'if (c !== refresh && c !== live) c.remove();', repl: 'c.remove();' },
+  { name: '"Refresh numbers" leaves focus on <body> after its button was disabled', covers: ['AN-6', 'NF-7'], file: V,
+    find: 'if (refresh.isConnected && (!a || a === document.body || a === refresh)) refresh.focus();', repl: '' },
 
   // ---- label in name (L59)
   { name: '"Hide from Home" has an accessible name without its visible words', covers: ['AN-5'], file: V,

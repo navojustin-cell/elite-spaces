@@ -112,9 +112,12 @@ function createApp({ dbFile = ':memory:', now = null, dev = false, cookieName = 
       auth.startSession(ctx, res, u.id);
       res.json({ user: u });
     });
-    app.get('/api/dev/clock', (_req, res) => res.json({ now: ctx.clock.now(), fixed: ctx.clock.isFixed() }));
-    app.post('/api/dev/clock', (req, res) => { ctx.clock.set(req.body.now ?? null); res.json({ now: ctx.clock.now(), fixed: ctx.clock.isFixed() }); });
-    app.post('/api/dev/run-jobs', (_req, res) => res.json({ ran: runJobs(ctx) }));
+    // The clock and the job runner are shared by everyone on the demo, so only a
+    // signed-in user may read or move them (fix list 2026-10-21 item 4). The demo
+    // sign-in screen needs the two above, so they stay open.
+    app.get('/api/dev/clock', auth.requireRole(), (_req, res) => res.json({ now: ctx.clock.now(), fixed: ctx.clock.isFixed() }));
+    app.post('/api/dev/clock', auth.requireRole(), (req, res) => { ctx.clock.set(req.body.now ?? null); res.json({ now: ctx.clock.now(), fixed: ctx.clock.isFixed() }); });
+    app.post('/api/dev/run-jobs', auth.requireRole(), (_req, res) => res.json({ ran: runJobs(ctx) }));
   }
 
   // ---- modules ----

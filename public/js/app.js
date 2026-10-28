@@ -386,7 +386,8 @@
       h('div', { class: 'brand' }, 'ELITE Spaces', h('small', null, App.me.location ? App.me.location.name : 'All locations')),
       h('div', { class: 'spacer' }),
       bellBtn,
-      h('button', { 'aria-label': 'Sign out ' + u.name, title: 'Sign out', onclick: signOut }, u.name.split(' ')[0] + ' ⏻'),
+      // The name starts with the visible first name (WCAG 2.5.3 Label in Name).
+      h('button', { 'aria-label': u.name + ', sign out', title: 'Sign out', onclick: signOut }, u.name.split(' ')[0] + ' ⏻'),
     );
     renderNav(nav, cur);
     renderDevbar();
@@ -406,9 +407,10 @@
     const here = rest.find(v => v.id === cur);
     const sheet = h('div', { class: 'nav-sheet', id: 'nav-sheet', hidden: true, onkeydown: e => { if (e.key === 'Escape') { close(); more.focus(); } } },
       rest.map(v => link(v)));
-    // Relabeled to the page it holds, the button still says it opens the menu.
+    // Relabeled to the page it holds, the button still says it opens the menu. Its
+    // name starts with the words it shows (WCAG 2.5.3 Label in Name).
     const more = h('button', { type: 'button', class: 'nav-more', 'aria-expanded': 'false', 'aria-controls': 'nav-sheet',
-      'aria-label': here ? 'More pages, current: ' + here.title : 'More pages',
+      'aria-label': here ? here.title + ', more pages' : 'More pages',
       'aria-current': here ? 'page' : null, onclick: () => (sheet.hidden ? open() : close()) },
       h('span', { class: 'ico', 'aria-hidden': 'true' }, here ? here.icon || '•' : '☰'), h('span', null, here ? here.title : 'More'));
     function open() {

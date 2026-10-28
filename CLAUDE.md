@@ -16,7 +16,9 @@ ELITE_DEV=1 npm start   # demo mode, http://localhost:3000 (PORT env to change)
 npm start               # dev mode OFF: no demo sign-in, clock control or /api/dev endpoints
 ```
 Dev mode is off unless `ELITE_DEV=1` is set explicitly. It adds a purple bar for setting the
-clock and running scheduled jobs, plus one-tap demo sign-in on the sign-in screen.
+clock and running scheduled jobs, plus one-tap demo sign-in on the sign-in screen. The clock and job endpoints
+(`/api/dev/clock`, `/api/dev/run-jobs`) need a signed-in user (401 otherwise); `/api/dev/accounts` and
+`/api/dev/login-as` stay open because the demo sign-in screen uses them.
 The sign-in cookie is named per port (`sid_<PORT>`), so several local servers in one browser don't sign each other out.
 It is httpOnly, responses must never echo its token (L64), and it is Secure when the request came over HTTPS (`trust proxy` is on).
 Every response carries security headers (`src/app.js`, no dependencies): no `X-Powered-By`, `X-Content-Type-Options: nosniff`,

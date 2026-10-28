@@ -140,8 +140,7 @@ function visitEnd(ctx, hist, now) {
     const s = v.session_id == null ? null : ctx.db.prepare('SELECT id, start_time, end_time FROM sessions WHERE id = ?').get(v.session_id);
     if (!s) return Math.max(close, v.check_in_at);
     let end = time.toMs(loc, d, sessionTimes.timesOn(hist, s.id, d, s).end_time);
-    const closed = ctx.db.prepare('SELECT 1 FROM closures WHERE location_id = ? AND date = ?').get(v.location_id, d);
-    const slots = closed ? [] : ctx.db.prepare(`SELECT s.id, s.start_time, s.end_time FROM enrollments e
+    const slots = ctx.db.prepare(`SELECT s.id, s.start_time, s.end_time FROM enrollments e
         JOIN sessions s ON s.id = e.session_id JOIN terms t ON t.id = s.term_id
       WHERE e.student_id = ? AND e.status = 'active' AND e.weekday = ? AND s.status = 'active' AND s.location_id = ?
         AND t.start_date <= ? AND t.end_date >= ?`).all(v.student_id, wd, v.location_id, d, d)

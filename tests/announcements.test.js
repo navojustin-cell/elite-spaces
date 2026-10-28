@@ -972,6 +972,9 @@ class El {
   }
   click() { this.dispatch('click'); }
   focus() { this.doc.focused = this; }
+  // A control that becomes disabled loses focus to <body>, as in a browser.
+  get disabled() { return !!this._disabled; }
+  set disabled(v) { this._disabled = !!v; if (v && this.doc.focused === this) this.doc.focused = null; }
   adopt(kids) {
     const ns = kids.map(k => { const n = k instanceof El ? k : new El(this.doc, null, String(k)); n.remove(); n.parentNode = this; return n; });
     this.doc.changed(this, ns, []);
@@ -1207,6 +1210,25 @@ test(['AN-2', 'AN-5'], 'HQ\'s alert screen lists a closed location, marked close
   assert.ok(labels.includes('Irvine'), JSON.stringify(labels));
 });
 
+test(['AN-2'], 'HQ\'s composer lists locations by name, as on Locations, and still names the zone the server times a post by (fix list 10)', async () => {
+  const w = await world();
+  const { t } = w;
+  // Added last, so by id it would come last; by name it comes first.
+  t.fx.location({ name: 'Anaheim' });
+  const tab = alertTab(t);
+  tab.signIn(w.hq);
+  await tab.start();
+  await tab.go('#/news/new');
+  const main = tab.main();
+  const fieldset = main.find(n => n.tag === 'fieldset' && n.find(c => c.tag === 'legend' && c.textContent === 'Which locations?'));
+  const names = fieldset.findAll(n => n.tag === 'label' && n.find(c => c.tag === 'input' && c.getAttribute('type') === 'checkbox')).map(textOf);
+  assert.deepEqual(names, ['Anaheim', 'Irvine', 'Toronto']);
+  // A schedule time is read at the post's lowest-numbered location (parsePublishAt), so the hint names Irvine.
+  main.find(n => n.tag === 'input' && n.getAttribute('name') === 'ann-when' && n.getAttribute('value') === 'later').checked = true;
+  main.find(n => n.tag === 'form').dispatch('change');
+  assert.ok(tab.doc.getElementById('ann-at-hint').textContent.startsWith('Irvine time ('), tab.doc.getElementById('ann-at-hint').textContent);
+});
+
 // ---------------------------------------------------------------- the review step, News and Home as each viewer sees them
 
 const textOf = n => n.textContent;
@@ -1270,6 +1292,31 @@ test(['AN-5'], 'an alert HQ sent to several locations names them on News for HQ,
     'Sent to everyone at Irvine and Toronto. Nobody can mute emergency alerts.']);
   assert.deepEqual(await lines(w.staffA), ['Sent to everyone at the location. Nobody can mute emergency alerts.',
     'Sent to everyone at 2 locations. Nobody can mute emergency alerts.']);
+});
+
+test(['AN-6', 'NF-7'], '"Refresh numbers" updates a post\'s numbers and keeps focus on that post\'s Refresh button (fix list 17)', async () => {
+  const w = await world();
+  const { t } = w;
+  const id = (await t.as(w.dirA).post(API, post())).body.announcement.id;
+  await t.as(w.dirA).post(API, post({ title: 'Book swap' }));
+  const tab = alertTab(t, '#/news');
+  tab.signIn(w.dirA);
+  await tab.start();
+  const refresh = () => tab.main().find(n => n.tag === 'button' && n.getAttribute('aria-label') === 'Refresh numbers for Fall open house');
+  const readCount = () => {
+    const box = refresh().parentNode;
+    const cell = box.childNodes.find(n => n.tag === 'div' && n.textContent.endsWith('Read'));
+    return cell.childNodes[0].textContent;
+  };
+  assert.equal(readCount(), '0');
+  await t.as(w.famA.parent).post(API + '/' + id + '/read');
+  refresh().focus();
+  refresh().click();
+  await tab.settle();
+  assert.equal(readCount(), '1', 'the numbers are fresh');
+  const focused = tab.doc.activeElement;
+  assert.ok(focused.isConnected, 'focus did not drop to the top of the page');
+  assert.equal(focused, refresh(), 'focus is on that post\'s Refresh button');
 });
 
 test(['AN-5'], 'Home\'s "Hide from Home" button has an accessible name that starts with its visible words', async () => {

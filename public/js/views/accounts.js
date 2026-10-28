@@ -878,13 +878,22 @@
       const who = h('select', { required: true }, h('option', { value: '' }, 'Choose a person'),
         ...people.map(s => h('option', { value: s.id }, `${s.name} (${s.role === 'director' ? 'director' : 'staff'} at ${s.location_name || 'no location'})`)));
       const err = alertBox();
+      const actions = h('div', { class: 'row' }, h('button', { class: 'btn btn-primary', type: 'submit' }, 'Make director'),
+        h('button', { class: 'btn btn-ghost', type: 'button', onclick: close }, 'Not now'));
       const form = h('form', null, err,
-        field('Person', who, `They become a director and move to ${l.name} if they work somewhere else.`),
-        h('div', { class: 'row' }, h('button', { class: 'btn btn-primary', type: 'submit' }, 'Make director'),
-          h('button', { class: 'btn btn-ghost', type: 'button', onclick: close }, 'Not now')));
+        field('Person', who, `They become a director and move to ${l.name} if they work somewhere else.`), actions);
       onSubmit(form, err, async () => {
+        // Moving a location's only active director away leaves it with none: ask first, naming it.
+        const p = people.find(s => String(s.id) === who.value);
+        const lastHere = p && p.role === 'director' && p.location_id != null
+          && !staff.some(s => s.id !== p.id && s.active && s.role === 'director' && s.location_id === p.location_id);
+        if (lastHere && !(await App.confirm({ el: actions, opener: who, danger: true,
+          title: `Leave ${p.location_name} with no director?`,
+          body: `${p.name} is the only director at ${p.location_name}. Moving them to ${l.name} leaves ${p.location_name} with no director until you add one.`,
+          confirmLabel: `Move ${p.name} to ${l.name}`, cancelLabel: `Keep ${p.name} at ${p.location_name}` }))) return;
         const r = await App.api.post(A + '/directors/assign', { user_id: Number(who.value) || null, location_id: l.id });
-        App.toast(r.user.name + ' now leads ' + l.name + '.');
+        const left = r.left_without_director;
+        App.toast(r.user.name + ' now leads ' + l.name + '.' + (left ? ' ' + left.name + ' has no director now.' : ''));
         App.refresh();
       });
       box.replaceChildren(box.firstChild, form);

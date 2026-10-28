@@ -318,7 +318,12 @@ module.exports = [
   { name: "the Home card keeps the first session's end time through a back-to-back stay", covers: ['CI-3', 'CI-5'], file: SVC,
     find: 'ends_at: inNow ? inNow.end_at : v.end_time', repl: 'ends_at: v.end_time' },
   { name: 'the Home card moves on to a back-to-back session before it starts', covers: ['CI-3'], file: SVC,
-    find: 'time.toMs(loc, today, v.end_time)).filter(s => s.start_at <= ms).pop() : null;\n  return {', repl: 'time.toMs(loc, today, v.end_time)).pop() : null;\n  return {' },
+    find: 'v.check_out_at == null ? slotIn(ctx, loc, v, ms) : null;', repl: 'v.check_out_at == null ? slotIn(ctx, loc, v, Infinity) : null;' },
+  // F12: once the first session has ended, the stay is in the next back-to-back one, even before it starts
+  { name: 'a back-to-back stay waits for the next session to start before moving on to it', covers: ['CI-3', 'CI-5'], file: SVC,
+    find: 'if (s.start_at > ms && cur.end_at >= ms) break;', repl: 'if (s.start_at > ms) break;' },
+  { name: 'a back-to-back stay moves on at the very minute the first session ends', covers: ['CI-3', 'CI-5'], file: SVC,
+    find: 'if (s.start_at > ms && cur.end_at >= ms) break;', repl: 'if (s.start_at > ms && cur.end_at > ms) break;' },
   // R2 and D-15a: a slot a visit already covered is not the "next" session
   { name: 'the Home card offers a slot the visit already covered as next', covers: ['CI-3', 'CI-7'], file: SVC,
     find: 'visits.some(x => visitCovers(x, s))', repl: 'visits.some(x => x.session_id === s.session_id)' },
@@ -326,7 +331,7 @@ module.exports = [
   { name: 'In the building keeps naming the first session through a back-to-back stay', covers: ['CI-7', 'CI-5'], file: SVC,
     find: 'return inNow ? Object.assign(row(v), { session_name: inNow.name, ends_at: inNow.end_at }) : row(v);', repl: 'return row(v);' },
   { name: 'In the building moves on to a back-to-back session before it starts', covers: ['CI-7'], file: SVC,
-    find: ".filter(s => s.start_at <= ms).pop() : null;\n    return inNow", repl: ".pop() : null;\n    return inNow" },
+    find: 'const inNow = slotIn(ctx, loc, v, ms);', repl: 'const inNow = slotIn(ctx, loc, v, Infinity);' },
   // R6: the card says when a membership that hasn't started begins
   { name: "the Home card isn't told a membership hasn't started", covers: ['CI-3'], file: SVC,
     find: 'starts_on: startsLater(ctx, student.id, today),', repl: 'starts_on: null,' },
@@ -347,7 +352,10 @@ module.exports = [
   { name: 'the Check in screen titles a closure-day refusal "No session right now"', covers: ['CI-3'], file: VIEW,
     find: "showError(TITLES[closed ? 'closed_today' : e.code]", repl: 'showError(TITLES[e.code]' },
   { name: 'the Check in screen titles a closure day from stale status', covers: ['CI-3'], file: VIEW,
-    find: "if (e.code === 'no_session') await loadStatus();", repl: '' },
+    find: "(L31).\n        await loadStatus();", repl: "(L31).\n" },
+  // F13: every refused scan refreshes the status card, not just a no-session one
+  { name: 'only a no-session refusal refreshes the status card', covers: ['CI-4', 'CI-5'], file: VIEW,
+    find: "(L31).\n        await loadStatus();", repl: "(L31).\n        if (e.code === 'no_session') await loadStatus();" },
   { name: 'the help line offers staff check-in on a closure day', covers: ['CI-3'], file: VIEW,
     find: "const closed = status.closed_today && status.state !== 'here';", repl: 'const closed = false;' },
   { name: 'the help line leaves out the closure reason', covers: ['CI-3'], file: VIEW,
@@ -386,6 +394,18 @@ module.exports = [
     find: "(session ? session.name + '. ' : '')", repl: "''" },
   { name: 'the check-out notice names a session for a visit with none', covers: ['CI-6'], file: SVC,
     find: "(session ? session.name + '. ' : '')", repl: "((session && session.name) || 'No session') + '. '" },
+  // F14: the automatic check-out notice names the session, as the scan and staff ones do
+  { name: 'the automatic check-out notice leaves out the session', covers: ['CI-6', 'CI-5'], file: SVC,
+    find: "didn't scan out of ${session ? session.name + ' at ' : ''}${loc.name}", repl: "didn't scan out of ${loc.name}" },
+  { name: 'the automatic check-out notice names a session for a visit with none', covers: ['CI-6'], file: SVC,
+    find: "didn't scan out of ${session ? session.name + ' at ' : ''}${loc.name}", repl: "didn't scan out of ${(session ? session.name : 'No session') + ' at '}${loc.name}" },
+  { name: 'the automatic check-out notice names the first session of a back-to-back stay', covers: ['CI-6', 'CI-5'], file: SVC,
+    find: 'const session = slotIn(ctx, loc, v, cutoff);', repl: 'const session = visitSession(ctx, loc, v);' },
+  // F7: the Needs review buttons' screen-reader names contain their visible text
+  { name: '"Time is right" is read out as something else', covers: ['CI-7'], file: VIEW,
+    find: "'aria-label': `Time is right for ${v.name}`", repl: "'aria-label': `Confirm the time out for ${v.name}`" },
+  { name: '"Fix time out" is read out as something else', covers: ['CI-7'], file: VIEW,
+    find: "'aria-label': `Fix time out for ${v.name}`", repl: "'aria-label': `Fix the time out for ${v.name}`" },
   // L35: check-in Inbox items open a screen
   { name: "a parent's check-in Inbox item opens Hours", covers: ['CI-6'], file: VIEW,
     find: "App.inboxLink('visit', n => (n.kind === 'checkin' ? null : 'hours'));", repl: "App.inboxLink('visit', 'hours');" },

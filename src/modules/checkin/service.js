@@ -154,6 +154,18 @@ function visitSession(ctx, loc, v) {
   return s ? { id: s.id, name: s.name, start_at: time.toMs(loc, v.local_date, s.start_time), end_at: time.toMs(loc, v.local_date, s.end_time) } : null;
 }
 
+// The slot a visit is in at `ms`: its own session, or during a back-to-back stay (R2) the latest slot it
+// has run on into, once that slot has started or the one before it has ended. null for a visit with no session.
+function slotIn(ctx, loc, v, ms) {
+  let cur = visitSession(ctx, loc, v);
+  if (!cur) return null;
+  for (const s of stayAfter(ctx, loc, v.student_id, v.local_date, cur.end_at)) { // ordered by start time
+    if (s.start_at > ms && cur.end_at >= ms) break;
+    cur = s;
+  }
+  return cur;
+}
+
 // ---------- wording ----------
 
 const firstName = name => String(name || '').split(' ')[0];
@@ -246,9 +258,9 @@ function building(ctx, loc, ms) {
     check_in_at: v.check_in_at, check_out_at: v.check_out_at, checkin_method: v.checkin_method,
     checkout_method: v.checkout_method, ends_at: v.end_time ? time.toMs(loc, today, v.end_time) : null, flagged: !!v.flagged,
   }, byFields(v));
-  // During a back-to-back stay (R2) a student here is in the latest slot the visit has run on into.
+  // During a back-to-back stay (R2) a student here is in the slot the visit has run on into.
   const here = visits.filter(v => v.check_out_at == null).map(v => {
-    const inNow = v.end_time ? stayAfter(ctx, loc, v.student_id, today, time.toMs(loc, today, v.end_time)).filter(s => s.start_at <= ms).pop() : null;
+    const inNow = slotIn(ctx, loc, v, ms);
     return inNow ? Object.assign(row(v), { session_name: inNow.name, ends_at: inNow.end_at }) : row(v);
   });
   const hereIds = new Set(here.map(v => v.student_id));
@@ -289,9 +301,8 @@ function status(ctx, student, ms) {
   const closure = closureOn(ctx, loc, today);
   // The next slot skips any slot today's visits already cover (D-15a, R2).
   const next = nextSlot(ctx, loc, student.id, ms, s => s.date === today && visits.some(x => visitCovers(x, s)));
-  // During a back-to-back stay (R2) the visit is in the latest slot it has run on into.
-  const inNow = v && v.check_out_at == null && v.end_time
-    ? stayAfter(ctx, loc, student.id, today, time.toMs(loc, today, v.end_time)).filter(s => s.start_at <= ms).pop() : null;
+  // During a back-to-back stay (R2) the visit is in the slot it has run on into.
+  const inNow = v && v.check_out_at == null ? slotIn(ctx, loc, v, ms) : null;
   return {
     id: student.id, name: student.name, location: publicLocation(loc),
     state: !v ? 'none' : v.check_out_at == null ? 'here' : 'left',
@@ -338,10 +349,12 @@ function autoCheckout(ctx) {
     closed++;
     const who = firstName(v.student_name);
     const why = slotEnd < close ? 'when the session ended' : `when ${loc.name} closed`;
+    // Names the session the student was in at the cutoff, as the scan and staff check-out notices do.
+    const session = slotIn(ctx, loc, v, cutoff);
     tellParents(ctx, { id: v.student_id }, v, {
       kind: 'checkout_auto',
       title: `${who} was checked out automatically · ${clockTime(loc, cutoff)}`,
-      body: `${who} didn't scan out of ${loc.name}, so the app checked them out ${why}. Total time ${duration(minutes(v.check_in_at, cutoff))}. Staff will review it.`,
+      body: `${who} didn't scan out of ${session ? session.name + ' at ' : ''}${loc.name}, so the app checked them out ${why}. Total time ${duration(minutes(v.check_in_at, cutoff))}. Staff will review it.`,
     });
   }
   return closed;
@@ -349,7 +362,7 @@ function autoCheckout(ctx) {
 
 module.exports = {
   EARLY_MS, FLAG_REASON, getLocation, getVisit, qrDay, currentCode, codeExpiresAt, checkCode,
-  closureOn, slotsOn, slotNow, nextSlot, membershipOk, startsLater, stayAfter, stayEnd, visitCovers, openVisit, createVisit, closeVisit, lastCheckout, visitSession,
+  closureOn, slotsOn, slotNow, nextSlot, membershipOk, startsLater, stayAfter, stayEnd, visitCovers, openVisit, createVisit, closeVisit, lastCheckout, visitSession, slotIn,
   firstName, clockTime, minutes, duration, dayName, when, noSessionMessage, closedMessage, announceCheckin, announceCheckout,
   publicLocation, building, status, autoCheckout,
 };

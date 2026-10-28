@@ -1289,3 +1289,41 @@ test(['DN-4', 'NF-7'], 'the note hint sits below Post note and Save changes, so 
   assert.equal(c.hint(), 'Ready to save. Parents see the change but are not notified again.');
   assert.deepEqual(order(), [true, true, true], 'Save changes');
 });
+
+// Fix list 17: at 320px the hint runs to several lines; it reserves its longest wordings so the card never changes height.
+test(['DN-4', 'NF-7'], 'the note hint reserves the height of its longest wordings, so the card keeps its height as the hint changes', async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  w.visit(leo, w.A);
+  const tab = notesTab(w.t);
+  await tab.signIn(w.staffA);
+  await tab.open('daily-notes');
+  const c = noteCard(tab, leo);
+  const p = () => c.card().find(n => n.cls.includes('note-hint'));
+  const fit = () => [p().getAttribute('data-fit-list'), p().getAttribute('data-fit-ready')];
+  // The live wording is in its own span, in the same grid cell as the two hidden longest wordings.
+  const live = () => { const kids = p().childNodes; return kids.length === 1 && kids[0].tag === 'span' ? kids[0].textContent : null; };
+  const css = tab.css();
+  assert.match(css, /\.note-hint \{ display: grid; grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(css, /\.note-hint > span, \.note-hint::before, \.note-hint::after \{ grid-area: 1 \/ 1;/);
+  assert.match(css, /\.note-hint::before \{ content: attr\(data-fit-list\); visibility: hidden; \}/);
+  assert.match(css, /\.note-hint::after \{ content: attr\(data-fit-ready\); visibility: hidden; \}/);
+
+  // Every "Rate ... to post." wording is a shorter run of the one naming every item.
+  const everyItem = 'Rate On time, Focused, Respectful of others / not distracting and Productive use of time to ';
+  assert.deepEqual(fit(), [everyItem + 'post.', 'Ready to post. Parents get a notification.']);
+  assert.equal(live(), 'Rate each item to post.');
+  await c.tap('On time', 'Great');
+  assert.equal(live(), 'Rate Focused, Respectful of others / not distracting and Productive use of time to post.');
+  assert.deepEqual(fit(), [everyItem + 'post.', 'Ready to post. Parents get a notification.'], 'the reserved wordings stay as the hint changes');
+  for (const label of PRD_ITEMS.slice(1)) await c.tap(label, 'Great');
+  assert.equal(live(), 'Ready to post. Parents get a notification.');
+
+  // Editing a posted note reserves the save wordings, and the empty hint keeps them.
+  await tab.click(c.button('Post note'));
+  await tab.click(c.button('Edit note'));
+  assert.equal(live(), '');
+  assert.deepEqual(fit(), [everyItem + 'save.', 'Ready to save. Parents see the change but are not notified again.']);
+  await c.tap('Focused', 'Good');
+  assert.equal(live(), 'Ready to save. Parents see the change but are not notified again.');
+});

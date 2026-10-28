@@ -215,12 +215,13 @@
       } catch (e) {
         if (e.code === 'confirm_checkout') return askFirst(e.message, { yes: 'Check out', no: 'Stay checked in', kept: "OK, you're still checked in." }, () => submit(target, pos, true));
         if (e.code === 'confirm_checkin') return askFirst(e.message, { yes: 'Check back in', no: 'Stay checked out', kept: "OK, you're still checked out." }, () => submit(target, pos, true));
+        // After any refused scan the status card is refreshed so it matches the message; on a closure
+        // day (which keeps the no_session code) it also says whether today is closed (L31).
+        await loadStatus();
         if (e.code === 'outside_radius' && pos.accuracy > 75) {
           const inOut = status && status.state === 'here' ? 'out' : 'in';
           return showError("Your phone's location is fuzzy right now", `It's only accurate to about ${Math.round(pos.accuracy)} m. Step near a window or the entrance and try again, or ask staff to check you ${inOut}.`, { retry: () => submit(target) });
         }
-        // A closure day keeps the no_session code; fresh status says whether today is closed (L31).
-        if (e.code === 'no_session') await loadStatus();
         const closed = e.code === 'no_session' && status && status.closed_today;
         showError(TITLES[closed ? 'closed_today' : e.code] || "We couldn't check you in", e.message);
       }
@@ -506,14 +507,14 @@
                 v.checkout_method === 'staff' && h('div', { class: 'muted small' }, outLine(v)),
                 v.flag_reason && h('div', { class: 'small' }, v.flag_reason), fix),
               h('div', { class: 'ci-actions' },
-                h('button', { class: 'btn', type: 'button', 'aria-label': `Confirm the time out for ${v.name}`, onclick: async e => {
+                h('button', { class: 'btn', type: 'button', 'aria-label': `Time is right for ${v.name}`, onclick: async e => {
                   await App.run(e.currentTarget, async () => {
                     await App.api.post(`${API}/visits/${v.visit_id}/review`, {});
                     App.toast(`Marked ${first(v.name)}'s visit reviewed.`);
                     reload();
                   });
                 } }, 'Time is right'),
-                h('button', { class: 'btn', type: 'button', 'aria-label': `Fix the time out for ${v.name}`, 'aria-expanded': 'false', onclick: e => {
+                h('button', { class: 'btn', type: 'button', 'aria-label': `Fix time out for ${v.name}`, 'aria-expanded': 'false', onclick: e => {
                   fix.hidden = !fix.hidden;
                   e.currentTarget.setAttribute('aria-expanded', String(!fix.hidden));
                   if (!fix.hidden) time.focus();
