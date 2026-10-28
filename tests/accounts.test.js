@@ -698,21 +698,25 @@ test(['AC-4', 'NF-1'], 'a director cannot see or change staff at another locatio
 
 // ---------------------------------------------------------------- AC-5 locations and directors
 
-test(['AC-5'], 'HQ creates a location with its own time zone, radius, QR time and hours', async () => {
+test(['AC-5', 'NF-5'], 'HQ creates a location with its own time zone, QR time and hours; it needs no coordinates or check-in radius (D-49)', async () => {
   const t = await makeApp();
   const hq = t.fx.hq();
-  const body = { name: 'Toronto', timezone: 'America/Toronto', address: '100 Queen St W', lat: 43.6532, lng: -79.3832,
-    geofence_m: 200, qr_rotate_at: '05:00', open_time: '08:00', close_time: '19:30' };
+  const body = { name: 'Toronto', timezone: 'America/Toronto', address: '100 Queen St W',
+    qr_rotate_at: '05:00', open_time: '08:00', close_time: '19:30' };
   const r = await t.as(hq).post(A + '/locations', body);
-  assert.equal(r.status, 201);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
   const row = t.db.prepare('SELECT * FROM locations WHERE id = ?').get(r.body.location.id);
   for (const [k, v] of Object.entries(body)) assert.equal(row[k], v, k);
+  // no coordinates asked for: stored as 0, 0, and the unused radius column keeps 150
+  assert.deepEqual([row.lat, row.lng, row.geofence_m], [0, 0, 150]);
+  assert.equal(r.body.location.geofence_m, undefined, 'the radius is not part of a location any more');
   assert.equal(row.active, 1);
   assert.match(row.qr_secret, /^[0-9a-f]{32}$/);
   assert.equal(r.body.location.qr_secret, undefined);
   assert.equal(t.fx.audit('location.create')[0].target_id, row.id);
   const defaults = await t.as(hq).post(A + '/locations', { name: 'Plain', timezone: 'America/Chicago', lat: 41.9, lng: -87.6 });
-  assert.equal(defaults.body.location.geofence_m, 150);
+  assert.equal(defaults.status, 201);
+  assert.deepEqual([defaults.body.location.lat, defaults.body.location.lng], [41.9, -87.6], 'coordinates still optional, kept when sent');
   assert.equal(defaults.body.location.qr_rotate_at, '04:00');
   const bad = async (over, field) => {
     const x = await t.as(hq).post(A + '/locations', Object.assign({}, body, over));
@@ -722,7 +726,8 @@ test(['AC-5'], 'HQ creates a location with its own time zone, radius, QR time an
   await bad({ timezone: 'Mars/Olympus' }, 'timezone');
   await bad({ lat: 120 }, 'lat');
   await bad({ lng: 'west' }, 'lng');
-  await bad({ geofence_m: 5 }, 'geofence_m');
+  // a check-in radius isn't accepted at all, whatever its value (D-49)
+  for (const geofence_m of [200, 150, null]) await bad({ geofence_m }, 'unknown_field');
   await bad({ qr_rotate_at: '4am' }, 'qr_rotate_at');
   await bad({ open_time: '20:00', close_time: '09:00' }, 'close_time');
   await bad({ name: '' }, 'name');
@@ -782,29 +787,29 @@ test(['AC-5'], 'moving a location\'s only director away says which location now 
   assert.equal(promoted.body.left_without_director, null);
 });
 
-test(['AC-5', 'NF-1'], 'directors edit only their own location\'s radius, QR time and hours; HQ edits anything', async () => {
+test(['AC-5', 'NF-1'], 'directors edit only their own location\'s QR time and hours; HQ edits anything', async () => {
   const t = await makeApp();
   const a = t.fx.location({ name: 'Irvine' }), b = t.fx.location({ name: 'Arcadia' });
   const dirA = t.fx.director(a), staffA = t.fx.staff(a), hq = t.fx.hq();
-  const ok = await t.as(dirA).patch(A + '/locations/' + a.id, { geofence_m: 250, qr_rotate_at: '03:30', open_time: '08:30', close_time: '21:00' });
+  const ok = await t.as(dirA).patch(A + '/locations/' + a.id, { qr_rotate_at: '03:30', open_time: '08:30', close_time: '21:00' });
   assert.equal(ok.status, 200);
   const row = t.db.prepare('SELECT * FROM locations WHERE id = ?').get(a.id);
-  assert.deepEqual([row.geofence_m, row.qr_rotate_at, row.open_time, row.close_time], [250, '03:30', '08:30', '21:00']);
+  assert.deepEqual([row.qr_rotate_at, row.open_time, row.close_time], ['03:30', '08:30', '21:00']);
   const log = t.fx.audit('location.update');
   assert.equal(log.length, 1);
-  assert.deepEqual(JSON.parse(log[0].detail).geofence_m, [150, 250]);
+  assert.deepEqual(JSON.parse(log[0].detail).qr_rotate_at, ['04:00', '03:30']);
   for (const over of [{ name: 'Mine Now' }, { timezone: 'America/New_York' }, { lat: 1 }, { address: 'Elsewhere' }, { active: 0 }]) {
     const x = await t.as(dirA).patch(A + '/locations/' + a.id, over);
     assert.equal(x.status, 403, JSON.stringify(over));
   }
   assert.equal(t.db.prepare('SELECT name, timezone FROM locations WHERE id = ?').get(a.id).name, 'Irvine');
-  assert.equal((await t.as(dirA).patch(A + '/locations/' + b.id, { geofence_m: 999 })).status, 403);
-  assert.equal(t.db.prepare('SELECT geofence_m FROM locations WHERE id = ?').get(b.id).geofence_m, 150);
-  assert.equal((await t.as(staffA).patch(A + '/locations/' + a.id, { geofence_m: 300 })).status, 403);
+  assert.equal((await t.as(dirA).patch(A + '/locations/' + b.id, { qr_rotate_at: '02:00' })).status, 403);
+  assert.equal(t.db.prepare('SELECT qr_rotate_at FROM locations WHERE id = ?').get(b.id).qr_rotate_at, '04:00');
+  assert.equal((await t.as(staffA).patch(A + '/locations/' + a.id, { qr_rotate_at: '02:00' })).status, 403);
   assert.equal((await t.as(dirA).patch(A + '/locations/' + a.id, { open_time: '22:00' })).body.error, 'close_time');
   const own = await t.as(dirA).get(A + '/locations');
   assert.deepEqual(own.body.locations.map(l => l.id), [a.id]);
-  const hqEdit = await t.as(hq).patch(A + '/locations/' + b.id, { name: 'Arcadia Center', timezone: 'America/Denver', geofence_m: 300 });
+  const hqEdit = await t.as(hq).patch(A + '/locations/' + b.id, { name: 'Arcadia Center', timezone: 'America/Denver', qr_rotate_at: '05:00' });
   assert.equal(hqEdit.status, 200);
   assert.equal(hqEdit.body.location.name, 'Arcadia Center');
   assert.equal(hqEdit.body.location.timezone, 'America/Denver');
@@ -1098,11 +1103,11 @@ test(['AC-5'], 'R4: location hours can\'t be changed so that an active session o
   };
   await refuse(dir, { close_time: '10:00' },
     'Morning Focus runs 9:00 AM–11:30 AM, outside 9:00 AM–10:00 AM. Choose hours that cover it, or change that session first.');
-  await refuse(hq, { close_time: '15:00', geofence_m: 300 },
+  await refuse(hq, { close_time: '15:00', qr_rotate_at: '05:00' },
     'Afternoon Study runs 1:00 PM–4:00 PM, outside 9:00 AM–3:00 PM. Choose hours that cover it, or change that session first.');
   await refuse(dir, { open_time: '09:30' },
     'Morning Focus runs 9:00 AM–11:30 AM, outside 9:30 AM–8:00 PM. Choose hours that cover it, or change that session first.');
-  assert.equal(t.db.prepare('SELECT geofence_m FROM locations WHERE id = ?').get(a.id).geofence_m, 150);
+  assert.equal(t.db.prepare('SELECT qr_rotate_at FROM locations WHERE id = ?').get(a.id).qr_rotate_at, '04:00');
   assert.equal(t.fx.audit('location.update').length, 0);
   // hours that still cover every session are saved, edges included
   const ok = await t.as(dir).patch(A + '/locations/' + a.id, { open_time: '09:00', close_time: '16:00' });
@@ -1115,7 +1120,7 @@ test(['AC-5'], 'R4: location hours can\'t be changed so that an active session o
   assert.equal(r.status, 409);
   assert.match(r.body.message, /^Last Day runs 4:00 PM–5:00 PM/);
   // a change that leaves the hours alone is never held back
-  assert.equal((await t.as(dir).patch(A + '/locations/' + a.id, { geofence_m: 200 })).status, 200);
+  assert.equal((await t.as(dir).patch(A + '/locations/' + a.id, { qr_rotate_at: '05:00' })).status, 200);
 });
 
 // ---------------------------------------------------------------- sweep 2026-10-14, round 2
@@ -1222,7 +1227,7 @@ test(['AC-5'], 'L44: no two locations share a name, ignoring case and spaces; a 
   assert.equal(t.db.prepare('SELECT name FROM locations WHERE id = ?').get(tustin.body.location.id).name, 'Tustin');
   // its own name, in any case, is fine, and so is a save that keeps the name
   assert.equal((await t.as(hq).patch(A + '/locations/' + irvine.id, { name: 'IRVINE' })).body.location.name, 'IRVINE');
-  assert.equal((await t.as(hq).patch(A + '/locations/' + irvine.id, { name: 'IRVINE', geofence_m: 300 })).status, 200);
+  assert.equal((await t.as(hq).patch(A + '/locations/' + irvine.id, { name: 'IRVINE', qr_rotate_at: '05:00' })).status, 200);
   const names = (await t.as(hq).get(A + '/locations')).body.locations.map(l => l.name.toLowerCase());
   assert.deepEqual(names, [...new Set(names)]);
 });
@@ -1469,4 +1474,55 @@ test(['AC-5'], 'Locations: "Make someone director" asks first, naming the locati
   await tab.settle();
   assert.equal(userRow(t, dana.id).location_id, b.id);
   assert.match(tab.doc.getElementById('toasts').textContent, /Dana Park now leads Arcadia\. Irvine has no director now\./);
+});
+
+// ---------------------------------------------------------------- v1.1: no location check (S-5, D-49)
+
+test(['NF-5', 'AC-5', 'NF-1'], 'editing a location refuses a check-in radius for directors and HQ alike, and changes nothing (D-49)', async () => {
+  const t = await makeApp();
+  const a = t.fx.location({ name: 'Irvine' }), b = t.fx.location({ name: 'Arcadia' });
+  const dir = t.fx.director(a), hq = t.fx.hq();
+  const before = () => t.db.prepare('SELECT geofence_m, qr_rotate_at, close_time FROM locations WHERE id = ?').get(a.id);
+  const was = before();
+  for (const [who, body] of [[dir, { geofence_m: 250 }], [dir, { geofence_m: 150, qr_rotate_at: '03:30' }], [hq, { geofence_m: 300, close_time: '21:00' }]]) {
+    const r = await t.as(who).patch(A + '/locations/' + a.id, body);
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.equal(r.body.error, 'unknown_field');
+    assert.equal(r.body.message, 'Locations no longer have a check-in radius. A scan of the code at the entrance is all a student needs.');
+  }
+  assert.deepEqual(before(), was, 'nothing was saved');
+  assert.equal(t.fx.audit('location.update').length, 0);
+  // scope still comes first: another location's director is refused as before (NF-1)
+  assert.equal((await t.as(t.fx.director(b)).patch(A + '/locations/' + a.id, { geofence_m: 250 })).status, 403);
+  // the location list no longer carries a radius
+  const list = await t.as(hq).get(A + '/locations');
+  assert.ok(list.body.locations.every(l => !('geofence_m' in l)));
+});
+
+test(['NF-5', 'AC-5'], 'Location settings and the HQ location form ask for no check-in radius and no latitude or longitude (D-49)', async () => {
+  const t = await makeApp();
+  const a = t.fx.location({ name: 'Irvine' });
+  const dir = t.fx.director(a), hq = t.fx.hq();
+  const fieldNames = root => root.findAll(n => n.tag === 'label').map(l => words(l));
+  const tab = accountsTab(t);
+  await tab.signIn(dir);
+  const mine = await tab.open('people/location');
+  assert.doesNotMatch(words(mine), /radius|latitude|longitude|map position/i);
+  mine.find(n => n.tag === 'form').dispatch('submit');
+  await tab.settle();
+  assert.match(tab.doc.getElementById('toasts').textContent, /Irvine is updated\./, 'saving the director form works without a radius');
+  const hqTab = accountsTab(t);
+  await hqTab.signIn(hq);
+  const page = await hqTab.open('locations');
+  page.find(n => n.tag === 'button' && n.textContent === 'Add a location').click();
+  await hqTab.settle();
+  const form = hqTab.main.find(n => n.tag === 'form');
+  assert.doesNotMatch(fieldNames(form).join(' | '), /radius|latitude|longitude/i);
+  form.findAll(n => n.tag === 'input')[0].value = 'Tustin';
+  form.find(n => n.tag === 'select').value = 'America/Los_Angeles';
+  form.dispatch('submit');
+  await hqTab.settle();
+  const made = t.db.prepare("SELECT lat, lng, geofence_m FROM locations WHERE name = 'Tustin'").get();
+  assert.deepEqual({ ...made }, { lat: 0, lng: 0, geofence_m: 150 }, 'HQ adds a location without coordinates');
+  assert.doesNotMatch(words(hqTab.main), /radius/i);
 });

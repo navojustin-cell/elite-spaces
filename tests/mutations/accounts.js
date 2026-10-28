@@ -284,5 +284,29 @@ module.exports = [
   // L51: the roster doesn't mark a parent "(not approved yet)"
   { name: 'the roster marks parents of an invited student as not approved', covers: ['AC-6'], file: V,
     find: "h('div', null, p.name),", repl: "h('div', null, p.name, p.link_status === 'pending' ? ' (not approved yet)' : '')," },
+
+  // ---- v1.1 NF-5 / D-49: locations need no coordinates or check-in radius ----
+  { name: 'a location edit still accepts a check-in radius', covers: ['NF-5', 'AC-5'], file: O,
+    find: '    refuseRadius(b);\n', repl: '' },
+  { name: 'a new location still accepts a check-in radius', covers: ['NF-5', 'AC-5'], file: O,
+    find: '    refuseRadius(req.body || {});\n', repl: '' },
+  { name: 'only a radius other than the old default is refused', covers: ['NF-5'], file: O,
+    find: 'if (b.geofence_m !== undefined) {', repl: 'if (b.geofence_m !== undefined && b.geofence_m !== 150 && b.geofence_m !== null) {' },
+  { name: 'the radius refusal answers before the location scope check', covers: ['NF-5', 'NF-1'], file: O,
+    find: "    if (!auth.canManageLocation(req.user, cur.id)) throw forbidden('You can only change your own location.');\n    refuseRadius(b);",
+    repl: "    refuseRadius(b);\n    if (!auth.canManageLocation(req.user, cur.id)) throw forbidden('You can only change your own location.');" },
+  { name: 'a new location without coordinates is refused', covers: ['NF-5', 'AC-5'], file: O,
+    find: '    out.lat = out.lat ?? 0;', repl: "    out.lat = out.lat ?? u.number(undefined, 'lat', 'a latitude', -90, 90);" },
+  { name: 'the location list still carries the radius', covers: ['NF-5'], file: O,
+    find: "const LOC_COLS = 'id, name, timezone, address, lat, lng, qr_rotate_at,", repl: "const LOC_COLS = 'id, name, timezone, address, lat, lng, geofence_m, qr_rotate_at," },
+  { name: 'Location settings still show the check-in radius', covers: ['NF-5'], file: V,
+    find: "      fact('New QR code each day at', App.hhmm(l.qr_rotate_at)),",
+    repl: "      fact('Check-in radius', l.geofence_m + ' m'),\n      fact('New QR code each day at', App.hhmm(l.qr_rotate_at))," },
+  { name: 'the location form still sends a check-in radius', covers: ['NF-5'], file: V,
+    find: 'const body = { qr_rotate_at: rotate.value, open_time: open.value, close_time: shut.value };',
+    repl: 'const body = { geofence_m: 150, qr_rotate_at: rotate.value, open_time: open.value, close_time: shut.value };' },
+  { name: 'the HQ location form still asks for latitude and longitude', covers: ['NF-5'], file: V,
+    find: "        field('Time zone', zone, 'Sessions, closing time and the daily QR code all follow this zone.'));",
+    repl: "        field('Time zone', zone, 'Sessions, closing time and the daily QR code all follow this zone.'),\n        h('div', { class: 'grid' }, field('Latitude', input('number', {})), field('Longitude', input('number', {}))));" },
 ];
 

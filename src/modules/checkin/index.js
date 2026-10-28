@@ -4,7 +4,7 @@
 // Routes, mounted at /api/checkin:
 //   POST /scan                       student scans the entrance code; checks in or out (CI-2, CI-3, CI-4)
 //   GET  /status                     parent: each linked student's status today; student: their own
-//   GET  /dev/simulate               dev mode only: today's code and the coordinates of the student's home location
+//   GET  /dev/simulate               dev mode only: { locationId, code } for the student's home location
 //   GET  /locations/:id/qr           staff+ of that location: today's code, its app URL and an SVG (CI-1)
 //   GET  /locations/:id/building     staff+: here / expected / left today and visits needing review (CI-7)
 //   GET  /locations/:id/students?q=  staff+: find a student at the location for a manual check-in
@@ -15,11 +15,12 @@
 //                                    an out_time equal to the current time out just confirms it
 // Job: auto-checkout (CI-5, D-14).
 //
-// Scan order: today's code -> home location (D-1) -> location not marked closed (R5) -> inside the radius -> an
-// open visit today means check-out -> otherwise an enrolled slot window means
+// Scan order: today's code -> home location (D-1) -> location not marked closed (R5) -> an
+// open visit today means check-out -> otherwise a scheduled date's window means
 // check-in. A scan within five minutes of the last check-in or check-out asks
-// before reversing it. Scan coordinates are used for the radius check only and
-// are never stored or logged (NF-5, D-23).
+// before reversing it. There is no location check (S-5, D-49): a scan of today's code
+// at the student's home location counts as being there, and any `lat`/`lng` in the
+// body is never read (NF-5).
 
 const express = require('express');
 const QRCode = require('qrcode');
@@ -33,12 +34,6 @@ const svc = require('./service');
 const CONFIRM_MS = 5 * 60000; // a second scan this soon after checking in (or out) asks first
 
 const refuse = (code, msg) => new AppError(403, code, msg);
-// Real coordinates only: a number on the globe for each. null, text, NaN, 1e308, or a latitude
-// past a pole (146.3154 lands back on Irvine) is refused before any distance is measured.
-const onGlobe = (n, max) => typeof n === 'number' && Math.abs(n) <= max;
-const coordsGiven = b => onGlobe(b.lat, 90) && onGlobe(b.lng, 180);
-// Fails closed: a distance that is not a number (NaN) counts as outside.
-const insideRadius = (loc, lat, lng) => time.distanceM(lat, lng, loc.lat, loc.lng) <= loc.geofence_m;
 // Body values that are objects or arrays are treated as missing, never a server error.
 const idOf = v => (typeof v === 'number' || typeof v === 'string' ? Number(v) || 0 : 0);
 const cleanReason = r => (typeof r === 'string' ? r : '').trim().slice(0, 200) || null;
@@ -78,15 +73,8 @@ function router(ctx) {
     }
     // A location marked closed takes no scans (R5); staff can still check a student out by hand.
     if (!loc.active) throw refuse('location_closed', `${loc.name} is marked closed, so scanning in and out is turned off. If you're here, ask staff at the front desk.`);
-    if (!coordsGiven(b)) throw bad('location_needed', "We need your phone's location to check you in. It's only used for this check and isn't saved.");
     const today = time.localDate(loc, now);
     const open = svc.openVisit(ctx, student.id, loc.id, today);
-    if (!insideRadius(loc, b.lat, b.lng)) {
-      throw refuse('outside_radius', open
-        ? `You need to be inside ${loc.name} to check out. If you are, ask staff to check you out.`
-        : `You need to be inside ${loc.name} to check in or out. If you are, ask staff to check you in.`);
-    }
-    // From here on the coordinates are not used again.
 
     if (open) {
       if (now - open.check_in_at < CONFIRM_MS && b.confirm !== true) {
@@ -135,12 +123,12 @@ function router(ctx) {
     res.json({ now, students: ids.map(id => svc.status(ctx, auth.getUser(ctx, id), now)).filter(Boolean) });
   });
 
-  // ---- dev only: scan without a camera or GPS ----
+  // ---- dev only: scan without a camera ----
   if (ctx.dev) {
     r.get('/dev/simulate', auth.requireRole('student'), (req, res) => {
       const loc = svc.getLocation(ctx, req.user.location_id);
       if (!loc) throw notFound('No home location.');
-      res.json({ locationId: loc.id, code: svc.currentCode(ctx, loc), lat: loc.lat, lng: loc.lng });
+      res.json({ locationId: loc.id, code: svc.currentCode(ctx, loc) });
     });
   }
 
@@ -285,6 +273,4 @@ module.exports = {
   jobs: [{ name: 'auto-checkout', run: ctx => svc.autoCheckout(ctx) }],
   // Read-only helper for other modules: the entrance code valid at `ms` (CI-1).
   currentCode: svc.currentCode,
-  // The radius check on its own, so a test can prove it fails closed on a NaN distance (CI-2).
-  insideRadius,
 };

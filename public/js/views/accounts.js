@@ -754,7 +754,7 @@
     return form;
   }
 
-  // A director's own location: radius, QR change time and hours (D-5).
+  // A director's own location: QR change time and hours (D-5). There is no check-in radius (D-49).
   async function locationTab(panel) {
     const { locations } = await App.api.get(A + '/locations');
     const l = locations[0];
@@ -762,7 +762,7 @@
     panel.append(h('section', { class: 'card', 'aria-labelledby': 'ac-loc-h' },
       h('h2', { id: 'ac-loc-h' }, l.name),
       facts(l),
-      h('p', { class: 'muted small' }, 'HQ manages the name, address, time zone and map position. You can change these settings:'),
+      h('p', { class: 'muted small' }, 'HQ manages the name, address and time zone. You can change these settings:'),
       settingsForm(l, false, () => App.refresh())));
   }
 
@@ -771,48 +771,42 @@
     return h('dl', { class: 'ac-facts' },
       fact('Time zone', zoneLabel(l.timezone)),
       fact('Hours', App.hhmm(l.open_time) + '–' + App.hhmm(l.close_time)),
-      fact('Check-in radius', l.geofence_m + ' m'),
       fact('New QR code each day at', App.hhmm(l.qr_rotate_at)),
       fact('Accounts', plural(l.student_count, 'student', 'students') + ' · ' + plural(l.staff_count, 'staff member', 'staff members')));
   }
 
-  // Location form. full = HQ (every field); otherwise a director's four settings.
+  // Location form. full = HQ (every field); otherwise a director's three settings.
+  // No coordinates or radius: check-in needs neither (D-49).
   function settingsForm(l, full, done, close) {
     const v = l || {};
-    const radius = input('number', { min: 25, max: 2000, step: 5, required: true, value: v.geofence_m ?? 150, inputmode: 'numeric' });
     const rotate = input('time', { required: true, value: v.qr_rotate_at || '04:00' });
     const open = input('time', { required: true, value: v.open_time || '09:00' });
     const shut = input('time', { required: true, value: v.close_time || '20:00' });
     const err = alertBox();
     const parts = [err];
-    let name, address, zone, lat, lng, active;
+    let name, address, zone, active;
     if (full) {
       name = input('text', { required: true, maxlength: 80, value: v.name || '' });
       address = input('text', { maxlength: 200, value: v.address || '', autocomplete: 'off' });
       zone = h('select', { required: true }, h('option', { value: '' }, 'Choose a time zone'),
         ...ZONES.concat(v.timezone && !ZONES.some(z => z[0] === v.timezone) ? [[v.timezone, v.timezone]] : [])
           .map(([z, label]) => h('option', { value: z, selected: z === v.timezone }, label)));
-      lat = input('number', { step: 'any', min: -90, max: 90, required: true, value: v.lat ?? '', inputmode: 'decimal' });
-      lng = input('number', { step: 'any', min: -180, max: 180, required: true, value: v.lng ?? '', inputmode: 'decimal' });
       parts.push(field('Location name', name), field('Street address', address),
-        field('Time zone', zone, 'Sessions, closing time and the daily QR code all follow this zone.'),
-        h('div', { class: 'grid' }, field('Latitude', lat), field('Longitude', lng)),
-        h('p', { class: 'hint muted small', style: 'margin-top:-.5rem' }, 'In Google Maps, right-click the building and click the two numbers at the top to copy them.'));
+        field('Time zone', zone, 'Sessions, closing time and the daily QR code all follow this zone.'));
       if (l) {
         active = h('select', null, h('option', { value: '1', selected: !!v.active }, 'Open'), h('option', { value: '0', selected: !v.active }, 'Closed'));
         parts.push(field('Status', active, 'A closed location no longer appears when families sign up.'));
       }
     }
     parts.push(
-      field('Check-in radius (meters)', radius, 'Students must be this close to the building to check in. 150 m suits most buildings.'),
       field('New QR code each day at', rotate, "Yesterday's entrance code stops working at this time, local to the location."),
       h('div', { class: 'grid' }, field('Opens at', open), field('Closes at', shut, 'Every session must fit inside these hours. Anyone still checked in is checked out automatically at closing time.')),
       h('div', { class: 'row' }, h('button', { class: 'btn btn-primary', type: 'submit' }, l ? 'Save changes' : 'Add location'),
         close && h('button', { class: 'btn btn-ghost', type: 'button', onclick: close }, 'Not now')));
     const form = h('form', full && l ? { class: 'ac-section' } : null, ...parts);
     onSubmit(form, err, async () => {
-      const body = { geofence_m: Number(radius.value), qr_rotate_at: rotate.value, open_time: open.value, close_time: shut.value };
-      if (full) Object.assign(body, { name: name.value, address: address.value, timezone: zone.value, lat: lat.value, lng: lng.value });
+      const body = { qr_rotate_at: rotate.value, open_time: open.value, close_time: shut.value };
+      if (full) Object.assign(body, { name: name.value, address: address.value, timezone: zone.value });
       if (active) body.active = active.value === '1';
       const r = l ? await App.api.patch(A + '/locations/' + l.id, body) : await App.api.post(A + '/locations', body);
       App.toast(l ? r.location.name + ' is updated.' : r.location.name + ' was added.');

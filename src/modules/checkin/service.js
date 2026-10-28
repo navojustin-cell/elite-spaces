@@ -1,13 +1,13 @@
 'use strict';
 // Check-in rules shared by the routes and the auto-checkout job: the daily QR
-// code (CI-1, D-12), enrolled-slot matching (CI-3, D-13), visits, and the
+// code (CI-1, D-12), scheduled-date matching (CI-3, D-13, D-47), visits, and the
 // parent notification for every check-in and check-out (CI-6).
-// Scan coordinates never reach this file: the scan route checks the radius
-// and drops them (NF-5, D-23).
+// There is no location check (D-49): nothing here reads coordinates (NF-5).
 
 const crypto = require('crypto');
 const time = require('../../time');
 const notify = require('../../notify');
+const dates = require('../sessions/dates');
 
 const EARLY_MS = 30 * 60000;            // D-13: check-in opens 30 minutes before a slot starts
 const LOOKAHEAD_DAYS = 14;              // how far ahead "your next session" looks
@@ -49,20 +49,43 @@ function checkCode(loc, given, ms) {
   return sameCode(given, codeOn(loc, time.addDays(day, -1))) ? 'expired' : 'bad';
 }
 
-// ---------- enrolled slots (CI-3, D-10, D-13) ----------
+// ---------- scheduled dates (CI-3, D-13, D-47) ----------
+
+// The schedule fields sessions/dates.js reads, from a slotsOn() query row.
+const schedOf = r => ({ id: r.session_id, weekdays: r.weekdays, term_start: r.term_start, term_end: r.term_end });
 
 // Every enrolled slot that runs at `loc` on `date`: an active enrollment in an
-// active session, on that weekday, inside the session's term, and not on a
-// closure day. studentId narrows it to one student.
+// active schedule that meets that day (D-47: added dates in, skipped ones out,
+// inside its term) and counts that day (D-42), not on a closure day.
+// studentId narrows it to one student. `weekday` is the date's ISO weekday.
 function slotsOn(ctx, loc, date, studentId = null) {
   if (ctx.db.prepare('SELECT 1 FROM closures WHERE location_id = ? AND date = ?').get(loc.id, date)) return [];
-  return ctx.db.prepare(`SELECT e.student_id, u.name AS student_name, e.weekday, s.id AS session_id, s.name, s.start_time, s.end_time
+  const rows = ctx.db.prepare(`SELECT e.student_id, u.name AS student_name, e.weekday AS enrolled_weekday, s.id AS session_id, s.name, s.weekdays,
+        s.start_time, s.end_time, t.start_date AS term_start, t.end_date AS term_end
       FROM enrollments e JOIN sessions s ON s.id = e.session_id JOIN terms t ON t.id = s.term_id JOIN users u ON u.id = e.student_id
-      WHERE e.status = 'active' AND e.weekday = ? AND s.status = 'active' AND s.location_id = ?
-        AND t.start_date <= ? AND t.end_date >= ? AND u.active = 1 AND (? IS NULL OR e.student_id = ?)
+      WHERE e.status = 'active' AND s.status = 'active' AND s.location_id = ? AND u.active = 1 AND (? IS NULL OR e.student_id = ?)
       ORDER BY s.start_time, s.id`)
-    .all(time.weekdayOfDate(date), loc.id, date, date, studentId, studentId)
-    .map(r => Object.assign(r, { date, start_at: time.toMs(loc, date, r.start_time), end_at: time.toMs(loc, date, r.end_time) }));
+    .all(loc.id, studentId, studentId);
+  if (!rows.length) return [];
+  const ov = dates.overrides(ctx, [...new Set(rows.map(r => r.session_id))]);
+  return rows.filter(r => dates.counts({ weekday: r.enrolled_weekday }, date) && dates.meets(schedOf(r), ov, date))
+    .map(r => ({ student_id: r.student_id, student_name: r.student_name, weekday: time.weekdayOfDate(date), session_id: r.session_id, name: r.name,
+      start_time: r.start_time, end_time: r.end_time, date, start_at: time.toMs(loc, date, r.start_time), end_at: time.toMs(loc, date, r.end_time) }));
+}
+
+// The student's schedules that would meet on `date` but were skipped (D-46), each with the
+// date it moved to, if it moved (in its term), else null. For the no-session message (CI-3, SC-5).
+function skippedOn(ctx, loc, studentId, date) {
+  return ctx.db.prepare(`SELECT s.name, e.weekday AS enrolled_weekday,
+        (SELECT a.date FROM session_dates a WHERE a.session_id = s.id AND a.kind = 'add' AND a.moved_from = d.date
+          AND a.date BETWEEN t.start_date AND t.end_date) AS moved_to
+      FROM session_dates d JOIN sessions s ON s.id = d.session_id JOIN terms t ON t.id = s.term_id
+      JOIN enrollments e ON e.session_id = s.id AND e.student_id = ? AND e.status = 'active'
+      WHERE d.kind = 'skip' AND d.date = ? AND s.status = 'active' AND s.location_id = ? AND d.date BETWEEN t.start_date AND t.end_date
+      ORDER BY s.start_time, s.id`)
+    .all(studentId, date, loc.id)
+    .filter(r => dates.counts({ weekday: r.enrolled_weekday }, date))
+    .map(r => ({ name: r.name, moved_to: r.moved_to }));
 }
 
 // The closure on `date` at `loc` (SC-3, D-19), or undefined.
@@ -188,8 +211,11 @@ function noSessionMessage(ctx, loc, studentId, ms) {
   if (next && time.localDate(loc, next.start_at) === time.localDate(loc, ms)) {
     return `Check-in for your ${clockTime(loc, next.start_at)} session opens at ${clockTime(loc, next.start_at - EARLY_MS)}. Staff can check you in if needed.`;
   }
-  return "You don't have a session right now." + (next ? ` Your next one is ${when(loc, next.start_at, ms)}.` : '')
-    + ' Staff can check you in if needed.';
+  // A schedule skipped today (D-46) says so, and where it moved to (SC-5).
+  const skipped = skippedOn(ctx, loc, studentId, time.localDate(loc, ms))[0];
+  const why = skipped ? `${skipped.name} doesn't meet today${skipped.moved_to ? ` (moved to ${dayName(loc, skipped.moved_to)})` : ''}.`
+    : "You don't have a session right now.";
+  return why + (next ? ` Your next one is ${when(loc, next.start_at, ms)}.` : '') + ' Staff can check you in if needed.';
 }
 
 // A scan on a closure day (SC-3, D-19): the center is closed, so it says so, with the reason,
@@ -362,7 +388,7 @@ function autoCheckout(ctx) {
 
 module.exports = {
   EARLY_MS, FLAG_REASON, getLocation, getVisit, qrDay, currentCode, codeExpiresAt, checkCode,
-  closureOn, slotsOn, slotNow, nextSlot, membershipOk, startsLater, stayAfter, stayEnd, visitCovers, openVisit, createVisit, closeVisit, lastCheckout, visitSession, slotIn,
+  closureOn, slotsOn, skippedOn, slotNow, nextSlot, membershipOk, startsLater, stayAfter, stayEnd, visitCovers, openVisit, createVisit, closeVisit, lastCheckout, visitSession, slotIn,
   firstName, clockTime, minutes, duration, dayName, when, noSessionMessage, closedMessage, announceCheckin, announceCheckout,
   publicLocation, building, status, autoCheckout,
 };

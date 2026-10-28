@@ -10,8 +10,10 @@
 //   POST  /staff/:id/reactivate        same scope
 //   POST  /staff/:id/reset-password    same scope -> new temporary password (shown once)
 //   GET   /locations                   director+: my location (HQ: all), with its directors
-//   POST  /locations                   HQ: create a location. Names are unique, ignoring case (L44)
-//   PATCH /locations/:id               HQ: any field; director: own location's radius, QR time and hours only (D-5).
+//   POST  /locations                   HQ: create a location. Names are unique, ignoring case (L44). lat/lng are
+//                                      optional (0 when missing); there is no check-in radius (D-49)
+//   PATCH /locations/:id               HQ: any field; director: own location's QR time and hours only (D-5).
+//                                      A body with geofence_m is refused: 400 unknown_field (D-49)
 //                                      New hours must still cover every active session of a term that hasn't ended (R4)
 //   POST  /directors                   HQ: { name, email, phone?, location_id } -> director + temporary password
 //   POST  /directors/assign            HQ: { user_id, location_id } -> make an existing staff member or director the director there.
@@ -26,9 +28,19 @@ const time = require('../../time');
 const { bad, forbidden, notFound, conflict } = require('../../errors');
 const u = require('./util');
 
-const LOC_COLS = 'id, name, timezone, address, lat, lng, geofence_m, qr_rotate_at, open_time, close_time, active, created_at';
-const DIRECTOR_FIELDS = ['geofence_m', 'qr_rotate_at', 'open_time', 'close_time'];
+const LOC_COLS = 'id, name, timezone, address, lat, lng, qr_rotate_at, open_time, close_time, active, created_at';
+const DIRECTOR_FIELDS = ['qr_rotate_at', 'open_time', 'close_time'];
 const HQ_FIELDS = ['name', 'timezone', 'address', 'lat', 'lng', 'active'];
+// D-49: locations have no check-in radius. New ones store the unused column's default.
+const UNUSED_RADIUS_M = 150;
+
+// D-49: a body that still sends a check-in radius is refused, the same way
+// membership refuses fields it doesn't store (D-22).
+function refuseRadius(b) {
+  if (b.geofence_m !== undefined) {
+    throw bad('unknown_field', 'Locations no longer have a check-in radius. A scan of the code at the entrance is all a student needs.');
+  }
+}
 
 // The location a request is about. HQ: the one asked for, or null for all.
 // Everyone else: their own, and asking for another one is refused (NF-1).
@@ -88,7 +100,6 @@ function locationFields(b, cur) {
     address: pick('address', v => u.optText(v, 'address', 'the address', 200)),
     lat: pick('lat', v => u.number(v, 'lat', 'a latitude', -90, 90)),
     lng: pick('lng', v => u.number(v, 'lng', 'a longitude', -180, 180)),
-    geofence_m: pick('geofence_m', v => u.number(v, 'geofence_m', 'a check-in radius in meters', 25, 2000, true)),
     qr_rotate_at: pick('qr_rotate_at', v => u.hhmm(v, 'qr_rotate_at', 'the QR code change time')),
     open_time: pick('open_time', v => u.hhmm(v, 'open_time', 'the opening time')),
     close_time: pick('close_time', v => u.hhmm(v, 'close_time', 'the closing time')),
@@ -97,9 +108,9 @@ function locationFields(b, cur) {
   if (!cur) {
     out.name = out.name ?? u.text(undefined, 'name', 'a location name');
     out.timezone = out.timezone ?? u.timezone(undefined);
-    out.lat = out.lat ?? u.number(undefined, 'lat', 'a latitude', -90, 90);
-    out.lng = out.lng ?? u.number(undefined, 'lng', 'a longitude', -180, 180);
-    out.geofence_m = out.geofence_m ?? 150;
+    // D-49: coordinates aren't needed; a location without them stores 0, 0.
+    out.lat = out.lat ?? 0;
+    out.lng = out.lng ?? 0;
     out.qr_rotate_at = out.qr_rotate_at ?? '04:00';
     out.open_time = out.open_time ?? '09:00';
     out.close_time = out.close_time ?? '20:00';
@@ -212,11 +223,12 @@ function routes(r, ctx) {
   });
 
   r.post('/locations', auth.requireRole('hq'), (req, res) => {
+    refuseRadius(req.body || {});
     const f = locationFields(req.body || {}, null);
     assertNameFree(db, f.name);
     const id = tx(db, () => {
       const id = Number(db.prepare(`INSERT INTO locations (name, timezone, address, lat, lng, geofence_m, qr_rotate_at, open_time, close_time, qr_secret, active, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(f.name, f.timezone, f.address, f.lat, f.lng, f.geofence_m, f.qr_rotate_at, f.open_time, f.close_time,
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(f.name, f.timezone, f.address, f.lat, f.lng, UNUSED_RADIUS_M, f.qr_rotate_at, f.open_time, f.close_time,
         crypto.randomBytes(16).toString('hex'), f.active, ctx.clock.now()).lastInsertRowid);
       audit.log(ctx, req.user, 'location.create', { targetType: 'location', targetId: id, locationId: id, detail: f });
       return id;
@@ -229,6 +241,7 @@ function routes(r, ctx) {
     const cur = db.prepare(`SELECT ${LOC_COLS} FROM locations WHERE id = ?`).get(Number(req.params.id) || 0);
     if (!cur) throw notFound('No such location.');
     if (!auth.canManageLocation(req.user, cur.id)) throw forbidden('You can only change your own location.');
+    refuseRadius(b);
     const asked = Object.keys(b).filter(k => b[k] !== undefined);
     if (req.user.role !== 'hq' && asked.some(k => HQ_FIELDS.includes(k))) {
       throw forbidden("Only HQ can change a location's name, time zone, address, map position or status.");
@@ -240,8 +253,8 @@ function routes(r, ctx) {
     if (changes.open_time || changes.close_time) assertSessionsFit(ctx, cur.id, f);
     if (Object.keys(changes).length) {
       tx(db, () => {
-        db.prepare(`UPDATE locations SET name = ?, timezone = ?, address = ?, lat = ?, lng = ?, geofence_m = ?, qr_rotate_at = ?,
-          open_time = ?, close_time = ?, active = ? WHERE id = ?`).run(f.name, f.timezone, f.address, f.lat, f.lng, f.geofence_m,
+        db.prepare(`UPDATE locations SET name = ?, timezone = ?, address = ?, lat = ?, lng = ?, qr_rotate_at = ?,
+          open_time = ?, close_time = ?, active = ? WHERE id = ?`).run(f.name, f.timezone, f.address, f.lat, f.lng,
           f.qr_rotate_at, f.open_time, f.close_time, f.active, cur.id);
         audit.log(ctx, req.user, 'location.update', { targetType: 'location', targetId: cur.id, locationId: cur.id, detail: changes });
       });

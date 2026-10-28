@@ -1,10 +1,11 @@
 /* Check-in views (PRD 1, CI-1..CI-7):
-   - student "Check in": camera scan with jsQR plus the phone's location, one button for in and out
+   - student "Check in": camera scan with jsQR, one button for in and out; after a check-in it asks
+     for today's goals through the notes API (/api/notes/goals/today, D-50)
    - #/scan/<locationId>/<code>: the link a phone camera opens from the entrance QR; finishes the scan
    - staff "In the building": here / expected / left, manual check-in and check-out, visits needing review
    - "Entrance QR": today's code full screen (or printed), refreshing itself
    - Home cards: student scan button + status, parent status per student, staff counts.
-   The phone's coordinates go to the scan request only; nothing here stores them (NF-5). */
+   The scan sends the code only: the app never asks for the phone's location (S-5, D-49, NF-5). */
 (function () {
   'use strict';
   const { h } = App;
@@ -18,8 +19,6 @@
     .ci-result { text-align: center; padding: 18px 16px; }
     .ci-result .ci-big { display: block; font-size: 1.9rem; font-weight: 800; line-height: 1.15; margin: .1rem 0 .35rem; }
     .ci-result p { margin: 0 0 .5rem; }
-    .ci-help { margin-top: .5rem; }
-    .ci-help ol { margin: .4rem 0 0; padding-left: 1.2rem; }
     .ci-cam { position: relative; border-radius: var(--radius); overflow: hidden; background: #000; aspect-ratio: 1 / 1; width: 100%; max-width: 420px; margin: 0 auto 12px; }
     .ci-cam video { width: 100%; height: 100%; object-fit: cover; display: block; }
     .ci-cam .ci-frame { position: absolute; inset: 16%; border: 3px solid rgba(255,255,255,.9); border-radius: 18px; box-shadow: 0 0 0 999px rgba(0,0,0,.28); pointer-events: none; }
@@ -91,16 +90,7 @@
     return h('span', { class: 'badge' }, 'Not in');
   }
 
-  // ---------- permissions help (camera and location), named per phone ----------
-  function locationHelp() {
-    const p = platform();
-    if (p === 'ios') return ['Open Settings › Privacy & Security › Location Services and make sure it is on.',
-      'Scroll to Safari Websites (or ELITE Spaces, if you added it to your Home Screen) and choose "While Using the App".',
-      'Come back here and scan again.'];
-    if (p === 'android') return ['Tap the icon to the left of the web address, then Permissions › Location › Allow.',
-      'Make sure Location is on in your quick settings.', 'Come back here and scan again.'];
-    return ['Allow location for this site in your browser\'s site settings.', 'Then scan again.'];
-  }
+  // ---------- camera permission help, named per phone ----------
   function cameraHelp() {
     const p = platform();
     if (p === 'ios') return ['Open Settings › Safari › Camera and choose "Allow" (or Settings › ELITE Spaces › Camera if you added it to your Home Screen).',
@@ -108,16 +98,6 @@
     if (p === 'android') return ['Tap the icon to the left of the web address, then Permissions › Camera › Allow.',
       'Come back here and tap Scan again.', 'Or open your phone\'s Camera app and point it at the code. It opens this app for you.'];
     return ['Allow the camera for this site in your browser\'s site settings, then tap Scan again.'];
-  }
-
-  function getPosition() {
-    return new Promise((resolve, reject) => {
-      if (!navigator.geolocation) return reject({ code: 'unsupported' });
-      navigator.geolocation.getCurrentPosition(
-        p => resolve({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy }),
-        e => reject({ code: e.code }),
-        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
-    });
   }
 
   // ---------- the scan panel (student Check in view and the #/scan link) ----------
@@ -134,7 +114,6 @@
     const devBtn = App.me && App.me.dev && h('button', { class: 'btn btn-block', type: 'button', onclick: simulate }, 'Simulate scan at my location (dev)');
     el.append(statusBox, result, camBox,
       h('div', { class: 'card' }, scanBtn,
-        h('p', { class: 'muted small ci-help' }, "When you scan, we check that you're in the building. Your location isn't saved."),
         helpLine,
         devBtn && h('div', { style: 'margin-top:.75rem' }, devBtn)));
 
@@ -157,9 +136,6 @@
         : `Having trouble? Ask staff at the front desk to check you ${status.state === 'here' ? 'out' : 'in'}.`;
     }
 
-    function busy(text) {
-      result.replaceChildren(h('div', { class: 'card ci-result', 'aria-busy': 'true' }, h('p', { class: 'muted', style: 'margin:0' }, text)));
-    }
     function showError(title, text, { steps, retry } = {}) {
       result.replaceChildren(h('div', { class: 'card ci-result', role: 'alert' },
         h('div', { class: 'notice notice-danger', style: 'text-align:left' }, h('strong', null, title), h('div', null, text),
@@ -181,6 +157,33 @@
       result.replaceChildren(box);
       box.setAttribute('tabindex', '-1');
       box.focus({ preventScroll: false });
+      // After a check-in (never a check-out) the student is asked for today's goals (D-50, DG-3).
+      if (r.action === 'checkin') askGoals();
+    }
+    // Today's goals, from the notes module: not answered -> set or skip; set -> the subjects and Edit.
+    // A failed load shows nothing: the check-in itself already worked.
+    async function askGoals() {
+      const box = h('div', { class: 'card' });
+      result.append(box);
+      let g;
+      try { g = await App.api.get('/api/notes/goals/today'); } catch (_) { box.remove(); return; }
+      if (!box.isConnected) return;
+      if (g.status === 'set') {
+        box.append(h('p', { style: 'margin:0 0 .5rem' }, h('strong', null, "Today's goals: "), g.goals.map(x => x.subject_label).join(' · ')),
+          h('a', { class: 'btn', href: '#/goals', 'aria-label': "Edit today's goals" }, 'Edit'));
+        return;
+      }
+      if (g.status !== 'none') { box.remove(); return; }
+      const skip = h('button', { class: 'btn', type: 'button', onclick: async e => {
+        await App.run(e.currentTarget, async () => {
+          await App.api.post('/api/notes/goals/today/skip', {});
+          const done = h('p', { style: 'margin:0', tabindex: '-1' }, 'Skipped. You can still add goals from Home today.');
+          box.replaceChildren(done);
+          done.focus(); // the Skip button is gone, so focus stays on the answer
+        });
+      } }, 'Skip today');
+      box.append(h('h2', null, 'What are you working on today?'),
+        h('div', { class: 'ci-actions' }, h('a', { class: 'btn btn-primary', href: '#/goals' }, "Set today's goals"), skip));
     }
     // A second scan soon after checking in (or out) asks before undoing it.
     function askFirst(message, { yes, no, kept }, go) {
@@ -193,35 +196,22 @@
 
     const TITLES = {
       code_expired: 'This code has expired', bad_code: "That code didn't work", wrong_location: 'This is a different location',
-      outside_radius: "We couldn't confirm you're in the building", no_session: 'No session right now',
-      membership_inactive: "Your membership isn't active", location_needed: 'We need your location',
+      no_session: 'No session right now', membership_inactive: "Your membership isn't active",
       location_closed: 'This location is closed', checked_out_auto: "You're already checked out", closed_today: 'Closed today',
     };
 
-    // Send one scan. `pos` is reused when the student confirms a check-out, so they aren't asked twice.
-    async function submit(target, pos, confirm) {
-      busy("Checking you're in the building…");
-      if (!pos) {
-        try { pos = await getPosition(); } catch (e) {
-          if (e.code === 1) return showError('Location is turned off for ELITE Spaces', "We use your location once, to check you're in the building. It isn't saved.", { steps: locationHelp(), retry: () => submit(target) });
-          if (e.code === 'unsupported') return showError("This browser can't share your location", 'Ask staff at the front desk to check you in.');
-          return showError("We couldn't find your location", 'Step near a window or the entrance, then try again. If it keeps happening, ask staff to check you in.', { retry: () => submit(target) });
-        }
-      }
+    // Send one scan: the code only (D-49).
+    async function submit(target, confirm) {
       try {
-        const r = await App.api.post(API + '/scan', { locationId: target.locationId, code: target.code, lat: pos.lat, lng: pos.lng, confirm: confirm || undefined });
+        const r = await App.api.post(API + '/scan', { locationId: target.locationId, code: target.code, confirm: confirm || undefined });
         showSuccess(r);
         loadStatus();
       } catch (e) {
-        if (e.code === 'confirm_checkout') return askFirst(e.message, { yes: 'Check out', no: 'Stay checked in', kept: "OK, you're still checked in." }, () => submit(target, pos, true));
-        if (e.code === 'confirm_checkin') return askFirst(e.message, { yes: 'Check back in', no: 'Stay checked out', kept: "OK, you're still checked out." }, () => submit(target, pos, true));
+        if (e.code === 'confirm_checkout') return askFirst(e.message, { yes: 'Check out', no: 'Stay checked in', kept: "OK, you're still checked in." }, () => submit(target, true));
+        if (e.code === 'confirm_checkin') return askFirst(e.message, { yes: 'Check back in', no: 'Stay checked out', kept: "OK, you're still checked out." }, () => submit(target, true));
         // After any refused scan the status card is refreshed so it matches the message; on a closure
         // day (which keeps the no_session code) it also says whether today is closed (L31).
         await loadStatus();
-        if (e.code === 'outside_radius' && pos.accuracy > 75) {
-          const inOut = status && status.state === 'here' ? 'out' : 'in';
-          return showError("Your phone's location is fuzzy right now", `It's only accurate to about ${Math.round(pos.accuracy)} m. Step near a window or the entrance and try again, or ask staff to check you ${inOut}.`, { retry: () => submit(target) });
-        }
         const closed = e.code === 'no_session' && status && status.closed_today;
         showError(TITLES[closed ? 'closed_today' : e.code] || "We couldn't check you in", e.message);
       }
@@ -285,7 +275,7 @@
     async function simulate(e) {
       await App.run(e.currentTarget, async () => {
         const s = await App.api.get(API + '/dev/simulate');
-        await submit({ locationId: s.locationId, code: s.code }, { lat: s.lat, lng: s.lng, accuracy: 5 });
+        await submit({ locationId: s.locationId, code: s.code });
       });
     }
 
@@ -325,7 +315,7 @@
   });
 
   // ---------- staff: In the building ----------
-  const IN_REASONS = ['Phone is dead', 'Forgot phone', "Location check didn't work", "Camera didn't work", 'Other'];
+  const IN_REASONS = ['Phone is dead', 'Forgot phone', "Camera didn't work", 'Other'];
   const OUT_REASONS = ['Phone is dead', 'Forgot to scan out', 'Leaving early', 'Other'];
 
   // One reusable dialog for every check-in/out sheet. Closing it any way (Cancel, Escape, done)

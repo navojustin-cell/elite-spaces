@@ -6,23 +6,22 @@ const { test, makeApp, assert, load, at } = require('./lib');
 
 const LA = 'America/Los_Angeles', TO = 'America/Toronto';
 const mod = () => load('src/modules/checkin/index.js');
-const M_PER_DEG = 6371000 * Math.PI / 180;
-// A point `m` metres due north of the location.
-const north = (loc, m) => ({ lat: loc.lat + m / M_PER_DEG, lng: loc.lng });
 
-// Irvine (LA), one family enrolled in Afternoon Study on Wednesdays (13:00-16:00),
+// Irvine (LA), one family enrolled in Afternoon Study on Wednesdays (13:00-16:00), a v1
+// per-weekday row (D-42: it counts only on Wednesdays; `weekday: 0` makes it the whole schedule),
 // clock at Wed 2026-10-14 13:05 local.
+// A scan sends the code only (D-49).
 async function setup(opts = {}) {
   const t = await makeApp({ now: at(LA, '2026-10-14', '13:05'), dev: opts.dev });
   const loc = t.fx.location(Object.assign({ name: 'Irvine' }, opts.location));
   const fam = t.fx.family(loc, opts.family);
   const sess = t.fx.session(loc, { name: 'Afternoon Study', start: '13:00', end: '16:00', weekdays: '1,3,5' });
-  t.fx.enroll(fam.student, sess, 3);
+  t.fx.enroll(fam.student, sess, opts.weekday ?? 3);
   rename(t, fam.student, 'Maya Johnson');
   const staff = t.fx.staff(loc, { name: 'Chris Ortiz' });
   const code = (l = loc) => mod().currentCode(t.ctx, l, t.clock.now());
   const scan = (student = fam.student, extra = {}) =>
-    t.as(student).post('/api/checkin/scan', Object.assign({ locationId: loc.id, code: code() }, north(loc, 20), extra));
+    t.as(student).post('/api/checkin/scan', Object.assign({ locationId: loc.id, code: code() }, extra));
   return Object.assign(t, { loc, fam, sess, staff, code, scan });
 }
 function rename(t, user, name) {
@@ -127,28 +126,27 @@ test(['CI-1'], 'a code with non-ASCII characters is refused as a bad code, not a
 
 // ---------------------------------------------------------------- CI-2 location check
 
-test(['CI-2'], "scans outside the location's radius, or without a location, are refused", async () => {
+test(['CI-2', 'NF-5'], "a scan of today's code at the home location is being there: no coordinates are needed, and any sent are ignored (S-5, D-49)", async () => {
   const t = await setup();
-  const leo = kid(t, t.loc, 'Leo Garcia', t.sess, [3]);
-  const far = await t.scan(leo, north(t.loc, 165)); // radius 150 m
-  assert.equal(far.status, 403);
-  assert.equal(far.body.error, 'outside_radius');
-  assert.equal(far.body.message, 'You need to be inside Irvine to check in or out. If you are, ask staff to check you in.');
-  const none = await t.scan(leo, { lat: null, lng: null });
-  assert.equal(none.status, 400);
-  assert.equal(none.body.error, 'location_needed');
-  const text = await t.scan(leo, { lat: String(t.loc.lat), lng: String(t.loc.lng) });
-  assert.equal(text.body.error, 'location_needed');
-  assert.equal(visitsOf(t, leo).length, 0);
-  // just inside the radius works
-  const near = await t.scan(t.fam.student, north(t.loc, 140));
-  assert.equal(near.status, 200);
-  assert.equal(near.body.action, 'checkin');
-  // the radius is the location's own setting (D-5)
-  t.db.prepare('UPDATE locations SET geofence_m = 200 WHERE id = ?').run(t.loc.id);
-  const wider = await t.scan(leo, north(t.loc, 165));
-  assert.equal(wider.status, 200);
-  assert.equal(visitsOf(t, leo).length, 1);
+  // the location itself needs no coordinates or radius (stored as 0, 0 and a radius nobody could be inside)
+  t.db.prepare('UPDATE locations SET lat = 0, lng = 0, geofence_m = 1 WHERE id = ?').run(t.loc.id);
+  const plain = await t.scan();
+  assert.equal(plain.status, 200, JSON.stringify(plain.body));
+  assert.equal(plain.body.action, 'checkin');
+  // far away, past a pole, text, objects: never read, so each one checks its student in
+  const sent = [{ lat: 40.7128, lng: -74.006 }, { lat: 1e308, lng: 1e308 }, { lat: 146.3154, lng: 62.1735 },
+    { lat: 'north', lng: null }, { lat: { toString: 1 }, lng: [1] }];
+  for (const [i, c] of sent.entries()) {
+    const kidN = kid(t, t.loc, 'Kid ' + i, t.sess, [3]);
+    const r = await t.scan(kidN, c);
+    assert.equal(r.status, 200, JSON.stringify(c));
+    assert.equal(r.body.action, 'checkin', JSON.stringify(c));
+  }
+  // and the same goes for a check-out
+  setClock(t, '15:00');
+  const out = await t.scan(undefined, { lat: 40.7128, lng: -74.006 });
+  assert.equal(out.body.action, 'checkout');
+  assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM visits').get().n, 6);
 });
 
 test(['CI-2', 'NF-1'], 'only students scan, and only at their home location (D-1)', async () => {
@@ -160,46 +158,12 @@ test(['CI-2', 'NF-1'], 'only students scan, and only at their home location (D-1
   assert.equal(r.body.error, 'wrong_location');
   assert.equal(r.body.message, "This code is for Irvine. You're a member at Arcadia. Scan the code at Arcadia, or ask staff at the front desk.");
   for (const u of [t.fam.parent, t.staff, t.fx.director(t.loc), t.fx.hq()]) {
-    const x = await t.as(u).post('/api/checkin/scan', Object.assign({ locationId: t.loc.id, code: t.code() }, north(t.loc, 10)));
+    const x = await t.as(u).post('/api/checkin/scan', { locationId: t.loc.id, code: t.code() });
     assert.equal(x.status, 403, u.role);
     assert.equal(x.body.error, 'forbidden', u.role);
   }
   assert.equal((await t.anon.post('/api/checkin/scan', { locationId: t.loc.id, code: t.code() })).status, 401);
   assert.equal(t.db.prepare('SELECT COUNT(*) AS n FROM visits').get().n, 0);
-});
-
-test(['CI-2'], 'coordinates that are not a real place on Earth are refused, even ones that measure 0 m from the building', async () => {
-  const t = await setup();
-  const dist = (c) => load('src/time.js').distanceM(c.lat, c.lng, t.loc.lat, t.loc.lng);
-  const huge = { lat: 1e308, lng: 1e308 };
-  assert.ok(Number.isNaN(dist(huge)), 'the distance from 1e308 is not a number');
-  // past a pole or once round the globe: each lands back on Irvine (33.6846, -117.8265)
-  const wrapped = [{ lat: 146.3154, lng: 62.1735 }, { lat: -213.6846, lng: 62.1735 }, { lat: 33.6846, lng: 242.1735 }, { lat: 33.6846, lng: -477.8265 }];
-  for (const c of wrapped) assert.ok(dist(c) < 1, `${JSON.stringify(c)} measures ${dist(c)} m`);
-  for (const c of [huge, ...wrapped]) {
-    const r = await t.scan(undefined, c);
-    assert.equal(r.status, 400, JSON.stringify(c));
-    assert.equal(r.body.error, 'location_needed', JSON.stringify(c));
-    assert.equal(r.body.message, "We need your phone's location to check you in. It's only used for this check and isn't saved.");
-  }
-  assert.equal(visitsOf(t, t.fam.student).length, 0, 'no visit written');
-  assert.equal(t.fx.notifications(t.fam.parent).length, 0);
-  // the same coordinates can't check a student out either
-  assert.equal((await t.scan()).body.action, 'checkin');
-  setClock(t, '15:30');
-  for (const c of [huge, ...wrapped]) assert.equal((await t.scan(undefined, c)).body.error, 'location_needed', JSON.stringify(c));
-  assert.equal(visitsOf(t, t.fam.student)[0].check_out_at, null);
-  assert.equal(t.fx.notifications(t.fam.parent, 'checkout').length, 0);
-});
-
-test(['CI-2'], 'the radius check fails closed: a distance that is not a number counts as outside', async () => {
-  const t = await setup();
-  const inside = (c) => mod().insideRadius(t.loc, c.lat, c.lng);
-  assert.equal(inside({ lat: 1e308, lng: 1e308 }), false);
-  assert.equal(inside({ lat: NaN, lng: t.loc.lng }), false);
-  assert.equal(inside({ lat: t.loc.lat, lng: Infinity }), false);
-  assert.equal(inside(north(t.loc, 140)), true);
-  assert.equal(inside(north(t.loc, 165)), false);
 });
 
 // ---------------------------------------------------------------- CI-3 enrolled slot
@@ -466,7 +430,7 @@ test(['CI-5', 'NF-4', 'CI-3'], "check-in windows and auto-checkout run on each l
   const fam = t.fx.family(to);
   const s = t.fx.session(to, { name: 'Morning Focus', weekdays: '3', start: '09:00', end: '11:30' });
   t.fx.enroll(fam.student, s, 3);
-  const r = await t.as(fam.student).post('/api/checkin/scan', Object.assign({ locationId: to.id, code: mod().currentCode(t.ctx, to, t.clock.now()) }, north(to, 10)));
+  const r = await t.as(fam.student).post('/api/checkin/scan', { locationId: to.id, code: mod().currentCode(t.ctx, to, t.clock.now()) });
   assert.equal(r.status, 200);
   assert.equal(r.body.session.end_at, at(TO, '2026-10-14', '11:30'));
   assert.equal(visitsOf(t, fam.student)[0].local_date, '2026-10-14');
@@ -855,7 +819,7 @@ test(['NF-1', 'CI-7'], "In the building never mixes in another location's visits
   const t = await setup();
   const arcadia = t.fx.location({ name: 'Arcadia' });
   const arcSess = t.fx.session(arcadia, { name: 'Arcadia Study', weekdays: '3', start: '13:00', end: '16:00' });
-  const arcScan = s => t.as(s).post('/api/checkin/scan', Object.assign({ locationId: arcadia.id, code: t.code(arcadia) }, north(arcadia, 10)));
+  const arcScan = s => t.as(s).post('/api/checkin/scan', { locationId: arcadia.id, code: t.code(arcadia) });
   // Irvine: Maya stays, Leo comes and goes, Ivy has a flagged visit from yesterday
   const leo = kid(t, t.loc, 'Leo Garcia', t.sess, [3]);
   const ivy = kid(t, t.loc, 'Ivy Chen');
@@ -934,7 +898,7 @@ test(['NF-1', 'CI-2'], 'the scan simulator exists only in dev mode and only for 
   const t = await setup({ dev: true });
   const r = await t.as(t.fam.student).get('/api/checkin/dev/simulate');
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body, { locationId: t.loc.id, code: t.code(), lat: t.loc.lat, lng: t.loc.lng });
+  assert.deepEqual(r.body, { locationId: t.loc.id, code: t.code() });
   for (const u of [t.fam.parent, t.staff]) assert.equal((await t.as(u).get('/api/checkin/dev/simulate')).status, 403, u.role);
   const scan = await t.as(t.fam.student).post('/api/checkin/scan', r.body);
   assert.equal(scan.status, 200);
@@ -943,11 +907,11 @@ test(['NF-1', 'CI-2'], 'the scan simulator exists only in dev mode and only for 
 
 // ---------------------------------------------------------------- NF-5 privacy, NF-6 speed
 
-test(['NF-5', 'CI-2'], 'scan coordinates are used for the radius check and never stored or logged', async () => {
+test(['NF-5', 'CI-2'], 'coordinates sent with a scan are never stored, logged or sent back (D-49)', async () => {
   const t = await setup();
   const leo = kid(t, t.loc, 'Leo Garcia', t.sess, [3]);
-  const lat = t.loc.lat + 0.000123457, lng = t.loc.lng - 0.000098765;     // ~15 m away
-  const farLat = t.loc.lat + 0.004567891, farLng = t.loc.lng + 0.003456789; // ~600 m away
+  const lat = 33.68471234567, lng = -117.82659876543;
+  const farLat = 33.68916789123, farLng = -117.82304321987;
   const printed = [];
   const saved = {};
   for (const k of ['log', 'info', 'warn', 'error', 'debug']) { saved[k] = console[k]; console[k] = (...a) => printed.push(a.map(String).join(' ')); }
@@ -960,15 +924,17 @@ test(['NF-5', 'CI-2'], 'scan coordinates are used for the radius check and never
   } finally {
     Object.assign(console, saved);
   }
-  assert.deepEqual([a.body.action, b.body.action, c.body.error], ['checkin', 'checkout', 'outside_radius']);
+  assert.deepEqual([a.body.action, b.body.action, c.body.action], ['checkin', 'checkout', 'checkin']);
   assert.equal(t.fx.notifications(t.fam.parent).length, 2, 'the scans did write visits and notifications');
   const tables = t.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(r => r.name);
   const dump = tables.map(n => JSON.stringify(t.db.prepare(`SELECT * FROM "${n}"`).all())).join('\n');
   const out = printed.join('\n');
+  const replies = JSON.stringify([a.body, b.body, c.body]);
   for (const n of [lat, lng, farLat, farLng]) {
     for (const s of [String(n), n.toFixed(6), n.toFixed(5)]) {
       assert.ok(!dump.includes(s), `database holds ${s}`);
       assert.ok(!out.includes(s), `console printed ${s}`);
+      assert.ok(!replies.includes(s), `a reply echoed ${s}`);
     }
   }
   const cols = t.db.prepare('PRAGMA table_info(visits)').all().map(x => x.name);
@@ -1017,7 +983,7 @@ test(['NF-4', 'CI-3', 'CI-4', 'CI-7'], "an evening in Los Angeles is still that 
   t.fx.enroll(fam.student, eve, 3);
   const staff = t.fx.staff(loc);
   const scan = () => t.as(fam.student).post('/api/checkin/scan',
-    Object.assign({ locationId: loc.id, code: mod().currentCode(t.ctx, loc, t.clock.now()) }, north(loc, 10)));
+    { locationId: loc.id, code: mod().currentCode(t.ctx, loc, t.clock.now()) });
 
   const r = await scan();
   assert.equal(r.status, 200, JSON.stringify(r.body));
@@ -1057,21 +1023,6 @@ test(['NF-4', 'CI-7'], "a corrected time out is read in the visit's own location
   assert.equal(r.status, 200);
   assert.equal(r.body.visit.check_out_at, at(TO, '2026-10-13', '15:10'));
   assert.equal(visitsOf(t, fam.student)[0].check_out_at, at(TO, '2026-10-13', '15:10'));
-});
-
-test(['CI-2', 'CI-4'], 'checking out needs the phone inside the radius too; a scan from outside leaves the visit open', async () => {
-  const t = await setup();
-  assert.equal((await t.scan()).body.action, 'checkin');
-  setClock(t, '15:30');
-  const far = await t.scan(t.fam.student, north(t.loc, 165)); // radius 150 m
-  assert.equal(far.status, 403);
-  assert.equal(far.body.error, 'outside_radius');
-  assert.equal(far.body.message, 'You need to be inside Irvine to check out. If you are, ask staff to check you out.');
-  const [v] = visitsOf(t, t.fam.student);
-  assert.deepEqual([v.check_out_at, v.checkout_method], [null, null]);
-  assert.equal(t.fx.notifications(t.fam.parent, 'checkout').length, 0);
-  const near = await t.scan(t.fam.student, north(t.loc, 140));
-  assert.equal(near.body.action, 'checkout');
 });
 
 // ---------------------------------------------------------------- malformed requests: a clear answer, never a server error
@@ -1552,6 +1503,8 @@ class El {
   }
   click() { this.dispatch('click'); }
   focus() { this.doc.focused = this; }
+  showModal() { this.open = true; }
+  close() { this.open = false; this.dispatch('close'); }
   adopt(kids) { return kids.map(k => { const n = k instanceof El ? k : new El(this.doc, null, String(k)); n.remove(); n.parentNode = this; return n; }); }
   append(...kids) { this.childNodes.push(...this.adopt(kids)); }
   appendChild(k) { this.append(k); return k; }
@@ -1572,7 +1525,9 @@ class El {
 
 // One tab running the real shell and the check-in view (read from ROOT, so the
 // mutation runner's copy is the one exercised) against the test server.
-function shellTab(t) {
+// `stub` answers some requests itself ({ 'GET /api/notes/goals/today': () => [200, body] }), for the
+// notes module a scoped run doesn't load; `requests` lists every request the tab sent.
+function shellTab(t, { stub = {}, navigator = {} } = {}) {
   const vm = require('vm'), fs = require('fs'), path = require('path'), crypto = require('crypto');
   const { ROOT } = require('./lib');
   let cookie = '';
@@ -1603,9 +1558,19 @@ function shellTab(t) {
     },
   };
   class EventSource { close() {} }
-  const fetchAs = (url, opts = {}) => track(fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie }) }))
-    .then(async r => new Response(await r.arrayBuffer(), { status: r.status, headers: r.headers })));
-  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, console, navigator: {}, location, EventSource,
+  const requests = [];
+  const fetchAs = (url, opts = {}) => {
+    const method = (opts.method || 'GET').toUpperCase();
+    requests.push({ method, url, body: opts.body ? JSON.parse(opts.body) : undefined });
+    const fake = stub[method + ' ' + url];
+    if (fake) {
+      const [status, body] = fake();
+      return track(Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })));
+    }
+    return track(fetch(t.base + url, Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { cookie }) }))
+      .then(async r => new Response(await r.arrayBuffer(), { status: r.status, headers: r.headers })));
+  };
+  const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, console, navigator, location, EventSource,
     history: { replaceState(_s, _t, url) { location._hash = String(url).replace(/^[^#]*/, ''); } },
     addEventListener(type, fn) { (winOn[type] = winOn[type] || []).push(fn); },
     setTimeout: (fn, ms) => setTimeout(fn, ms).unref(), clearTimeout,
@@ -1620,7 +1585,7 @@ function shellTab(t) {
     } while (pending.size);
   };
   return {
-    doc, settle, main: () => doc.getElementById('main'), App: win.App,
+    doc, settle, requests, main: () => doc.getElementById('main'), App: win.App,
     async open(user, hash) {
       const token = crypto.randomBytes(16).toString('hex');
       t.ctx.sessions.set(token, user.id);
@@ -1792,4 +1757,167 @@ test(['CI-7'], "the Needs review buttons' screen-reader names contain their visi
   const buttons = byTag(tab.main(), 'button').filter(b => /^(Time is right|Fix time out)$/.test(b.textContent));
   assert.deepEqual(buttons.map(b => [b.textContent, b.getAttribute('aria-label')]),
     [['Time is right', 'Time is right for Maya Johnson'], ['Fix time out', 'Fix time out for Maya Johnson']]);
+});
+
+// ---------------------------------------------------------------- v1.1: whole schedules and date changes (D-42, D-46, D-47)
+
+test(['CI-3', 'SC-5'], 'a whole-schedule enrollment checks in on every meeting date of the schedule, and on no other day', async () => {
+  const t = await setup({ weekday: 0 }); // Afternoon Study meets Mon, Wed, Fri
+  const day = async (date, wd) => {
+    setClock(t, '13:05', date);
+    const r = await t.scan();
+    assert.equal(r.status, 200, date + ' ' + JSON.stringify(r.body));
+    assert.equal(r.body.action, 'checkin', date);
+    assert.equal(r.body.session.id, t.sess.id, date);
+    // the visit keeps the date's own ISO weekday, never the enrollment's 0
+    assert.equal(visitsOf(t, t.fam.student).pop().weekday, wd, date);
+    setClock(t, '15:00', date);
+    assert.equal((await t.scan()).body.action, 'checkout', date);
+  };
+  await day('2026-10-14', 3);
+  await day('2026-10-16', 5);
+  await day('2026-10-19', 1);
+  setClock(t, '13:05', '2026-10-20');
+  const tue = await t.scan();
+  assert.equal(tue.status, 403);
+  assert.equal(tue.body.error, 'no_session');
+  assert.equal(tue.body.message, "You don't have a session right now. Your next one is tomorrow at 1:00 PM. Staff can check you in if needed.");
+  assert.equal(visitsOf(t, t.fam.student).length, 3);
+});
+
+test(['SC-5', 'CI-3'], 'an added date checks in, linked to the schedule; a skipped date is refused and says where it moved', async () => {
+  const t = await setup({ weekday: 0 });
+  // Monday Oct 19 moves to Tuesday Oct 20; Wednesday Oct 21 is skipped
+  t.fx.sessionDate(t.sess, '2026-10-19', 'skip', { reason: 'Staff training day' });
+  t.fx.sessionDate(t.sess, '2026-10-20', 'add', { moved_from: '2026-10-19', reason: 'Staff training day' });
+  t.fx.sessionDate(t.sess, '2026-10-21', 'skip', { reason: 'Field trip' });
+  const fay = kid(t, t.loc, 'Fay Friday', t.sess, [5]); // a v1 Friday-only row: Monday was never hers
+  const nia = kid(t, t.loc, 'Nia None');
+  setClock(t, '13:05', '2026-10-19');
+  const mon = await t.scan();
+  assert.equal(mon.status, 403);
+  assert.equal(mon.body.error, 'no_session');
+  assert.equal(mon.body.message, "Afternoon Study doesn't meet today (moved to Tue, Oct 20). Your next one is tomorrow at 1:00 PM. Staff can check you in if needed.");
+  assert.equal((await t.scan(fay)).body.message, "You don't have a session right now. Your next one is Fri, Oct 23 at 1:00 PM. Staff can check you in if needed.");
+  assert.equal((await t.scan(nia)).body.message, "You don't have a session right now. Staff can check you in if needed.");
+  assert.equal(visitsOf(t, t.fam.student).length, 0);
+  assert.equal(t.fx.notifications(t.fam.parent).length, 0);
+  // the added Tuesday opens 30 minutes early and links the schedule
+  setClock(t, '12:30', '2026-10-20');
+  const tue = await t.scan();
+  assert.equal(tue.status, 200, JSON.stringify(tue.body));
+  assert.equal(tue.body.action, 'checkin');
+  assert.deepEqual(tue.body.session, { id: t.sess.id, name: 'Afternoon Study', start_at: at(LA, '2026-10-20', '13:00'), end_at: at(LA, '2026-10-20', '16:00') });
+  const [v] = visitsOf(t, t.fam.student);
+  assert.deepEqual([v.session_id, v.local_date, v.weekday], [t.sess.id, '2026-10-20', 2]);
+  assert.equal(t.fx.notifications(t.fam.parent, 'checkin')[0].body, 'Afternoon Study, until 4:00 PM.');
+  // a plain skip says so, without a move
+  setClock(t, '13:05', '2026-10-21');
+  assert.equal((await t.scan()).body.message, "Afternoon Study doesn't meet today. Your next one is Fri, Oct 23 at 1:00 PM. Staff can check you in if needed.");
+});
+
+test(['SC-5', 'CI-5', 'CI-7'], 'the status, In the building, a manual check-in and the auto-checkout all follow the changed dates', async () => {
+  const t = await setup({ weekday: 0 });
+  t.fx.sessionDate(t.sess, '2026-10-19', 'skip');
+  t.fx.sessionDate(t.sess, '2026-10-20', 'add', { moved_from: '2026-10-19' });
+  const leo = kid(t, t.loc, 'Leo Garcia', t.sess, [0]);
+  const status = async () => (await t.as(t.fam.parent).get('/api/checkin/status')).body.students[0];
+  const building = async () => (await t.as(t.staff).get(`/api/checkin/locations/${t.loc.id}/building`)).body;
+  // Monday: nothing is expected, and the next date is the added Tuesday
+  setClock(t, '12:00', '2026-10-19');
+  assert.deepEqual((await building()).expected, []);
+  const next = (await status()).next;
+  assert.deepEqual([next.date, next.start_at, next.when], ['2026-10-20', at(LA, '2026-10-20', '13:00'), 'tomorrow at 1:00 PM']);
+  const refused = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: leo.id });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, 'no_session');
+  // Tuesday: both are expected, staff check Leo in without an override, and Maya scans in
+  setClock(t, '12:40', '2026-10-20');
+  const start = at(LA, '2026-10-20', '13:00');
+  assert.deepEqual((await building()).expected.map(x => [x.name, x.session_id, x.start_at]).sort(),
+    [['Leo Garcia', t.sess.id, start], ['Maya Johnson', t.sess.id, start]]);
+  const manual = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: leo.id });
+  assert.equal(manual.status, 200, JSON.stringify(manual.body));
+  assert.deepEqual([manual.body.override, manual.body.visit.session_id], [false, t.sess.id]);
+  assert.equal((await t.scan()).body.action, 'checkin');
+  // the added date ends at 4:00 PM, so the auto-checkout closes both visits then
+  setClock(t, '15:59', '2026-10-20');
+  t.jobs();
+  assert.equal(visitsOf(t, t.fam.student)[0].check_out_at, null);
+  setClock(t, '16:01', '2026-10-20');
+  t.jobs();
+  for (const s of [t.fam.student, leo]) {
+    const [v] = visitsOf(t, s);
+    assert.deepEqual([v.check_out_at, v.checkout_method, v.flagged], [at(LA, '2026-10-20', '16:00'), 'auto', 1], s.name);
+  }
+});
+
+// ---------------------------------------------------------------- v1.1 screens: no location, today's goals (D-49, D-50)
+
+test(['CI-2', 'NF-5'], "the Check in screen sends the code only and never asks for the phone's location", async () => {
+  const t = await setup({ dev: true });
+  let asked = 0;
+  const geolocation = {
+    getCurrentPosition: ok => { asked++; ok({ coords: { latitude: 33.6846, longitude: -117.8265, accuracy: 5 } }); },
+    watchPosition: () => { asked++; return 1; },
+  };
+  const tab = shellTab(t, { navigator: { geolocation } });
+  await tab.open(t.fam.student, '#/checkin');
+  assert.doesNotMatch(words(tab.main()), /location isn't saved|in the building/i);
+  byTag(tab.main(), 'button').find(b => /Simulate scan/.test(b.textContent)).click();
+  await tab.settle();
+  assert.match(words(tab.main().find(n => n.getAttribute('role') === 'status')), /^✓ Checked in 1:05 PM/);
+  const scans = tab.requests.filter(r => r.url === '/api/checkin/scan');
+  assert.deepEqual(scans.map(r => Object.keys(r.body).sort()), [['code', 'locationId']]);
+  assert.equal(asked, 0, 'the screen never asked for the location');
+});
+
+test(['DG-3', 'CI-2'], "after a check-in (never a check-out) the Check in screen asks for today's goals through the notes API", async () => {
+  const t = await setup({ dev: true });
+  let goals = { date: '2026-10-14', checked_in: true, status: 'none', goals: [] };
+  const stub = {
+    'GET /api/notes/goals/today': () => [200, goals],
+    'POST /api/notes/goals/today/skip': () => { goals = Object.assign({}, goals, { status: 'skipped' }); return [200, { status: 'skipped' }]; },
+  };
+  const tab = shellTab(t, { stub });
+  await tab.open(t.fam.student, '#/checkin');
+  const result = () => tab.main().find(n => n.getAttribute('role') === 'status');
+  const simulate = async () => {
+    byTag(tab.main(), 'button').find(b => /Simulate scan/.test(b.textContent)).click();
+    await tab.settle();
+    return words(result());
+  };
+  const asked = () => tab.requests.filter(r => r.url.startsWith('/api/notes/')).map(r => r.method + ' ' + r.url);
+  // not answered: Set today's goals (#/goals) or Skip today
+  assert.match(await simulate(), /^✓ Checked in 1:05 PM .* What are you working on today\? Set today's goals Skip today$/);
+  assert.equal(result().find(n => n.tag === 'a' && /Set today's goals/.test(n.textContent)).getAttribute('href'), '#/goals');
+  byTag(result(), 'button').find(b => b.textContent === 'Skip today').click();
+  await tab.settle();
+  assert.deepEqual(asked(), ['GET /api/notes/goals/today', 'POST /api/notes/goals/today/skip']);
+  assert.match(words(result()), /Skipped\. You can still add goals from Home today\.$/);
+  // a check-out asks nothing
+  setClock(t, '15:00');
+  assert.doesNotMatch(await simulate(), /goals|working on/);
+  assert.equal(asked().length, 2);
+  // an answered day shows nothing when skipped, and the subjects with Edit when set
+  setClock(t, '15:10');
+  assert.match(await simulate(), /^✓ Checked in 3:10 PM .*Your parents have been told\.$/);
+  goals = { date: '2026-10-14', checked_in: true, status: 'set', goals: [
+    { position: 1, subject: 'math', subject_label: 'Math', text: 'Finish the practice set' },
+    { position: 2, subject: 'english', subject_label: 'English', text: 'Write the first draft of my essay' }] };
+  setClock(t, '15:20');
+  assert.match(await simulate(), /^✓ Checked out/);
+  setClock(t, '15:30');
+  assert.match(await simulate(), /Today's goals: Math · English Edit$/);
+  assert.equal(result().find(n => n.tag === 'a' && n.textContent === 'Edit').getAttribute('href'), '#/goals');
+});
+
+test(['CI-7', 'NF-5'], "a manual check-in's reasons no longer offer a failed location check", async () => {
+  const t = await setup();
+  const tab = shellTab(t);
+  await tab.open(t.staff, '#/building');
+  byTag(tab.main(), 'button').find(b => b.getAttribute('aria-label') === 'Check in Maya Johnson').click();
+  await tab.settle();
+  const select = tab.doc.getElementById('ci-reason');
+  assert.deepEqual(byTag(select, 'option').map(o => o.textContent), ['No reason given', 'Phone is dead', 'Forgot phone', "Camera didn't work", 'Other']);
 });
