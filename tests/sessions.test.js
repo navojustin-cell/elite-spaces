@@ -1,12 +1,14 @@
 'use strict';
-// Sessions and scheduling: SC-1..SC-4, scope on every route (NF-1), and
-// per-location time zones (NF-4).
+// Schedules and periods: SC-1..SC-5, scope on every route (NF-1), and
+// per-location time zones (NF-4). A session is a schedule (D-41) in a term (its
+// period); enrollments and waitlist rows cover the whole schedule (weekday 0, D-42).
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const crypto = require('crypto');
 const { test, makeApp, assert, at, ROOT, load } = require('./lib');
 
+const LA = 'America/Los_Angeles';
 const MON = '2026-11-23'; // a Monday inside the default Fall 2026 term (Aug 17 - Dec 18)
 
 // Two locations, each with the default Fall 2026 term, plus their staff.
@@ -24,16 +26,18 @@ const row = (t, id) => t.db.prepare('SELECT * FROM sessions WHERE id = ?').get(i
 const enrollment = (t, id) => t.db.prepare('SELECT * FROM enrollments WHERE id = ?').get(id);
 const count = (t, sql, ...args) => t.db.prepare(sql).get(...args).n;
 const sent = (t, user, kind) => t.fx.notifications(user, kind).length;
-function waitlist(t, student, session, weekday) {
-  const id = Number(t.db.prepare("INSERT INTO waitlist (student_id, session_id, weekday, status, created_at) VALUES (?,?,?,'waiting',?)")
-    .run(student.id, session.id, weekday, t.clock.now()).lastInsertRowid);
-  return id;
-}
 const waitRow = (t, id) => t.db.prepare('SELECT * FROM waitlist WHERE id = ?').get(id);
+const dateRows = (t, s) => t.db.prepare('SELECT date, kind, moved_from, reason, created_by FROM session_dates WHERE session_id = ? ORDER BY date')
+  .all(s.id).map(r => ({ ...r }));
+const datesUrl = s => '/api/sessions/' + s.id + '/dates';
 
-// ---------------- SC-1: directors create 2-3 hour recurring blocks ----------------
+// { toString: 1 } makes String() and Number() throw; { a: 1 } turns into "[object Object]".
+const POISON = { toString: 1 };
+const PLAIN = { a: 1 };
 
-test(['SC-1'], 'a director creates a Mon/Wed/Fri 1-4pm session at their own location', async () => {
+// ---------------- SC-1: directors publish 2-3 hour schedules ----------------
+
+test(['SC-1'], 'a director publishes a Mon/Wed/Fri 1-4pm schedule at their own location', async () => {
   const w = await world();
   const r = await w.t.as(w.dirA).post('/api/sessions', block({ term_id: w.termA.id }));
   assert.equal(r.status, 201);
@@ -47,7 +51,10 @@ test(['SC-1'], 'a director creates a Mon/Wed/Fri 1-4pm session at their own loca
   assert.equal(s.capacity, 10);
   assert.equal(s.status, 'active');
   assert.equal(s.created_by, w.dirA.id);
-  assert.deepEqual(r.body.session.slots.map(x => x.weekday), [1, 3, 5]);
+  const x = r.body.session;
+  assert.equal(x.slots, undefined, 'no per-day slots any more');
+  assert.deepEqual([x.weekdays, x.enrolled, x.paused, x.waiting, x.seats_left, x.days_per_week, x.days_locked, x.changes],
+    [[1, 3, 5], 0, 0, 0, 10, 3, false, []]);
   const log = w.t.fx.audit('session.create');
   assert.equal(log.length, 1);
   assert.equal(log[0].actor_id, w.dirA.id);
@@ -56,7 +63,7 @@ test(['SC-1'], 'a director creates a Mon/Wed/Fri 1-4pm session at their own loca
   assert.deepEqual(list.body.sessions.map(x => [x.name, x.weekdays, x.start_time, x.end_time]), [['Afternoon Study', [1, 3, 5], '13:00', '16:00']]);
 });
 
-test(['SC-1'], 'a session runs 2 to 3 hours on at least one real weekday and ends after it starts', async () => {
+test(['SC-1'], 'a schedule runs 2 to 3 hours on at least one real weekday and ends after it starts', async () => {
   const w = await world();
   const post = over => w.t.as(w.dirA).post('/api/sessions', block(Object.assign({ term_id: w.termA.id }, over)));
   const refused = [
@@ -81,11 +88,11 @@ test(['SC-1'], 'a session runs 2 to 3 hours on at least one real weekday and end
   assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM sessions'), 2);
 });
 
-test(['SC-1', 'SC-4'], 'edits follow the same rules as new sessions', async () => {
+test(['SC-1', 'SC-4'], 'edits follow the same rules as new schedules', async () => {
   const w = await world();
   const s = w.t.fx.session(w.a, { weekdays: '1,3' });
   const fam = w.t.fx.family(w.a);
-  w.t.fx.enroll(fam.student, s, 1);
+  w.t.fx.enroll(fam.student, s);
   for (const [body, code] of [[{ end_time: '17:30' }, 'duration'], [{ weekdays: [] }, 'weekdays'], [{ capacity: 0 }, 'capacity'], [{ start_time: '17:00' }, 'end_before_start']]) {
     const r = await w.t.as(w.dirA).put('/api/sessions/' + s.id, body);
     assert.equal(r.status, 400, JSON.stringify(body));
@@ -97,7 +104,7 @@ test(['SC-1', 'SC-4'], 'edits follow the same rules as new sessions', async () =
   assert.equal((await w.t.as(w.dirA).put('/api/sessions/99999', { capacity: 5 })).status, 404);
 });
 
-test(['SC-1', 'NF-1'], 'a session must belong to a term at its own location', async () => {
+test(['SC-1', 'NF-1'], 'a schedule must belong to a period at its own location', async () => {
   const w = await world();
   const wrong = await w.t.as(w.dirA).post('/api/sessions', block({ term_id: w.termB.id }));
   assert.equal(wrong.status, 400);
@@ -114,29 +121,35 @@ test(['SC-1', 'NF-1'], 'a session must belong to a term at its own location', as
   assert.equal(row(w.t, ok.body.session.id).location_id, w.b.id);
 });
 
-// ---------------- SC-2: capacity per weekly slot, no seats ----------------
+// ---------------- SC-2: seats per schedule (per meeting date), no assigned seats ----------------
 
-test(['SC-2'], 'capacity and counts are per weekly day, paused ones counted apart, and nobody is assigned a seat', async () => {
+test(['SC-2'], 'counts are per schedule from whole-schedule rows, paused ones apart, and nobody is assigned a seat', async () => {
   const w = await world();
   const s = w.t.fx.session(w.a, { weekdays: '1,3', capacity: 3 });
-  const kids = [1, 2, 3, 4, 5, 6].map(() => w.t.fx.family(w.a).student);
-  w.t.fx.enroll(kids[0], s, 1);
-  w.t.fx.enroll(kids[1], s, 1);
-  w.t.fx.enroll(kids[2], s, 3);
-  w.t.fx.enroll(kids[3], s, 3, { status: 'paused' });
-  w.t.fx.enroll(kids[4], s, 1, { status: 'dropped' });
-  waitlist(w.t, kids[5], s, 1);
+  const kids = [1, 2, 3, 4, 5, 6, 7].map(() => w.t.fx.family(w.a).student);
+  w.t.fx.enroll(kids[0], s);
+  w.t.fx.enroll(kids[1], s);
+  w.t.fx.enroll(kids[2], s, 0, { status: 'paused' });
+  w.t.fx.enroll(kids[3], s, 0, { status: 'dropped' });
+  w.t.fx.waitlist(kids[4], s);
+  // v1 per-weekday rows are history (D-42): they hold no seat and wait in no line.
+  w.t.fx.enroll(kids[5], s, 1);
+  w.t.fx.waitlist(kids[6], s, { weekday: 3 });
   const r = await w.t.as(w.staffA).get('/api/sessions?location_id=' + w.a.id);
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.sessions.find(x => x.id === s.id).slots, [
-    { weekday: 1, enrolled: 2, paused: 0, waiting: 1, capacity: 3, seats_left: 1 },
-    { weekday: 3, enrolled: 1, paused: 1, waiting: 0, capacity: 3, seats_left: 2 },
-  ]);
-  // A paused enrollment holds no seat (D-16), but it is counted, because taking off its day ends it too (D-26).
-  // Capacity can come down to the busiest day's count (2), not the whole session's (3).
+  const x = r.body.sessions.find(y => y.id === s.id);
+  assert.deepEqual([x.capacity, x.enrolled, x.paused, x.waiting, x.seats_left, x.days_per_week], [3, 2, 1, 1, 1, 2]);
+  // An overfull schedule (a v1.1 migration raise, say) shows no seats left, never a negative.
+  const full = w.t.fx.session(w.a, { name: 'Full', weekdays: '2', capacity: 1 });
+  w.t.fx.enroll(kids[0], full);
+  w.t.fx.enroll(kids[1], full);
+  const f = (await w.t.as(w.staffA).get('/api/sessions')).body.sessions.find(y => y.id === full.id);
+  assert.deepEqual([f.enrolled, f.seats_left, f.days_per_week], [2, 0, 1]);
+  // A paused enrollment holds no seat (D-16): seats can come down to the active count (2).
   const e = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { capacity: 2 });
   assert.equal(e.status, 200);
   assert.equal(row(w.t, s.id).capacity, 2);
+  assert.equal(e.body.session.seats_left, 0);
 });
 
 test(['SC-2'], 'capacity is a whole number of at least 1', async () => {
@@ -152,7 +165,7 @@ test(['SC-2'], 'capacity is a whole number of at least 1', async () => {
   assert.equal(row(w.t, one.body.session.id).capacity, 1);
 });
 
-test(['SC-2'], 'seats per day top out at 1,000, so a runaway number never reaches the schedule', async () => {
+test(['SC-2'], 'seats top out at 1,000, so a runaway number never reaches the schedule', async () => {
   const w = await world(); // Wed 14 Oct 2026
   const s = w.t.fx.session(w.a, { name: 'Irvine Study', weekdays: '3', capacity: 10 });
   // 9999999999999999 is past Number.MAX_SAFE_INTEGER: once stored, every read of the row would throw.
@@ -166,14 +179,14 @@ test(['SC-2'], 'seats per day top out at 1,000, so a runaway number never reache
   }
   assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM sessions'), 1);
   assert.equal(row(w.t, s.id).capacity, 10);
-  // The location's schedule and today's list still load.
+  // The location's schedules and today's list still load.
   const list = await w.t.as(w.staffA).get('/api/sessions');
   assert.equal(list.status, 200);
   assert.deepEqual(list.body.sessions.map(x => [x.id, x.capacity]), [[s.id, 10]]);
   const today = await w.t.as(w.staffA).get('/api/sessions/today');
   assert.equal(today.status, 200);
   assert.deepEqual(today.body.sessions.map(x => [x.id, x.capacity]), [[s.id, 10]]);
-  // 1,000 is allowed, on a new session and on an edit.
+  // 1,000 is allowed, on a new schedule and on an edit.
   const top = await w.t.as(w.dirA).post('/api/sessions', block({ term_id: w.termA.id, capacity: 1000 }));
   assert.equal(top.status, 201);
   assert.equal(row(w.t, top.body.session.id).capacity, 1000);
@@ -181,15 +194,11 @@ test(['SC-2'], 'seats per day top out at 1,000, so a runaway number never reache
   assert.equal(row(w.t, s.id).capacity, 1000);
 });
 
-// { toString: 1 } makes String() and Number() throw; { a: 1 } turns into "[object Object]".
-const POISON = { toString: 1 };
-const PLAIN = { a: 1 };
-
-test(['SC-1', 'SC-2'], 'a session field sent as an object is refused with a 400, never stored or crashed on', async () => {
+test(['SC-1', 'SC-2'], 'a schedule field sent as an object is refused with a 400, never stored or crashed on', async () => {
   const w = await world();
   const s = w.t.fx.session(w.a, { name: 'Irvine Study', weekdays: '1,3' });
   const fam = w.t.fx.family(w.a);
-  w.t.fx.enroll(fam.student, s, 1);
+  w.t.fx.enroll(fam.student, s);
   const shared = [
     [{ name: POISON }, 'name'], [{ name: PLAIN }, 'name'], [{ name: 42 }, 'name'],
     [{ start_time: POISON }, 'time'], [{ end_time: POISON }, 'time'],
@@ -216,11 +225,11 @@ test(['SC-1', 'SC-2'], 'a session field sent as an object is refused with a 400,
   assert.deepEqual([row(w.t, ok.body.session.id).weekdays, row(w.t, ok.body.session.id).capacity], ['2,4', 12]);
 });
 
-test(['SC-3'], 'a term name, closure reason or location sent as an object is refused with a 400', async () => {
+test(['SC-3'], 'a period name, closure reason or location sent as an object is refused with a 400', async () => {
   const w = await world();
   const s = w.t.fx.session(w.a, { weekdays: '1' });
   const fam = w.t.fx.family(w.a);
-  w.t.fx.enroll(fam.student, s, 1);
+  w.t.fx.enroll(fam.student, s);
   const spring = { name: 'Spring 2027', start_date: '2027-01-11', end_date: '2027-05-28' };
   for (const [over, code] of [[{ name: POISON }, 'name'], [{ name: PLAIN }, 'name'], [{ location_id: POISON }, 'location']]) {
     const r = await w.t.as(w.dirA).post('/api/sessions/terms', Object.assign({}, spring, over));
@@ -246,29 +255,25 @@ test(['SC-3'], 'a term name, closure reason or location sent as an object is ref
   assert.equal(w.t.db.prepare('SELECT reason FROM closures WHERE id = ?').get(ok.body.closure.id).reason, null);
 });
 
-test(['SC-2', 'SC-4'], 'capacity cannot go below the students already enrolled on a day that stays', async () => {
+test(['SC-2', 'SC-4'], 'seats cannot go below the students already enrolled in the schedule', async () => {
   const w = await world();
-  const s = w.t.fx.session(w.a, { weekdays: '1,3', capacity: 5 });
-  for (let i = 0; i < 3; i++) w.t.fx.enroll(w.t.fx.family(w.a).student, s, 1);
-  w.t.fx.enroll(w.t.fx.family(w.a).student, s, 3);
-  for (let i = 0; i < 2; i++) w.t.fx.enroll(w.t.fx.family(w.a).student, s, 1, { status: 'paused' }); // paused students hold no seat
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3', capacity: 5 });
+  for (let i = 0; i < 3; i++) w.t.fx.enroll(w.t.fx.family(w.a).student, s);
+  for (let i = 0; i < 2; i++) w.t.fx.enroll(w.t.fx.family(w.a).student, s, 0, { status: 'paused' }); // paused students hold no seat
+  w.t.fx.enroll(w.t.fx.family(w.a).student, s, 1); // a live v1 Monday row holds no seat either (D-42)
   const low = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { capacity: 2 });
   assert.equal(low.status, 409);
   assert.equal(low.body.error, 'capacity_below_enrolled');
-  assert.match(low.body.message, /3 students are already enrolled on Mondays/);
+  assert.equal(low.body.message, '3 students are enrolled in Afternoon Study, so seats can\'t go below 3.');
   assert.equal(row(w.t, s.id).capacity, 5);
   const exact = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { capacity: 3 });
   assert.equal(exact.status, 200);
   assert.equal(row(w.t, s.id).capacity, 3);
-  // Taking Monday off in the same edit ends Monday's enrollments, so only Wednesday's 1 counts.
-  const both = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { weekdays: [3], capacity: 1 });
-  assert.equal(both.status, 200);
-  assert.deepEqual([row(w.t, s.id).weekdays, row(w.t, s.id).capacity], ['3', 1]);
 });
 
-// ---------------- SC-3: terms and holiday closures ----------------
+// ---------------- SC-3: periods and holiday closures ----------------
 
-test(['SC-3'], 'directors set terms with start and end dates', async () => {
+test(['SC-3'], 'directors set periods with start and end dates', async () => {
   const w = await world();
   const r = await w.t.as(w.dirA).post('/api/sessions/terms', { name: 'Spring 2027', start_date: '2027-01-11', end_date: '2027-05-28' });
   assert.equal(r.status, 201);
@@ -297,48 +302,99 @@ test(['SC-3'], 'directors set terms with start and end dates', async () => {
   assert.equal(w.t.fx.audit('term.update').length, 1);
 });
 
-test(['SC-3'], 'a closure tells the students and active parents enrolled that weekday, and nobody else', async () => {
+test(['SC-3'], 'D-56: periods at one location never overlap, on create or edit; other locations and touching edges are fine', async () => {
+  const w = await world(); // Fall 2026: Aug 17 - Dec 18 at both locations
+  const post = body => w.t.as(w.dirA).post('/api/sessions/terms', body);
+  const msg = 'Fall 2026 already covers Nov 1 - Nov 30. Periods at one location can\'t overlap. Use months or a semester for these dates, not both.';
+  const nov = await post({ name: 'November 2026', start_date: '2026-11-01', end_date: '2026-11-30' });
+  assert.equal(nov.status, 409);
+  assert.deepEqual([nov.body.error, nov.body.message], ['term_overlaps', msg]);
+  // The overlapping stretch is named, whichever side it is on.
+  for (const [start_date, end_date, covers] of [['2026-08-01', '2026-08-17', 'Aug 17 - Aug 17'], ['2026-12-18', '2027-01-08', 'Dec 18 - Dec 18'], ['2026-07-01', '2027-01-31', 'Aug 17 - Dec 18']]) {
+    const r = await post({ name: 'X', start_date, end_date });
+    assert.equal(r.status, 409, start_date);
+    assert.equal(r.body.message.split('.')[0], 'Fall 2026 already covers ' + covers);
+  }
+  assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM terms WHERE location_id = ?', w.a.id), 1);
+  // The day after and the day before are free; Arcadia's own Fall term doesn't block Irvine.
+  const jan = await post({ name: 'January 2027', start_date: '2026-12-19', end_date: '2027-01-29' });
+  assert.equal(jan.status, 201);
+  assert.equal((await post({ name: 'Summer 2026', start_date: '2026-06-01', end_date: '2026-08-16' })).status, 201);
+  assert.equal((await w.t.as(w.dirB).post('/api/sessions/terms', { name: 'Late fall', start_date: '2026-12-19', end_date: '2026-12-31' })).status, 201);
+  // Editing: a period never overlaps itself, but can't be stretched over a neighbour.
+  assert.equal((await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { end_date: '2026-12-17' })).status, 200);
+  const stretch = await w.t.as(w.dirA).put('/api/sessions/terms/' + jan.body.term.id, { start_date: '2026-12-01' });
+  assert.equal(stretch.status, 409);
+  assert.equal(stretch.body.message, 'Fall 2026 already covers Dec 1 - Dec 17. Periods at one location can\'t overlap. Use months or a semester for these dates, not both.');
+  assert.equal(w.t.db.prepare('SELECT start_date FROM terms WHERE id = ?').get(jan.body.term.id).start_date, '2026-12-19');
+  // v1 periods that already overlap are left alone, and must be fixed before either is edited.
+  const old = w.t.fx.term(w.b, { name: 'Autumn block', start: '2026-10-01', end: '2026-10-31' });
+  const rename = await w.t.as(w.dirB).put('/api/sessions/terms/' + old.id, { name: 'Autumn' });
+  assert.equal(rename.status, 409);
+  assert.equal(rename.body.error, 'term_overlaps');
+  assert.equal((await w.t.as(w.dirB).put('/api/sessions/terms/' + w.termB.id, { name: 'Fall' })).status, 409);
+  const fixed = await w.t.as(w.dirB).put('/api/sessions/terms/' + old.id, { start_date: '2026-12-01', end_date: '2026-12-18' });
+  assert.equal(fixed.status, 409, 'still inside Fall 2026');
+  assert.equal((await w.t.as(w.dirB).put('/api/sessions/terms/' + w.termB.id, { end_date: '2026-09-30' })).status, 200);
+  assert.equal((await w.t.as(w.dirB).put('/api/sessions/terms/' + old.id, { name: 'Autumn' })).status, 200);
+});
+
+test(['SC-3'], 'a closure tells the students and active parents meeting that day by dates.js, and nobody else', async () => {
   const w = await world();
-  const s = w.t.fx.session(w.a, { weekdays: '1,3,5' });
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
   const mon = w.t.fx.family(w.a);
   const guardian2 = w.t.fx.user('parent', { location: w.a });
   w.t.fx.link(guardian2, mon.student);
   const pendingParent = w.t.fx.user('parent', { location: w.a });
   w.t.fx.link(pendingParent, mon.student, 'pending');
-  w.t.fx.enroll(mon.student, s, 1);
-  const wed = w.t.fx.family(w.a);
-  w.t.fx.enroll(wed.student, s, 3);
+  w.t.fx.enroll(mon.student, s);
+  // A Tue/Thu schedule doesn't meet Monday; one with Monday added does; one with Monday skipped doesn't.
+  const tth = w.t.fx.family(w.a);
+  w.t.fx.enroll(tth.student, w.t.fx.session(w.a, { name: 'Tue/Thu Study', weekdays: '2,4' }));
+  const extra = w.t.fx.family(w.a);
+  const extraS = w.t.fx.session(w.a, { name: 'Extra TTh', weekdays: '2,4', start: '16:30', end: '18:30' });
+  w.t.fx.enroll(extra.student, extraS);
+  w.t.fx.sessionDate(extraS, MON, 'add');
+  const moved = w.t.fx.family(w.a);
+  const movedS = w.t.fx.session(w.a, { name: 'Mornings MWF', start: '09:00', end: '11:30' });
+  w.t.fx.enroll(moved.student, movedS);
+  w.t.fx.sessionDate(movedS, MON, 'skip');
+  // v1 rows count only on their own weekday.
+  const v1Mon = w.t.fx.family(w.a);
+  w.t.fx.enroll(v1Mon.student, s, 1);
+  const v1Wed = w.t.fx.family(w.a);
+  w.t.fx.enroll(v1Wed.student, s, 3);
   const dropped = w.t.fx.family(w.a);
-  w.t.fx.enroll(dropped.student, s, 1, { status: 'dropped' });
+  w.t.fx.enroll(dropped.student, s, 0, { status: 'dropped' });
   const paused = w.t.fx.family(w.a);
-  w.t.fx.enroll(paused.student, s, 1, { status: 'paused' });
+  w.t.fx.enroll(paused.student, s, 0, { status: 'paused' });
   const spring = w.t.fx.term(w.a, { name: 'Spring 2027', start: '2027-01-11', end: '2027-05-28' });
   const springFam = w.t.fx.family(w.a);
-  w.t.fx.enroll(springFam.student, w.t.fx.session(w.a, { term: spring, weekdays: '1' }), 1);
+  w.t.fx.enroll(springFam.student, w.t.fx.session(w.a, { term: spring, weekdays: '1' }));
   const other = w.t.fx.family(w.b);
-  w.t.fx.enroll(other.student, w.t.fx.session(w.b, { weekdays: '1' }), 1);
+  w.t.fx.enroll(other.student, w.t.fx.session(w.b, { weekdays: '1' }));
 
   const r = await w.t.as(w.dirA).post('/api/sessions/closures', { date: MON, reason: 'Staff training' });
   assert.equal(r.status, 201);
-  assert.equal(r.body.notified, 3);
+  assert.equal(r.body.notified, 7);
   const c = w.t.db.prepare('SELECT * FROM closures WHERE location_id = ?').all(w.a.id);
   assert.deepEqual(c.map(x => [x.date, x.reason, x.created_by]), [[MON, 'Staff training', w.dirA.id]]);
-  for (const u of [mon.student, mon.parent, guardian2]) {
+  for (const u of [mon.student, mon.parent, guardian2, extra.student, extra.parent, v1Mon.student, v1Mon.parent]) {
     const n = w.t.fx.notifications(u, 'session_closure');
-    assert.equal(n.length, 1);
+    assert.equal(n.length, 1, u.name);
     assert.equal(n[0].title, 'Irvine is closed Mon, Nov 23');
-    assert.match(n[0].body, /^Staff training\. Sessions that day are cancelled/);
+    assert.equal(n[0].body, 'Staff training. Schedules that day are cancelled. Your other dates go ahead as usual.');
   }
-  for (const u of [pendingParent, wed.student, wed.parent, dropped.student, dropped.parent, paused.student, paused.parent,
-    springFam.student, springFam.parent, other.student, other.parent]) {
+  for (const u of [pendingParent, tth.student, tth.parent, moved.student, moved.parent, v1Wed.student, v1Wed.parent,
+    dropped.student, dropped.parent, paused.student, paused.parent, springFam.student, springFam.parent, other.student, other.parent]) {
     assert.equal(sent(w.t, u, 'session_closure'), 0, u.name);
   }
-  // Enrollments stay (D-19): only that date's occurrence is cancelled.
-  assert.equal(count(w.t, "SELECT COUNT(*) AS n FROM enrollments WHERE session_id = ? AND status = 'active'", s.id), 2);
+  // Enrollments stay (D-19): only that date is cancelled.
+  assert.equal(count(w.t, "SELECT COUNT(*) AS n FROM enrollments WHERE session_id = ? AND status = 'active'", s.id), 3);
   assert.equal(w.t.fx.audit('closure.create').length, 1);
 });
 
-test(['SC-3'], 'closures must fall inside one of the location\'s own terms', async () => {
+test(['SC-3'], 'closures must fall inside one of the location\'s own periods', async () => {
   const w = await world();
   w.t.fx.term(w.b, { name: 'Spring 2027', start: '2027-01-11', end: '2027-05-28' }); // only Arcadia has a spring term
   for (const date of ['2027-01-18', '2026-08-10']) {
@@ -361,10 +417,9 @@ test(['SC-3'], 'closures must fall inside one of the location\'s own terms', asy
 
 test(['SC-3'], 'removing a closure reopens the day and tells the same families', async () => {
   const w = await world();
-  const s = w.t.fx.session(w.a, { weekdays: '1,3' });
-  const mon = w.t.fx.family(w.a), wed = w.t.fx.family(w.a);
-  w.t.fx.enroll(mon.student, s, 1);
-  w.t.fx.enroll(wed.student, s, 3);
+  const mon = w.t.fx.family(w.a), tth = w.t.fx.family(w.a);
+  w.t.fx.enroll(mon.student, w.t.fx.session(w.a, { weekdays: '1,3' }));
+  w.t.fx.enroll(tth.student, w.t.fx.session(w.a, { name: 'Tue/Thu', weekdays: '2,4' }));
   const c = await w.t.as(w.dirA).post('/api/sessions/closures', { date: MON, reason: 'Storm' });
   const r = await w.t.as(w.dirA).del('/api/sessions/closures/' + c.body.closure.id);
   assert.equal(r.status, 200);
@@ -375,12 +430,12 @@ test(['SC-3'], 'removing a closure reopens the day and tells the same families',
     assert.equal(n.length, 1);
     assert.equal(n[0].title, 'Irvine is open Mon, Nov 23 after all');
   }
-  assert.equal(sent(w.t, wed.parent, 'session_reopened'), 0);
+  assert.equal(sent(w.t, tth.parent, 'session_reopened'), 0);
   assert.equal(w.t.fx.audit('closure.delete').length, 1);
   assert.equal((await w.t.as(w.dirA).del('/api/sessions/closures/' + c.body.closure.id)).status, 404);
 });
 
-test(['SC-3'], 'a term can\'t be shortened past one of its closures', async () => {
+test(['SC-3'], 'a period can\'t be shortened past one of its closures', async () => {
   const w = await world();
   assert.equal((await w.t.as(w.dirA).post('/api/sessions/closures', { date: '2026-12-14', reason: 'Winter break' })).status, 201);
   const r = await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { end_date: '2026-12-11' });
@@ -390,48 +445,53 @@ test(['SC-3'], 'a term can\'t be shortened past one of its closures', async () =
   assert.equal((await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { end_date: '2026-12-14' })).status, 200);
 });
 
-test(['SC-2', 'SC-3'], 'today\'s sessions show enrolled against capacity, and a closure is flagged', async () => {
+test(['SC-2', 'SC-3', 'SC-5'], 'today\'s schedules follow dates.js (added in, skipped out), show seats and the line, and a closure is flagged', async () => {
   const w = await world(); // Wed 14 Oct 2026, 10:00 in Los Angeles
   const mwf = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5', capacity: 10 });
-  w.t.fx.session(w.a, { name: 'Tue/Thu Study', weekdays: '2,4' });
-  w.t.fx.session(w.a, { name: 'Morning Focus', weekdays: '3', start: '09:30', end: '12:00', capacity: 2 });
+  const tth = w.t.fx.session(w.a, { name: 'Tue/Thu Study', weekdays: '2,4' });
+  w.t.fx.sessionDate(tth, '2026-10-14', 'add', { reason: 'Exam week' });
+  const skipped = w.t.fx.session(w.a, { name: 'Morning Focus', weekdays: '3', start: '09:30', end: '12:00', capacity: 2 });
+  w.t.fx.sessionDate(skipped, '2026-10-14', 'skip');
+  w.t.fx.session(w.a, { name: 'Early Focus', weekdays: '3', start: '09:00', end: '11:30' });
   const winter = w.t.fx.term(w.a, { name: 'Winter', start: '2027-01-04', end: '2027-03-26' });
   w.t.fx.session(w.a, { term: winter, name: 'Winter Study', weekdays: '3' });
-  w.t.fx.enroll(w.t.fx.family(w.a).student, mwf, 3);
-  w.t.fx.enroll(w.t.fx.family(w.a).student, mwf, 3);
-  w.t.fx.enroll(w.t.fx.family(w.a).student, mwf, 1);
-  waitlist(w.t, w.t.fx.family(w.a).student, mwf, 3);
+  w.t.fx.enroll(w.t.fx.family(w.a).student, mwf);
+  w.t.fx.enroll(w.t.fx.family(w.a).student, mwf);
+  w.t.fx.enroll(w.t.fx.family(w.a).student, mwf, 3); // a v1 Wednesday row holds no seat
+  w.t.fx.waitlist(w.t.fx.family(w.a).student, mwf);
   const r = await w.t.as(w.staffA).get('/api/sessions/today');
   assert.equal(r.status, 200);
   assert.equal(r.body.date, '2026-10-14');
   assert.equal(r.body.weekday, 3);
   assert.equal(r.body.closure, null);
-  assert.deepEqual(r.body.sessions.map(s => s.name), ['Morning Focus', 'Afternoon Study']);
+  assert.deepEqual(r.body.sessions.map(s => [s.name, s.added]), [['Early Focus', false], ['Afternoon Study', false], ['Tue/Thu Study', true]]);
   const pm = r.body.sessions[1];
   assert.deepEqual([pm.enrolled, pm.waiting, pm.capacity], [2, 1, 10]);
+  assert.equal(r.body.sessions[2].starts_at, at(LA, '2026-10-14', '13:00'));
   await w.t.as(w.dirA).post('/api/sessions/closures', { date: '2026-10-14', reason: 'Power outage' });
   const closed = await w.t.as(w.staffA).get('/api/sessions/today');
   assert.equal(closed.body.closure.reason, 'Power outage');
 });
 
-// ---------------- SC-4: edit and cancel, families told ----------------
+// ---------------- SC-4: edit and cancel, families told; days fixed once families commit ----------------
 
-test(['SC-4'], 'changing a session\'s name, time or capacity tells every enrolled family, paused ones included', async () => {
+test(['SC-4'], 'changing a schedule\'s name, time or seats tells every enrolled family, paused ones included', async () => {
   const w = await world();
   const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3', start: '13:00', end: '16:00', capacity: 10 });
   const act = w.t.fx.family(w.a);
-  w.t.fx.enroll(act.student, s, 1);
+  w.t.fx.enroll(act.student, s);
   const pau = w.t.fx.family(w.a);
-  w.t.fx.enroll(pau.student, s, 3, { status: 'paused' });
+  w.t.fx.enroll(pau.student, s, 0, { status: 'paused' });
   const wait = w.t.fx.family(w.a);
-  waitlist(w.t, wait.student, s, 1);
+  w.t.fx.waitlist(wait.student, s);
   const gone = w.t.fx.family(w.a);
-  w.t.fx.enroll(gone.student, s, 1, { status: 'dropped' });
+  w.t.fx.enroll(gone.student, s, 0, { status: 'dropped' });
   const elsewhere = w.t.fx.family(w.a);
-  w.t.fx.enroll(elsewhere.student, w.t.fx.session(w.a, { name: 'Morning', start: '09:00', end: '11:30' }), 1);
+  w.t.fx.enroll(elsewhere.student, w.t.fx.session(w.a, { name: 'Morning', start: '09:00', end: '11:30' }));
 
   const r = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { name: 'Afternoon Focus', start_time: '13:30', end_time: '16:30' });
   assert.equal(r.status, 200);
+  assert.equal(r.body.notified, 4);
   const after = row(w.t, s.id);
   assert.deepEqual([after.name, after.weekdays, after.start_time, after.end_time, after.capacity], ['Afternoon Focus', '1,3', '13:30', '16:30', 10]);
   for (const u of [act.student, act.parent, pau.student, pau.parent]) {
@@ -450,114 +510,101 @@ test(['SC-4'], 'changing a session\'s name, time or capacity tells every enrolle
   assert.equal(log[0].actor_id, w.dirA.id);
   const detail = JSON.parse(log[0].detail);
   assert.deepEqual([detail.before.start_time, detail.after.start_time], ['13:00', '13:30']);
-
-  // Adding a day changes nothing for current families.
-  assert.equal((await w.t.as(w.dirA).put('/api/sessions/' + s.id, { weekdays: [1, 3, 5] })).status, 200);
-  assert.equal(row(w.t, s.id).weekdays, '1,3,5');
-  assert.equal(sent(w.t, act.parent, 'session_changed'), 1);
-  // A capacity change is news too.
+  // Seats are news too.
   assert.equal((await w.t.as(w.dirA).put('/api/sessions/' + s.id, { capacity: 12 })).status, 200);
   const latest = w.t.fx.notifications(act.parent, 'session_changed');
   assert.equal(latest.length, 2);
-  assert.match(latest[1].body, /Seats per day: 12 \(was 10\)\./);
+  assert.match(latest[1].body, /Seats per date: 12 \(was 10\)\./);
+  // An edit that changes nothing families see tells nobody.
+  const same = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { capacity: 12 });
+  assert.deepEqual([same.status, same.body.notified], [200, 0]);
+  assert.equal(sent(w.t, act.parent, 'session_changed'), 2);
 });
 
-test(['SC-4'], 'taking a day off a session ends that day\'s enrollments and waitlist and tells those families', async () => {
+test(['SC-4'], 'D-45: a schedule\'s days are fixed once anyone is enrolled or waiting; name, times and seats still change', async () => {
   const w = await world();
-  const s = w.t.fx.session(w.a, { weekdays: '1,3,5' });
-  const fri = w.t.fx.family(w.a);
-  const eFri = w.t.fx.enroll(fri.student, s, 5);
-  const friPaused = w.t.fx.family(w.a);
-  const ePaused = w.t.fx.enroll(friPaused.student, s, 5, { status: 'paused' });
-  const friWait = w.t.fx.family(w.a);
-  const wFri = waitlist(w.t, friWait.student, s, 5);
-  const mon = w.t.fx.family(w.a);
-  const eMon = w.t.fx.enroll(mon.student, s, 1);
-  const monWait = w.t.fx.family(w.a);
-  const wMon = waitlist(w.t, monWait.student, s, 1);
-  // Friday history from before the edit: a student who dropped in September and a waitlist
-  // spot given up then. Their dates stay true (attendance and the schedule read ended_at),
-  // and neither family hears about a day they already left.
-  const sept = at('America/Los_Angeles', '2026-09-21', '15:00');
-  const gone = w.t.fx.family(w.a);
-  const eGone = w.t.fx.enroll(gone.student, s, 5, { status: 'dropped' });
-  w.t.db.prepare('UPDATE enrollments SET ended_at = ? WHERE id = ?').run(sept, eGone.id);
-  const leftWait = w.t.fx.family(w.a);
-  const wLeft = waitlist(w.t, leftWait.student, s, 5);
-  w.t.db.prepare("UPDATE waitlist SET status = 'removed', resolved_at = ? WHERE id = ?").run(sept, wLeft);
-  const now = at('America/Los_Angeles', '2026-10-14', '11:00');
-  w.t.clock.set(now);
-
-  const r = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { weekdays: [1, 3] });
-  assert.equal(r.status, 200);
-  assert.deepEqual([r.body.ended, r.body.notified], [3, 6]);
+  const s = w.t.fx.session(w.a, { name: 'Mornings MWF', weekdays: '1,3,5', start: '09:00', end: '12:00' });
+  const put = body => w.t.as(w.dirA).put('/api/sessions/' + s.id, body);
+  const msg = 'Families are enrolled in Mornings MWF, so its days are fixed. Use Move or Add date for single weeks, or cancel it and publish a new schedule.';
+  const locked = async weekdays => {
+    const r = await put({ weekdays });
+    assert.equal(r.status, 409, JSON.stringify(weekdays));
+    assert.deepEqual([r.body.error, r.body.message], ['days_locked', msg]);
+  };
+  // Nobody yet: the days can change.
+  assert.equal((await put({ weekdays: [1, 3] })).status, 200);
   assert.equal(row(w.t, s.id).weekdays, '1,3');
-  for (const id of [eFri.id, ePaused.id]) {
-    assert.deepEqual([enrollment(w.t, id).status, enrollment(w.t, id).ended_at], ['dropped', now]);
-  }
-  assert.deepEqual([waitRow(w.t, wFri).status, waitRow(w.t, wFri).resolved_at], ['removed', now]);
-  assert.deepEqual([enrollment(w.t, eGone.id).status, enrollment(w.t, eGone.id).ended_at], ['dropped', sept]);
-  assert.deepEqual([waitRow(w.t, wLeft).status, waitRow(w.t, wLeft).resolved_at], ['removed', sept]);
-  for (const u of [gone.student, gone.parent, leftWait.student, leftWait.parent]) {
-    assert.equal(w.t.fx.notifications(u).length, 0, u.name);
-  }
-  assert.deepEqual([enrollment(w.t, eMon.id).status, enrollment(w.t, eMon.id).ended_at], ['active', null]);
-  assert.equal(waitRow(w.t, wMon).status, 'waiting');
-  for (const u of [fri.student, fri.parent, friPaused.student, friPaused.parent, friWait.student, friWait.parent]) {
-    const n = w.t.fx.notifications(u, 'session_day_removed');
-    assert.equal(n.length, 1, u.name);
-    assert.equal(n[0].title, 'Afternoon Study no longer meets on Fridays');
-  }
-  for (const u of [mon.student, mon.parent, monWait.parent]) {
-    assert.equal(sent(w.t, u, 'session_day_removed'), 0);
-    assert.equal(sent(w.t, u, 'session_changed'), 0);
-  }
-  const list = await w.t.as(w.dirA).get('/api/sessions');
-  assert.deepEqual(list.body.sessions[0].slots.map(x => x.weekday), [1, 3]);
+  assert.equal((await w.t.as(w.staffA).get('/api/sessions')).body.sessions[0].days_locked, false);
+  // A dropped enrollment and a settled waiting spot are history: still free.
+  w.t.fx.enroll(w.t.fx.family(w.a).student, s, 0, { status: 'dropped' });
+  w.t.fx.waitlist(w.t.fx.family(w.a).student, s, { status: 'removed' });
+  assert.equal((await put({ weekdays: [1, 3, 5] })).status, 200);
+  // One family waiting fixes the days.
+  const waiter = w.t.fx.waitlist(w.t.fx.family(w.a).student, s);
+  await locked([2, 4]);
+  assert.equal(row(w.t, s.id).weekdays, '1,3,5');
+  assert.equal((await w.t.as(w.staffA).get('/api/sessions')).body.sessions[0].days_locked, true);
+  // The same days in any order, plus a new name, times and seats, are still fine.
+  const ok = await put({ weekdays: [5, 3, 1], name: 'Mornings M/W/F', start_time: '09:30', end_time: '12:00', capacity: 12 });
+  assert.equal(ok.status, 200);
+  assert.deepEqual([row(w.t, s.id).weekdays, row(w.t, s.id).name, row(w.t, s.id).capacity], ['1,3,5', 'Mornings M/W/F', 12]);
+  assert.equal(ok.body.session.days_locked, true);
+  // A paused enrollment fixes them too, and so does a live v1 row.
+  w.t.db.prepare("UPDATE waitlist SET status = 'removed' WHERE id = ?").run(waiter.id);
+  const e = w.t.fx.enroll(w.t.fx.family(w.a).student, s, 0, { status: 'paused' });
+  const msg2 = msg.replace('Mornings MWF', 'Mornings M/W/F');
+  const r2 = await put({ weekdays: [1] });
+  assert.deepEqual([r2.status, r2.body.message], [409, msg2]);
+  w.t.db.prepare("UPDATE enrollments SET status = 'dropped' WHERE id = ?").run(e.id);
+  const v1 = w.t.fx.enroll(w.t.fx.family(w.a).student, s, 1);
+  assert.equal((await put({ weekdays: [1] })).status, 409);
+  w.t.db.prepare("UPDATE enrollments SET status = 'dropped' WHERE id = ?").run(v1.id);
+  assert.equal((await put({ weekdays: [1] })).status, 200);
+  assert.equal(row(w.t, s.id).weekdays, '1');
 });
 
-test(['SC-4'], 'cancelling a session ends every enrollment and waitlist spot and tells every family', async () => {
+test(['SC-4'], 'cancelling a schedule ends every live enrollment and waiting spot, whatever its weekday, and tells every family', async () => {
   const w = await world();
   const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3' });
   const keep = w.t.fx.session(w.a, { name: 'Morning Focus', start: '09:00', end: '11:30' });
-  const fams = [w.t.fx.family(w.a), w.t.fx.family(w.a), w.t.fx.family(w.a), w.t.fx.family(w.a)];
+  const fams = [w.t.fx.family(w.a), w.t.fx.family(w.a), w.t.fx.family(w.a), w.t.fx.family(w.a), w.t.fx.family(w.a)];
   const live = [
-    w.t.fx.enroll(fams[0].student, s, 1),
-    w.t.fx.enroll(fams[1].student, s, 3),
-    w.t.fx.enroll(fams[2].student, s, 1, { status: 'paused' }),
+    w.t.fx.enroll(fams[0].student, s),
+    w.t.fx.enroll(fams[1].student, s, 0, { status: 'paused' }),
+    w.t.fx.enroll(fams[2].student, s, 3), // a live v1 Wednesday row ends too (D-26)
   ];
-  const wl = waitlist(w.t, fams[3].student, s, 3);
+  const wl = w.t.fx.waitlist(fams[3].student, s);
+  const wlV1 = w.t.fx.waitlist(fams[4].student, s, { weekday: 1 });
   const other = w.t.fx.family(w.a);
-  const eOther = w.t.fx.enroll(other.student, keep, 1);
-  // History from before the cancel: a Monday student who dropped in September, and a
-  // Wednesday waitlist spot that became an enrollment in September and was dropped later
-  // that month. Their dates stay true (attendance and the schedule read ended_at), and
-  // neither family hears about a session they already left.
-  const sept = at('America/Los_Angeles', '2026-09-21', '15:00');
+  const eOther = w.t.fx.enroll(other.student, keep);
+  // History from before the cancel: a student who dropped in September, and a waitlist spot
+  // that became an enrollment in September and was dropped later that month. Their dates
+  // stay true (attendance and the schedule read ended_at), and neither family is told again.
+  const sept = at(LA, '2026-09-21', '15:00');
   const gone = w.t.fx.family(w.a);
-  const eGone = w.t.fx.enroll(gone.student, s, 1, { status: 'dropped' });
+  const eGone = w.t.fx.enroll(gone.student, s, 0, { status: 'dropped' });
   w.t.db.prepare('UPDATE enrollments SET ended_at = ? WHERE id = ?').run(sept, eGone.id);
-  const promotedAt = at('America/Los_Angeles', '2026-09-08', '09:00');
-  const promotedEnd = at('America/Los_Angeles', '2026-09-28', '17:00');
+  const promotedAt = at(LA, '2026-09-08', '09:00');
+  const promotedEnd = at(LA, '2026-09-28', '17:00');
   const promoted = w.t.fx.family(w.a);
-  const wPromoted = waitlist(w.t, promoted.student, s, 3);
-  w.t.db.prepare("UPDATE waitlist SET status = 'enrolled', resolved_at = ? WHERE id = ?").run(promotedAt, wPromoted);
-  const ePromoted = w.t.fx.enroll(promoted.student, s, 3, { status: 'dropped', source: 'waitlist' });
+  const wPromoted = w.t.fx.waitlist(promoted.student, s);
+  w.t.db.prepare("UPDATE waitlist SET status = 'enrolled', resolved_at = ? WHERE id = ?").run(promotedAt, wPromoted.id);
+  const ePromoted = w.t.fx.enroll(promoted.student, s, 0, { status: 'dropped', source: 'waitlist' });
   w.t.db.prepare('UPDATE enrollments SET ended_at = ? WHERE id = ?').run(promotedEnd, ePromoted.id);
-  const now = at('America/Los_Angeles', '2026-10-14', '12:00');
+  const now = at(LA, '2026-10-14', '12:00');
   w.t.clock.set(now);
 
   const r = await w.t.as(w.dirA).post('/api/sessions/' + s.id + '/cancel');
   assert.equal(r.status, 200);
-  assert.deepEqual([r.body.ended, r.body.notified], [4, 8]);
+  assert.deepEqual([r.body.ended, r.body.notified], [5, 10]);
   assert.equal(row(w.t, s.id).status, 'cancelled');
   assert.deepEqual(w.t.db.prepare('SELECT id, status, ended_at FROM enrollments WHERE session_id = ? ORDER BY id').all(s.id).map(x => [x.id, x.status, x.ended_at]), [
     ...live.map(e => [e.id, 'dropped', now]),
     [eGone.id, 'dropped', sept],
     [ePromoted.id, 'dropped', promotedEnd],
   ]);
-  assert.deepEqual([waitRow(w.t, wl).status, waitRow(w.t, wl).resolved_at], ['removed', now]);
-  assert.deepEqual([waitRow(w.t, wPromoted).status, waitRow(w.t, wPromoted).resolved_at], ['enrolled', promotedAt]);
+  for (const x of [wl, wlV1]) assert.deepEqual([waitRow(w.t, x.id).status, waitRow(w.t, x.id).resolved_at], ['removed', now]);
+  assert.deepEqual([waitRow(w.t, wPromoted.id).status, waitRow(w.t, wPromoted.id).resolved_at], ['enrolled', promotedAt]);
   assert.equal(enrollment(w.t, eOther.id).status, 'active');
   for (const f of fams) for (const u of [f.student, f.parent]) {
     const n = w.t.fx.notifications(u, 'session_cancelled');
@@ -570,7 +617,7 @@ test(['SC-4'], 'cancelling a session ends every enrollment and waitlist spot and
   }
   const list = await w.t.as(w.dirA).get('/api/sessions');
   assert.deepEqual(list.body.sessions.map(x => x.name), ['Morning Focus']);
-  // Both sessions meet on Wednesdays; only the one still running is on today's list.
+  // Both schedules meet on Wednesdays; only the one still running is on today's list.
   const today = await w.t.as(w.staffA).get('/api/sessions/today');
   assert.equal(today.body.weekday, 3);
   assert.deepEqual(today.body.sessions.map(x => x.name), ['Morning Focus']);
@@ -581,10 +628,294 @@ test(['SC-4'], 'cancelling a session ends every enrollment and waitlist spot and
   assert.equal(row(w.t, s.id).name, 'Afternoon Study');
 });
 
+// ---------------- SC-5: skip, add or move one date (D-46) ----------------
+
+test(['SC-5'], 'a director skips, adds and moves one date; enrolled families (paused too) are told once, nobody else', async () => {
+  const w = await world(); // Wed 14 Oct 2026
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const act = w.t.fx.family(w.a);
+  w.t.fx.enroll(act.student, s);
+  const guardian2 = w.t.fx.user('parent', { location: w.a });
+  w.t.fx.link(guardian2, act.student);
+  const pau = w.t.fx.family(w.a);
+  w.t.fx.enroll(pau.student, s, 0, { status: 'paused' });
+  const wait = w.t.fx.family(w.a);
+  w.t.fx.waitlist(wait.student, s);
+  const gone = w.t.fx.family(w.a);
+  w.t.fx.enroll(gone.student, s, 0, { status: 'dropped' });
+  const other = w.t.fx.family(w.a);
+  w.t.fx.enroll(other.student, w.t.fx.session(w.a, { name: 'Mornings MWF', start: '09:00', end: '11:30' }));
+  const told = [act.student, act.parent, guardian2, pau.student, pau.parent];
+  const post = body => w.t.as(w.dirA).post(datesUrl(s), body);
+  const only = (kind, title, body) => {
+    for (const u of told) {
+      const n = w.t.fx.notifications(u, kind);
+      assert.equal(n.length, 1, kind + ' ' + u.name);
+      assert.deepEqual([n[0].title, n[0].body, n[0].ref_type, n[0].ref_id], [title, body, 'session', s.id]);
+    }
+  };
+
+  const skip = await post({ action: 'skip', date: MON, reason: '  Staff training day  ' });
+  assert.equal(skip.status, 201);
+  assert.deepEqual(skip.body, { change: { action: 'skip', date: MON, to: null, reason: 'Staff training day' }, notified: 5 });
+  only('schedule_date_skipped', 'Afternoon Study doesn\'t meet Mon, Nov 23', 'Staff training day. Your other dates go ahead as usual.');
+
+  const add = await post({ action: 'add', date: '2026-11-24', reason: 'Exam prep' });
+  assert.deepEqual([add.status, add.body.notified], [201, 5]);
+  only('schedule_date_added', 'Afternoon Study also meets Tue, Nov 24', '1:00 PM–4:00 PM at Irvine. Exam prep');
+
+  const move = await post({ action: 'move', date: '2026-11-30', to: '2026-12-01', reason: 'Staff training day' });
+  assert.deepEqual([move.status, move.body.notified], [201, 5]);
+  assert.deepEqual(move.body.change, { action: 'move', date: '2026-11-30', to: '2026-12-01', reason: 'Staff training day' });
+  // A move is one notice, not a skip and an add.
+  only('schedule_date_moved', 'Afternoon Study moves from Mon, Nov 30 to Tue, Dec 1', 'Same time, 1:00 PM–4:00 PM. Staff training day');
+  only('schedule_date_skipped', 'Afternoon Study doesn\'t meet Mon, Nov 23', 'Staff training day. Your other dates go ahead as usual.');
+  only('schedule_date_added', 'Afternoon Study also meets Tue, Nov 24', '1:00 PM–4:00 PM at Irvine. Exam prep');
+
+  // No reason is fine; a long one is cut to 120 characters.
+  assert.equal((await post({ action: 'skip', date: '2026-12-02' })).status, 201);
+  assert.equal(w.t.fx.notifications(act.parent, 'schedule_date_skipped')[1].body, 'Your other dates go ahead as usual.');
+  assert.equal((await post({ action: 'add', date: '2026-12-05', reason: 'x'.repeat(130) })).status, 201);
+  for (const u of [wait.student, wait.parent, gone.student, gone.parent, other.student, other.parent]) {
+    assert.equal(w.t.fx.notifications(u).length, 0, u.name);
+  }
+  const by = w.dirA.id;
+  assert.deepEqual(dateRows(w.t, s), [
+    { date: MON, kind: 'skip', moved_from: null, reason: 'Staff training day', created_by: by },
+    { date: '2026-11-24', kind: 'add', moved_from: null, reason: 'Exam prep', created_by: by },
+    { date: '2026-11-30', kind: 'skip', moved_from: null, reason: 'Staff training day', created_by: by },
+    { date: '2026-12-01', kind: 'add', moved_from: '2026-11-30', reason: 'Staff training day', created_by: by },
+    { date: '2026-12-02', kind: 'skip', moved_from: null, reason: null, created_by: by },
+    { date: '2026-12-05', kind: 'add', moved_from: null, reason: 'x'.repeat(120), created_by: by },
+  ]);
+  assert.deepEqual(['session.date_skip', 'session.date_add', 'session.date_move'].map(a => w.t.fx.audit(a).length), [2, 2, 1]);
+  const log = w.t.fx.audit('session.date_move')[0];
+  assert.deepEqual([log.actor_id, log.target_id, log.location_id, JSON.parse(log.detail)],
+    [by, s.id, w.a.id, { date: '2026-11-30', to: '2026-12-01', reason: 'Staff training day' }]);
+  // The schedule list carries the upcoming changes.
+  const list = await w.t.as(w.staffA).get('/api/sessions');
+  assert.deepEqual(list.body.sessions.find(x => x.id === s.id).changes.map(c => [c.date, c.kind, c.moved_from]), [
+    [MON, 'skip', null], ['2026-11-24', 'add', null], ['2026-11-30', 'skip', null], ['2026-12-01', 'add', '2026-11-30'],
+    ['2026-12-02', 'skip', null], ['2026-12-05', 'add', null],
+  ]);
+  // HQ can change any location's schedule.
+  assert.equal((await w.t.as(w.hq).post(datesUrl(s), { action: 'skip', date: '2026-12-04' })).status, 201);
+});
+
+test(['SC-5'], 'a date change is refused, and nobody told, for past dates, dates outside the period, non-meeting dates, closures, changed dates and dates with visits', async () => {
+  const w = await world({ now: at(LA, '2026-10-14', '22:30') }); // Wed 10:30pm in Irvine, already Thu in UTC and Toronto
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const fam = w.t.fx.family(w.a);
+  w.t.fx.enroll(fam.student, s);
+  w.t.db.prepare("INSERT INTO closures (location_id, date, reason) VALUES (?, '2026-11-24', 'Inservice')").run(w.a.id);
+  w.t.fx.sessionDate(s, '2026-12-07', 'skip');
+  w.t.fx.sessionDate(s, '2026-12-08', 'add');
+  w.t.fx.visit(fam.student, w.a, { session: s, local_date: '2026-10-14' });
+  const refused = [
+    [{ action: 'skip', date: '2026-10-12' }, 400, 'past_date'],
+    [{ action: 'move', date: MON, to: '2026-10-13' }, 400, 'past_date'],
+    [{ action: 'add', date: '2026-12-19' }, 400, 'outside_term'],
+    [{ action: 'move', date: '2026-12-18', to: '2026-12-21' }, 400, 'outside_term'],
+    [{ action: 'add', date: '2026-08-15' }, 400, 'past_date'],
+    [{ action: 'skip', date: '2026-11-25T00:00' }, 400, 'date'],
+    [{ action: 'skip', date: '2026-11-26' }, 400, 'not_a_meeting_date'],
+    [{ action: 'skip', date: '2026-12-07' }, 400, 'not_a_meeting_date'],
+    [{ action: 'move', date: '2026-11-26', to: '2026-11-28' }, 400, 'not_a_meeting_date'],
+    [{ action: 'add', date: '2026-11-25' }, 400, 'already_meets'],
+    [{ action: 'add', date: '2026-12-08' }, 400, 'already_meets'],
+    [{ action: 'move', date: MON, to: '2026-11-25' }, 400, 'already_meets'],
+    [{ action: 'move', date: MON, to: MON }, 400, 'already_meets'],
+    [{ action: 'add', date: '2026-11-24' }, 400, 'closed_that_day'],
+    [{ action: 'move', date: MON, to: '2026-11-24' }, 400, 'closed_that_day'],
+    [{ action: 'skip', date: '2026-12-08' }, 409, 'already_changed'],
+    [{ action: 'add', date: '2026-12-07' }, 409, 'already_changed'],
+    [{ action: 'move', date: '2026-12-08', to: '2026-12-10' }, 409, 'already_changed'],
+    [{ action: 'move', date: MON, to: '2026-12-07' }, 409, 'already_changed'],
+    [{ action: 'skip', date: '2026-10-14' }, 409, 'date_has_visits'],
+    [{ action: 'move', date: '2026-10-14', to: '2026-10-15' }, 409, 'date_has_visits'],
+    [{ action: 'cancel', date: MON }, 400, 'action'],
+    [{ date: MON }, 400, 'action'],
+    [{ action: 'skip', date: '2026-02-30' }, 400, 'date'],
+    [{ action: 'skip' }, 400, 'date'],
+    [{ action: 'move', date: MON }, 400, 'date'],
+    [{ action: 'move', date: MON, to: POISON }, 400, 'date'],
+    [{ action: 'skip', date: MON, reason: POISON }, 400, 'reason'],
+    [{ action: 'skip', date: MON, reason: 7 }, 400, 'reason'],
+  ];
+  for (const [body, status, code] of refused) {
+    const r = await w.t.as(w.dirA).post(datesUrl(s), body);
+    assert.equal(r.status, status, JSON.stringify(body));
+    assert.equal(r.body.error, code, JSON.stringify(body));
+  }
+  const msg = async (body, text) => assert.equal((await w.t.as(w.dirA).post(datesUrl(s), body)).body.message, text);
+  await msg({ action: 'skip', date: '2026-10-12' }, 'Mon, Oct 12 has already passed at Irvine. Only today or a later date can change.');
+  await msg({ action: 'add', date: '2026-12-19' }, 'Sat, Dec 19 isn\'t inside Fall 2026 (Mon, Aug 17 – Fri, Dec 18).');
+  await msg({ action: 'skip', date: '2026-11-26' }, 'Afternoon Study doesn\'t meet on Thu, Nov 26.');
+  await msg({ action: 'add', date: '2026-11-25' }, 'Afternoon Study already meets on Wed, Nov 25.');
+  await msg({ action: 'add', date: '2026-11-24' }, 'Irvine is closed on Tue, Nov 24, so Afternoon Study can\'t meet then.');
+  await msg({ action: 'skip', date: '2026-12-08' }, 'Afternoon Study already has a change on Tue, Dec 8. Undo that change first.');
+  await msg({ action: 'skip', date: '2026-10-14' }, 'Students already checked in to Afternoon Study on Wed, Oct 14, so that date can\'t be skipped or moved.');
+  assert.deepEqual(dateRows(w.t, s).map(r => [r.date, r.kind]), [['2026-12-07', 'skip'], ['2026-12-08', 'add']]);
+  assert.equal(w.t.fx.notifications(fam.parent).length, 0);
+  assert.equal(w.t.fx.audit().filter(a => a.action.startsWith('session.date')).length, 0);
+
+  // Today is still today by the location's date (Wed in Irvine), and a visit to another schedule doesn't block it.
+  const wed = w.t.fx.session(w.a, { name: 'Wednesday Focus', weekdays: '3', start: '09:00', end: '11:30' });
+  assert.equal((await w.t.as(w.dirA).post(datesUrl(wed), { action: 'skip', date: '2026-10-14' })).status, 201);
+  // Toronto is already on Thursday: its Wednesday has passed, its Thursday is today.
+  const tor = w.t.fx.location({ name: 'Toronto', timezone: 'America/Toronto' });
+  w.t.fx.term(tor);
+  const torS = w.t.fx.session(tor, { name: 'Toronto Study', weekdays: '1,3,5', start: '09:00', end: '11:30' });
+  const dirT = w.t.fx.director(tor);
+  assert.equal((await w.t.as(dirT).post(datesUrl(torS), { action: 'add', date: '2026-10-14' })).body.error, 'past_date');
+  assert.equal((await w.t.as(dirT).post(datesUrl(torS), { action: 'add', date: '2026-10-15' })).status, 201);
+  // A cancelled schedule's dates are settled.
+  w.t.db.prepare("UPDATE sessions SET status = 'cancelled' WHERE id = ?").run(s.id);
+  const gone = await w.t.as(w.dirA).post(datesUrl(s), { action: 'skip', date: MON });
+  assert.deepEqual([gone.status, gone.body.error], [409, 'cancelled']);
+});
+
+test(['SC-5'], 'undo takes a change back (both halves of a move), today or later only, and tells the same families once', async () => {
+  const w = await world(); // Wed 14 Oct 2026
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const act = w.t.fx.family(w.a), pau = w.t.fx.family(w.a), wait = w.t.fx.family(w.a);
+  w.t.fx.enroll(act.student, s);
+  w.t.fx.enroll(pau.student, s, 0, { status: 'paused' });
+  w.t.fx.waitlist(wait.student, s);
+  const post = body => w.t.as(w.dirA).post(datesUrl(s), body);
+  const undo = date => w.t.as(w.dirA).del(datesUrl(s) + '/' + date);
+  const last = () => { const n = w.t.fx.notifications(act.parent, 'schedule_date_restored'); return n.length && [n.length, n[n.length - 1].title, n[n.length - 1].body]; };
+  await post({ action: 'skip', date: MON, reason: 'Staff training day' });
+  await post({ action: 'add', date: '2026-12-05' });
+  await post({ action: 'move', date: '2026-11-30', to: '2026-12-01' });
+
+  const r1 = await undo(MON);
+  assert.deepEqual([r1.status, r1.body], [200, { ok: true, notified: 4 }]);
+  assert.deepEqual(last(), [1, 'Afternoon Study meets Mon, Nov 23 after all', 'Same time, 1:00 PM–4:00 PM.']);
+  const r2 = await undo('2026-12-05');
+  assert.equal(r2.status, 200);
+  assert.deepEqual(last(), [2, 'Afternoon Study no longer meets Sat, Dec 5', 'Your other dates go ahead as usual.']);
+  // Undoing the Tuesday of a move takes back its Monday too, with one notice.
+  const r3 = await undo('2026-12-01');
+  assert.deepEqual([r3.status, r3.body.notified], [200, 4]);
+  assert.deepEqual(last(), [3, 'Afternoon Study meets Mon, Nov 30 after all', 'It no longer moves to Tue, Dec 1. Same time, 1:00 PM–4:00 PM.']);
+  assert.deepEqual(dateRows(w.t, s), []);
+  // And undoing the Monday of a move takes back its Tuesday.
+  await post({ action: 'move', date: '2026-11-30', to: '2026-12-01' });
+  assert.equal((await undo('2026-11-30')).status, 200);
+  assert.deepEqual(dateRows(w.t, s), []);
+  assert.equal(last()[0], 4);
+  for (const u of [act.student, pau.student, pau.parent]) assert.equal(sent(w.t, u, 'schedule_date_restored'), 4, u.name);
+  assert.equal(w.t.fx.notifications(wait.parent).length, 0);
+  const undone = w.t.fx.audit('session.date_undo');
+  assert.equal(undone.length, 4);
+  assert.deepEqual(JSON.parse(undone[2].detail).undone.map(x => [x.date, x.kind, x.moved_from]).sort(),
+    [['2026-11-30', 'skip', null], ['2026-12-01', 'add', '2026-11-30']]);
+  // Nothing to undo.
+  for (const d of ['2026-11-30', '2026-02-30', 'banana']) assert.equal((await undo(d)).status, 404, d);
+  // Past dates never change: a past skip stays, and so does a move whose Monday has passed.
+  w.t.fx.sessionDate(s, '2026-10-12', 'skip');
+  w.t.fx.sessionDate(s, '2026-10-05', 'skip');
+  w.t.fx.sessionDate(s, '2026-10-20', 'add', { moved_from: '2026-10-05' });
+  for (const d of ['2026-10-12', '2026-10-20']) {
+    const r = await undo(d);
+    assert.deepEqual([r.status, r.body.error], [400, 'past_date'], d);
+  }
+  assert.equal(dateRows(w.t, s).length, 3);
+  // Taking back an added date someone already came to would leave a visit on a date that doesn't meet.
+  const tth = w.t.fx.session(w.a, { name: 'Tue/Thu', weekdays: '2,4' });
+  w.t.fx.sessionDate(tth, '2026-10-14', 'add');
+  const visit = w.t.fx.visit(act.student, w.a, { session: tth, local_date: '2026-10-14' });
+  const blocked = await w.t.as(w.dirA).del(datesUrl(tth) + '/2026-10-14');
+  assert.deepEqual([blocked.status, blocked.body.error], [409, 'date_has_visits']);
+  w.t.db.prepare('DELETE FROM visits WHERE id = ?').run(visit.id);
+  assert.equal((await w.t.as(w.dirA).del(datesUrl(tth) + '/2026-10-14')).status, 200);
+  // A cancelled schedule keeps its history.
+  w.t.db.prepare("UPDATE sessions SET status = 'cancelled' WHERE id = ?").run(s.id);
+  assert.equal((await undo('2026-10-12')).body.error, 'cancelled');
+});
+
+test(['SC-5'], 'the dates route lists the whole period: regular, added, skipped and closed dates, with reasons and what has passed', async () => {
+  const w = await world(); // Wed 14 Oct 2026
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const other = w.t.fx.session(w.a, { name: 'Mornings MWF', start: '09:00', end: '11:30' });
+  w.t.fx.sessionDate(s, MON, 'skip', { reason: 'Staff training day' });
+  w.t.fx.sessionDate(s, '2026-11-24', 'add', { moved_from: MON, reason: 'Staff training day' });
+  w.t.fx.sessionDate(s, '2026-12-05', 'add', { reason: 'Exam prep' });
+  w.t.fx.sessionDate(s, '2026-10-12', 'skip');
+  w.t.fx.sessionDate(s, '2026-12-21', 'add'); // outside the period: ignored
+  w.t.fx.sessionDate(other, '2026-11-25', 'skip'); // another schedule's change
+  const close = (loc, date, reason) => w.t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(loc.id, date, reason);
+  close(w.a, '2026-11-26', 'Thanksgiving');
+  close(w.a, '2026-11-27', 'Thanksgiving');
+  close(w.a, '2026-12-05', 'Snow day'); // the closure wins over an added date (D-47)
+  close(w.b, '2026-11-30', 'Arcadia only');
+  const fam = w.t.fx.family(w.a);
+  const r = await w.t.as(fam.parent).get(datesUrl(s));
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.term, { id: w.termA.id, name: 'Fall 2026', start_date: '2026-08-17', end_date: '2026-12-18' });
+  assert.deepEqual([r.body.session.id, r.body.session.name, r.body.session.changes.map(c => c.date)], [s.id, 'Afternoon Study', [MON, '2026-11-24', '2026-12-05']]);
+  const ds = r.body.dates;
+  // 18 weeks of Mon/Wed/Fri (two of them skipped, one closed), plus the Tuesday and the closed Saturday.
+  assert.equal(ds.length, 18 * 3 + 2);
+  assert.deepEqual(ds.map(d => d.date), [...ds.map(d => d.date)].sort());
+  const on = date => ds.find(d => d.date === date);
+  assert.deepEqual(on('2026-08-17'), { date: '2026-08-17', kind: 'regular', reason: null, moved_from: null, past: true });
+  assert.deepEqual(on('2026-10-12'), { date: '2026-10-12', kind: 'skipped', reason: null, moved_from: null, past: true });
+  assert.deepEqual(on('2026-10-14'), { date: '2026-10-14', kind: 'regular', reason: null, moved_from: null, past: false });
+  assert.deepEqual(on(MON), { date: MON, kind: 'skipped', reason: 'Staff training day', moved_from: null, past: false });
+  assert.deepEqual(on('2026-11-24'), { date: '2026-11-24', kind: 'added', reason: 'Staff training day', moved_from: MON, past: false });
+  assert.deepEqual(on('2026-11-25'), { date: '2026-11-25', kind: 'regular', reason: null, moved_from: null, past: false });
+  assert.equal(on('2026-11-26'), undefined);
+  assert.deepEqual(on('2026-11-27'), { date: '2026-11-27', kind: 'closed', reason: 'Thanksgiving', moved_from: null, past: false });
+  assert.deepEqual(on('2026-11-30'), { date: '2026-11-30', kind: 'regular', reason: null, moved_from: null, past: false });
+  assert.deepEqual(on('2026-12-05'), { date: '2026-12-05', kind: 'closed', reason: 'Snow day', moved_from: null, past: false });
+  assert.equal(on('2026-12-21'), undefined);
+  // GET / shows only the changes from today on, inside the period.
+  const list = await w.t.as(fam.parent).get('/api/sessions');
+  assert.deepEqual(list.body.sessions.find(x => x.id === s.id).changes, [
+    { date: MON, kind: 'skip', moved_from: null, reason: 'Staff training day' },
+    { date: '2026-11-24', kind: 'add', moved_from: MON, reason: 'Staff training day' },
+    { date: '2026-12-05', kind: 'add', moved_from: null, reason: 'Exam prep' },
+  ]);
+  assert.equal((await w.t.as(w.dirA).get('/api/sessions/99999/dates')).status, 404);
+});
+
+test(['SC-5'], 'the demo seed moves Mornings MWF from the first Monday at least 3 days ahead to its Tuesday, through the same service, and tells the family', async () => {
+  const run = async (now, closures = []) => {
+    const t = await makeApp({ now });
+    const irvine = t.fx.location({ name: 'Irvine' });
+    t.fx.term(irvine);
+    for (const d of closures) t.db.prepare('INSERT INTO closures (location_id, date) VALUES (?,?)').run(irvine.id, d);
+    const dir = t.fx.director(irvine);
+    const mornings = t.fx.session(irvine, { name: 'Mornings MWF', start: '09:00', end: '12:00', capacity: 24 });
+    const fam = t.fx.family(irvine);
+    t.fx.enroll(fam.student, mornings);
+    load('src/modules/sessions/seed.js')(t.ctx, { NOW: now, locations: { irvine }, dirIrvine: dir, sessions: { morningsMWF: mornings } });
+    assert.equal(t.clock.now(), now, 'the clock is left where it was');
+    return { t, dir, fam, rows: dateRows(t, mornings).map(r => [r.date, r.kind, r.moved_from, r.reason, r.created_by]) };
+  };
+  // Fri Oct 16: Mon Oct 19 is 3 days ahead.
+  const fri = await run(at(LA, '2026-10-16', '10:00'));
+  assert.deepEqual(fri.rows, [['2026-10-19', 'skip', null, 'Staff training day', fri.dir.id], ['2026-10-20', 'add', '2026-10-19', 'Staff training day', fri.dir.id]]);
+  for (const u of [fri.fam.student, fri.fam.parent]) {
+    const n = fri.t.fx.notifications(u, 'schedule_date_moved');
+    assert.deepEqual(n.map(x => [x.title, x.body]), [['Mornings MWF moves from Mon, Oct 19 to Tue, Oct 20', 'Same time, 9:00 AM–12:00 PM. Staff training day']]);
+  }
+  assert.equal(fri.t.fx.audit('session.date_move')[0].actor_id, fri.dir.id);
+  // Sat Oct 17: Oct 19 is only 2 days ahead, and Tue Oct 27 is closed, so Mon Nov 2 moves.
+  const sat = await run(at(LA, '2026-10-17', '10:00'), ['2026-10-27']);
+  assert.deepEqual(sat.rows.map(r => r.slice(0, 3)), [['2026-11-02', 'skip', null], ['2026-11-03', 'add', '2026-11-02']]);
+  // After the period: the first Monday in it, changed as if three days before it.
+  const late = await run(at(LA, '2026-12-20', '10:00'));
+  assert.deepEqual(late.rows.map(r => r.slice(0, 3)), [['2026-08-17', 'skip', null], ['2026-08-18', 'add', '2026-08-17']]);
+  assert.equal(late.t.fx.notifications(late.fam.parent, 'schedule_date_moved')[0].created_at, at(LA, '2026-08-14', '09:00'));
+});
+
 // ---------------- NF-4: each location runs on its own time zone ----------------
 
-test(['NF-4', 'SC-1'], 'a Toronto session keeps Toronto times, and "today" follows Toronto\'s calendar', async () => {
-  const t = await makeApp({ now: at('America/Los_Angeles', '2026-10-14', '22:30') }); // already Thu 01:30 in Toronto
+test(['NF-4', 'SC-1'], 'a Toronto schedule keeps Toronto times, and "today" follows Toronto\'s calendar', async () => {
+  const t = await makeApp({ now: at(LA, '2026-10-14', '22:30') }); // already Thu 01:30 in Toronto
   const tor = t.fx.location({ name: 'Toronto', timezone: 'America/Toronto', lat: 43.6532, lng: -79.3832 });
   const la = t.fx.location({ name: 'Irvine' });
   const termT = t.fx.term(tor);
@@ -611,6 +942,10 @@ test(['NF-4', 'SC-1'], 'a Toronto session keeps Toronto times, and "today" follo
   // The same instant is still Wednesday in Los Angeles.
   const laToday = await t.as(staffLA).get('/api/sessions/today');
   assert.deepEqual([laToday.body.date, laToday.body.weekday], ['2026-10-14', 3]);
+  // A change dated Thursday shows in Toronto's upcoming changes, a Wednesday one doesn't.
+  const s = list.body.sessions[0];
+  t.db.prepare("INSERT INTO session_dates (session_id, date, kind, created_at) VALUES (?, '2026-10-14', 'add', 0), (?, '2026-10-15', 'skip', 0)").run(s.id, s.id);
+  assert.deepEqual((await t.as(staffT).get('/api/sessions')).body.sessions[0].changes.map(c => c.date), ['2026-10-15']);
 });
 
 // ---------------- NF-1: scope on every route ----------------
@@ -637,7 +972,7 @@ test(['NF-1'], 'reading a schedule: your own location only (families included), 
   assert.equal((await w.t.as(w.hq).get('/api/sessions')).status, 400);
 });
 
-test(['NF-1'], 'today\'s sessions: staff and up, at their own location only', async () => {
+test(['NF-1'], 'today\'s schedules: staff and up, at their own location only', async () => {
   const w = await world();
   w.t.fx.session(w.a, { name: 'Irvine Study' });
   const famA = w.t.fx.family(w.a);
@@ -650,17 +985,17 @@ test(['NF-1'], 'today\'s sessions: staff and up, at their own location only', as
   }
 });
 
-test(['NF-1'], 'a location\'s schedule, counts and closures never include another location\'s', async () => {
+test(['NF-1'], 'a location\'s schedules, counts and closures never include another location\'s', async () => {
   const w = await world(); // Wed 14 Oct 2026, 10:00 in Los Angeles (both locations)
   const sA = w.t.fx.session(w.a, { name: 'Irvine Study', weekdays: '1,3', capacity: 4 });
   const famA = w.t.fx.family(w.a);
-  w.t.fx.enroll(famA.student, sA, 3);
+  w.t.fx.enroll(famA.student, sA);
   assert.equal((await w.t.as(w.dirA).post('/api/sessions/closures', { date: MON, reason: 'Irvine staff training' })).status, 201);
   // Arcadia meets today too, with its own enrollments and waitlist, and is closed today.
   const sB = w.t.fx.session(w.b, { name: 'Arcadia Study', weekdays: '3', start: '09:30', end: '12:00', capacity: 6 });
-  w.t.fx.enroll(w.t.fx.family(w.b).student, sB, 3);
-  w.t.fx.enroll(w.t.fx.family(w.b).student, sB, 3);
-  waitlist(w.t, w.t.fx.family(w.b).student, sB, 3);
+  w.t.fx.enroll(w.t.fx.family(w.b).student, sB);
+  w.t.fx.enroll(w.t.fx.family(w.b).student, sB);
+  w.t.fx.waitlist(w.t.fx.family(w.b).student, sB);
   assert.equal((await w.t.as(w.dirB).post('/api/sessions/closures', { date: '2026-10-14', reason: 'Arcadia power outage' })).status, 201);
 
   const urlA = '/api/sessions?location_id=' + w.a.id;
@@ -670,10 +1005,8 @@ test(['NF-1'], 'a location\'s schedule, counts and closures never include anothe
     assert.equal(r.body.location.id, w.a.id, u.role);
     assert.deepEqual(r.body.terms.map(x => x.id), [w.termA.id], u.role);
     assert.deepEqual(r.body.closures.map(x => [x.date, x.reason]), [[MON, 'Irvine staff training']], u.role);
-    assert.deepEqual(r.body.sessions.map(s => [s.id, s.name, s.slots]), [[sA.id, 'Irvine Study', [
-      { weekday: 1, enrolled: 0, paused: 0, waiting: 0, capacity: 4, seats_left: 4 },
-      { weekday: 3, enrolled: 1, paused: 0, waiting: 0, capacity: 4, seats_left: 3 },
-    ]]], u.role);
+    assert.deepEqual(r.body.sessions.map(s => [s.id, s.name, s.enrolled, s.paused, s.waiting, s.seats_left]),
+      [[sA.id, 'Irvine Study', 1, 0, 0, 3]], u.role);
   }
   // Families never get the staff "today" view (see above); staff, director and HQ get Irvine's day only.
   for (const u of [w.staffA, w.dirA, w.hq]) {
@@ -692,7 +1025,7 @@ test(['NF-1'], 'a location\'s schedule, counts and closures never include anothe
   assert.deepEqual(bToday.body.sessions.map(s => [s.id, s.enrolled, s.waiting, s.capacity]), [[sB.id, 2, 1, 6]]);
 });
 
-test(['NF-1'], 'creating a session: the location\'s own director or HQ only', async () => {
+test(['NF-1'], 'creating a schedule: the location\'s own director or HQ only', async () => {
   const w = await world();
   const famA = w.t.fx.family(w.a);
   for (const u of [w.staffA, famA.parent, famA.student, w.dirB]) {
@@ -703,11 +1036,11 @@ test(['NF-1'], 'creating a session: the location\'s own director or HQ only', as
   assert.equal((await w.t.as(w.hq).post('/api/sessions', block({ location_id: w.a.id, term_id: w.termA.id }))).status, 201);
 });
 
-test(['NF-1'], 'editing or cancelling a session: the location\'s own director or HQ only', async () => {
+test(['NF-1'], 'editing or cancelling a schedule: the location\'s own director or HQ only', async () => {
   const w = await world();
   const s = w.t.fx.session(w.a, { name: 'Irvine Study' });
   const famA = w.t.fx.family(w.a);
-  w.t.fx.enroll(famA.student, s, 1);
+  w.t.fx.enroll(famA.student, s);
   for (const u of [w.staffA, famA.parent, famA.student, w.dirB]) {
     assert.equal((await w.t.as(u).put('/api/sessions/' + s.id, { name: 'Hijacked', capacity: 50 })).status, 403, u.role);
     assert.equal((await w.t.as(u).post('/api/sessions/' + s.id + '/cancel')).status, 403, u.role);
@@ -718,7 +1051,7 @@ test(['NF-1'], 'editing or cancelling a session: the location\'s own director or
   assert.equal((await w.t.as(w.hq).post('/api/sessions/' + s.id + '/cancel')).status, 200);
 });
 
-test(['NF-1'], 'terms: the location\'s own director or HQ only', async () => {
+test(['NF-1'], 'periods: the location\'s own director or HQ only', async () => {
   const w = await world();
   const famA = w.t.fx.family(w.a);
   const spring = { location_id: w.a.id, name: 'Spring 2027', start_date: '2027-01-11', end_date: '2027-05-28' };
@@ -736,7 +1069,7 @@ test(['NF-1'], 'closures: the location\'s own director or HQ only', async () => 
   const w = await world();
   const s = w.t.fx.session(w.a, { weekdays: '1' });
   const famA = w.t.fx.family(w.a);
-  w.t.fx.enroll(famA.student, s, 1);
+  w.t.fx.enroll(famA.student, s);
   for (const u of [w.staffA, famA.parent, w.dirB]) {
     assert.equal((await w.t.as(u).post('/api/sessions/closures', { location_id: w.a.id, date: MON })).status, 403, u.role);
   }
@@ -750,17 +1083,50 @@ test(['NF-1'], 'closures: the location\'s own director or HQ only', async () => 
   assert.equal((await w.t.as(w.hq).del('/api/sessions/closures/' + c.body.closure.id)).status, 200);
 });
 
+test(['NF-1', 'SC-5'], 'a schedule\'s dates: read at your own location (families included); changed by its own director or HQ only', async () => {
+  const w = await world();
+  const s = w.t.fx.session(w.a, { name: 'Irvine Study' });
+  const famA = w.t.fx.family(w.a), famB = w.t.fx.family(w.b);
+  w.t.fx.enroll(famA.student, s);
+  const url = datesUrl(s);
+  for (const u of [famB.parent, famB.student, w.staffB, w.dirB]) {
+    const r = await w.t.as(u).get(url);
+    assert.equal(r.status, 403, u.role);
+    assert.equal(r.body.dates, undefined);
+  }
+  assert.equal((await w.t.anon.get(url)).status, 401);
+  for (const u of [famA.parent, famA.student, w.staffA, w.dirA, w.hq]) {
+    const r = await w.t.as(u).get(url);
+    assert.equal(r.status, 200, u.role);
+    assert.equal(r.body.session.id, s.id);
+  }
+  for (const u of [w.staffA, famA.parent, famA.student, w.dirB]) {
+    assert.equal((await w.t.as(u).post(url, { action: 'skip', date: MON })).status, 403, u.role);
+  }
+  assert.equal((await w.t.anon.post(url, { action: 'skip', date: MON })).status, 401);
+  assert.deepEqual(dateRows(w.t, s), []);
+  assert.equal(w.t.fx.notifications(famA.parent).length, 0);
+  assert.equal((await w.t.as(w.dirA).post(url, { action: 'skip', date: MON })).status, 201);
+  assert.equal((await w.t.as(w.hq).post(url, { action: 'add', date: '2026-11-24' })).status, 201);
+  for (const u of [w.staffA, famA.parent, w.dirB]) {
+    assert.equal((await w.t.as(u).del(url + '/' + MON)).status, 403, u.role);
+  }
+  assert.equal(dateRows(w.t, s).length, 2);
+  assert.equal((await w.t.as(w.hq).del(url + '/' + MON)).status, 200);
+  assert.equal((await w.t.as(w.dirA).del(url + '/2026-11-24')).status, 200);
+  assert.equal((await w.t.as(w.dirA).post('/api/sessions/99999/dates', { action: 'skip', date: MON })).status, 404);
+});
+
 // ---------------- Round-1 sweep rules (R3, R4, R7, R8) ----------------
 
 test(['SC-3'], 'R3: closures are added and removed for today or later only, by the location\'s own date; a past date is refused and nobody is told', async () => {
-  const w = await world({ now: at('America/Los_Angeles', '2026-10-14', '22:30') }); // Wed 10:30pm in Irvine, already Thu in Toronto
+  const w = await world({ now: at(LA, '2026-10-14', '22:30') }); // Wed 10:30pm in Irvine, already Thu in Toronto
   const tor = w.t.fx.location({ name: 'Toronto', timezone: 'America/Toronto' });
   w.t.fx.term(tor);
   const dirT = w.t.fx.director(tor);
   const s = w.t.fx.session(w.a, { weekdays: '1,3' });
   const fam = w.t.fx.family(w.a);
-  w.t.fx.enroll(fam.student, s, 1);
-  w.t.fx.enroll(fam.student, s, 3);
+  w.t.fx.enroll(fam.student, s);
 
   // Mon Oct 12 is over: no closure, and no "closed" notice for a day the family already had.
   const past = await w.t.as(w.dirA).post('/api/sessions/closures', { date: '2026-10-12', reason: 'Power outage' });
@@ -791,13 +1157,13 @@ test(['SC-3'], 'R3: closures are added and removed for today or later only, by t
   assert.equal(sent(w.t, fam.parent, 'session_reopened'), 1);
 });
 
-test(['SC-1', 'SC-4'], 'R4: a session starts no earlier than its location opens and ends no later than it closes, when created or edited', async () => {
+test(['SC-1', 'SC-4'], 'R4: a schedule starts no earlier than its location opens and ends no later than it closes, when created or edited', async () => {
   const t = await makeApp();
   const loc = t.fx.location({ name: 'Irvine', open_time: '09:00', close_time: '18:00' });
   const term = t.fx.term(loc);
   const dir = t.fx.director(loc);
   const post = over => t.as(dir).post('/api/sessions', block(Object.assign({ term_id: term.id }, over)));
-  const msg = 'Irvine is open 9:00 AM–6:00 PM, so a session there has to start at 9:00 AM or later and end by 6:00 PM.';
+  const msg = 'Irvine is open 9:00 AM–6:00 PM, so a schedule there has to start at 9:00 AM or later and end by 6:00 PM.';
   for (const [start_time, end_time] of [['16:30', '18:30'], ['08:00', '10:00'], ['08:59', '11:00'], ['16:00', '18:01']]) {
     const r = await post({ start_time, end_time });
     assert.equal(r.status, 400, start_time + '-' + end_time);
@@ -807,7 +1173,7 @@ test(['SC-1', 'SC-4'], 'R4: a session starts no earlier than its location opens 
   assert.equal((await post({ start_time: '09:00', end_time: '11:00' })).status, 201); // opens at 9
   const late = await post({ start_time: '16:00', end_time: '18:00' });             // closes at 6
   assert.equal(late.status, 201);
-  // An edit can't push it past closing either; the session keeps its times.
+  // An edit can't push it past closing either; the schedule keeps its times.
   const e = await t.as(dir).put('/api/sessions/' + late.body.session.id, { end_time: '18:30' });
   assert.equal(e.status, 400);
   assert.equal(e.body.error, 'outside_hours');
@@ -815,43 +1181,53 @@ test(['SC-1', 'SC-4'], 'R4: a session starts no earlier than its location opens 
   assert.equal((await t.as(dir).put('/api/sessions/' + late.body.session.id, { start_time: '15:30' })).status, 200);
 });
 
-test(['SC-3', 'SC-4'], 'R7: shortening a term tells the families whose weekly sessions it cuts, like removing a day; nobody else', async () => {
+test(['SC-3', 'SC-4', 'SC-5'], 'R7: shortening a period tells the families whose schedules lose a meeting date (by dates.js); nobody else', async () => {
   const w = await world(); // Wed 14 Oct 2026; Fall 2026 runs Mon Aug 17 - Fri Dec 18
   const mwf = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
   const tth = w.t.fx.session(w.a, { name: 'Tue/Thu Study', weekdays: '2,4' });
-  const mon = w.t.fx.family(w.a), fri = w.t.fx.family(w.a), thu = w.t.fx.family(w.a), gone = w.t.fx.family(w.a);
-  w.t.fx.enroll(mon.student, mwf, 1);
-  w.t.fx.enroll(fri.student, mwf, 5);
-  w.t.fx.enroll(thu.student, tth, 4, { status: 'paused' });
-  w.t.fx.enroll(gone.student, mwf, 5, { status: 'dropped' });
+  const monAdd = w.t.fx.session(w.a, { name: 'Mondays plus', weekdays: '1', start: '09:00', end: '11:30' });
+  w.t.fx.sessionDate(monAdd, '2026-12-17', 'add'); // an extra Thursday in the cut
+  const monOnly = w.t.fx.session(w.a, { name: 'Mondays', weekdays: '1', start: '16:30', end: '18:30' });
+  const friSkip = w.t.fx.session(w.a, { name: 'Fridays', weekdays: '5', start: '16:30', end: '18:30' });
+  w.t.fx.sessionDate(friSkip, '2026-12-18', 'skip'); // its last Friday was already skipped
+  const fri = w.t.fx.family(w.a), thu = w.t.fx.family(w.a), plus = w.t.fx.family(w.a), mons = w.t.fx.family(w.a),
+    fris = w.t.fx.family(w.a), v1 = w.t.fx.family(w.a), gone = w.t.fx.family(w.a);
+  w.t.fx.enroll(fri.student, mwf);
+  w.t.fx.enroll(thu.student, tth, 0, { status: 'paused' });
+  w.t.fx.enroll(plus.student, monAdd);
+  w.t.fx.enroll(mons.student, monOnly);
+  w.t.fx.enroll(fris.student, friSkip);
+  w.t.fx.enroll(v1.student, mwf, 1); // a v1 Monday row counts only on Mondays
+  w.t.fx.enroll(gone.student, mwf, 0, { status: 'dropped' });
   const spring = w.t.fx.term(w.a, { name: 'Spring 2027', start: '2027-01-11', end: '2027-05-28' });
   const springFam = w.t.fx.family(w.a);
-  w.t.fx.enroll(springFam.student, w.t.fx.session(w.a, { term: spring, weekdays: '1,5' }), 5);
+  w.t.fx.enroll(springFam.student, w.t.fx.session(w.a, { term: spring, weekdays: '1,5' }));
   const kind = 'term_shortened';
 
   // Ending on Wed Dec 16 cuts Thu Dec 17 and Fri Dec 18.
   const r = await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { end_date: '2026-12-16' });
   assert.equal(r.status, 200);
-  assert.equal(r.body.notified, 4);
-  for (const u of [fri.student, fri.parent, thu.student, thu.parent]) {
+  assert.equal(r.body.notified, 6);
+  for (const u of [fri.student, fri.parent, thu.student, thu.parent, plus.student, plus.parent]) {
     const n = w.t.fx.notifications(u, kind);
     assert.equal(n.length, 1, u.name);
     assert.equal(n[0].title, 'Fall 2026 at Irvine now runs Mon, Aug 17 – Wed, Dec 16');
     assert.equal(n[0].body, 'Irvine changed Fall 2026 from Mon, Aug 17 – Fri, Dec 18 to Mon, Aug 17 – Wed, Dec 16. ' +
-      'Your weekly sessions in it don\'t meet outside those dates. You can pick another session in the app.');
+      'Your schedule in it doesn\'t meet outside those dates. You can pick another schedule in the app.');
   }
-  for (const u of [mon.student, mon.parent, gone.student, gone.parent, springFam.student, springFam.parent]) assert.equal(sent(w.t, u, kind), 0, u.name);
+  for (const u of [mons.student, mons.parent, fris.parent, v1.parent, gone.student, gone.parent, springFam.student, springFam.parent]) assert.equal(sent(w.t, u, kind), 0, u.name);
   // Lengthening it again, or moving a start date that has already passed, cuts nothing ahead.
   assert.equal((await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { end_date: '2026-12-18' })).body.notified, 0);
   assert.equal((await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { start_date: '2026-08-24' })).body.notified, 0);
-  // A later start for a term ahead cuts its first weeks: Fri Jan 15 is gone for the spring family.
+  // A later start for a period ahead cuts its first weeks: Mon Jan 11 and Fri Jan 15 are gone for the spring family.
   const sp = await w.t.as(w.dirA).put('/api/sessions/terms/' + spring.id, { start_date: '2027-01-18' });
   assert.equal(sp.body.notified, 2);
   assert.equal(sent(w.t, springFam.parent, kind), 1);
-  // Ending the term yesterday cuts every weekday from today on, Mondays included.
-  assert.equal((await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { end_date: '2026-10-13' })).body.notified, 6);
-  assert.equal(sent(w.t, mon.parent, kind), 1);
-  assert.equal(count(w.t, "SELECT COUNT(*) AS n FROM enrollments WHERE status = 'active'"), 3); // enrollments are left as they are
+  // Ending the period yesterday cuts every date from today on: every live enrollment hears.
+  assert.equal((await w.t.as(w.dirA).put('/api/sessions/terms/' + w.termA.id, { end_date: '2026-10-13' })).body.notified, 12);
+  for (const u of [mons.parent, fris.parent, v1.parent]) assert.equal(sent(w.t, u, kind), 1, u.name);
+  assert.equal(sent(w.t, gone.parent, kind), 0);
+  assert.equal(count(w.t, "SELECT COUNT(*) AS n FROM enrollments WHERE status = 'active'"), 6); // enrollments are left as they are
 });
 
 test(['SC-4'], 'R8: a time edit applies from the edit date on; the times it replaced are kept for every date before it', async () => {
@@ -867,7 +1243,7 @@ test(['SC-4'], 'R8: a time edit applies from the edit date on; the times it repl
   // A second edit the same day: the days before today still had 1-4pm.
   assert.equal((await put({ start_time: '14:00', end_time: '17:00' })).status, 200);
   assert.deepEqual(hist(s.id), [{ until_date: '2026-10-13', start_time: '13:00', end_time: '16:00' }]);
-  w.t.clock.set(at('America/Los_Angeles', '2026-10-20', '09:00'));
+  w.t.clock.set(at(LA, '2026-10-20', '09:00'));
   assert.equal((await put({ start_time: '13:00', end_time: '16:00' })).status, 200);
   assert.deepEqual(hist(s.id), [{ until_date: '2026-10-13', start_time: '13:00', end_time: '16:00' },
     { until_date: '2026-10-19', start_time: '14:00', end_time: '17:00' }]);
@@ -875,12 +1251,73 @@ test(['SC-4'], 'R8: a time edit applies from the edit date on; the times it repl
   const tor = w.t.fx.location({ name: 'Toronto', timezone: 'America/Toronto' });
   w.t.fx.term(tor);
   const ts = w.t.fx.session(tor, { weekdays: '1,3,5', start: '09:00', end: '11:30' });
-  w.t.clock.set(at('America/Los_Angeles', '2026-10-20', '22:30'));
+  w.t.clock.set(at(LA, '2026-10-20', '22:30'));
   assert.equal((await w.t.as(w.hq).put('/api/sessions/' + ts.id, { start_time: '09:30', end_time: '12:00' })).status, 200);
   assert.deepEqual(hist(ts.id), [{ until_date: '2026-10-20', start_time: '09:00', end_time: '11:30' }]);
 });
 
-// ---------------- The Sessions screen in a browser tab (S6, S7) ----------------
+// ---------------- Sweep fixes: L36, L38 (server) ----------------
+
+// L36 runs the enrollment module's waitlist job. A run scoped to sessions alone
+// does not load that module, so there a stand-in job proves the hand-off; the
+// full run and any run that includes integration load it and check the fill.
+const enrollmentLoaded = !process.env.ELITE_MODULES || process.env.ELITE_MODULES.split(',').includes('enrollment');
+
+test(['SC-2', 'SC-4'], 'raising seats fills them from the waitlist at once, through the enrollment module\'s own job (L36)', async () => {
+  const w = await world();
+  const s = w.t.fx.session(w.a, { weekdays: '1,3', capacity: 1 });
+  const held = w.t.fx.family(w.a);
+  w.t.fx.enroll(held.student, s);
+  const first = w.t.fx.family(w.a), second = w.t.fx.family(w.a), third = w.t.fx.family(w.a);
+  const lines = [first, second, third].map(f => w.t.fx.waitlist(f.student, s).id);
+  const mods = load('src/modules/index.js');
+  const calls = [];
+  const stand = !enrollmentLoaded && [
+    { name: 'enrollment', jobs: [{ name: 'other-job', run: () => calls.push('other') }, { name: 'promote-waitlists', run: c => calls.push(c === w.t.ctx ? 'promote' : 'wrong ctx') }] },
+    { name: 'attendance', jobs: [{ name: 'promote-waitlists', run: () => calls.push('wrong module') }] },
+  ];
+  if (stand) mods.push(...stand);
+  try {
+    const r = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { capacity: 3 });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.notified, 2, 'the edit itself tells the family already enrolled');
+    if (stand) {
+      assert.deepEqual(calls, ['promote']);
+      // A rename, or fewer seats, runs nothing.
+      assert.equal((await w.t.as(w.dirA).put('/api/sessions/' + s.id, { name: 'Renamed' })).status, 200);
+      assert.equal((await w.t.as(w.dirA).put('/api/sessions/' + s.id, { capacity: 2 })).status, 200);
+      assert.deepEqual(calls, ['promote']);
+      assert.deepEqual(lines.map(id => waitRow(w.t, id).status), ['waiting', 'waiting', 'waiting']);
+      return;
+    }
+    // No job run: the Save itself served the line, and the reply shows it.
+    assert.deepEqual(lines.map(id => waitRow(w.t, id).status), ['enrolled', 'enrolled', 'waiting']);
+    assert.deepEqual([r.body.session.enrolled, r.body.session.waiting, r.body.session.seats_left], [3, 1, 0]);
+    for (const f of [first, second]) {
+      assert.equal(count(w.t, "SELECT COUNT(*) AS n FROM enrollments WHERE student_id = ? AND session_id = ? AND weekday = 0 AND status = 'active'", f.student.id, s.id), 1);
+      assert.equal(sent(w.t, f.parent, 'waitlist_promoted'), 1);
+    }
+    assert.equal(sent(w.t, third.parent, 'waitlist_promoted'), 0);
+  } finally {
+    if (stand) for (const m of stand) mods.splice(mods.indexOf(m), 1);
+  }
+});
+
+test(['SC-4', 'SC-5'], 'a parent of two students in one schedule is told once, and "notified" counts people (L38)', async () => {
+  const w = await world();
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const fam = w.t.fx.family(w.a, { students: 2 });
+  for (const kid of fam.students) w.t.fx.enroll(kid, s);
+  const r = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { name: 'Afternoon Study MWF' });
+  assert.equal(r.body.notified, 3, 'two students and their parent');
+  assert.equal(sent(w.t, fam.parent, 'session_changed'), 1);
+  const d = await w.t.as(w.dirA).post(datesUrl(s), { action: 'skip', date: MON });
+  assert.equal(d.body.notified, 3);
+  assert.equal(sent(w.t, fam.parent, 'schedule_date_skipped'), 1);
+  for (const kid of fam.students) assert.equal(sent(w.t, kid, 'schedule_date_skipped'), 1);
+});
+
+// ---------------- The Schedules screen in a browser tab ----------------
 
 // Just enough DOM for public/js/app.js and the sessions view: one tree under
 // <html>, focus, bubbling events, input values and checkboxes.
@@ -967,70 +1404,152 @@ function sessionsTab(t, user, extraViews = []) {
     } while (pending.size);
   };
   return {
-    doc, main, requests, settle,
+    doc, main, requests, settle, toasts,
     async open() { const view = el('div'); main.replaceChildren(view); await win.App.views.find(v => v.id === 'sessions').render(view, []); await settle(); return view; },
     async inbox() { const view = el('div'); main.replaceChildren(view); await win.App.views.find(v => v.id === 'inbox').render(view, []); await settle(); return view; },
+    async card(id) { const box = el('div'); main.replaceChildren(box); await win.App.cards.find(c => c.id === id).render(box); await settle(); return box; },
+    title: () => win.App.views.find(v => v.id === 'sessions').title,
   };
 }
 const words = n => n.all().filter(c => !c.tag).map(c => c.data).join(' ').replace(/\s+/g, ' ').trim();
 const btn = (root, label) => root.find(n => n.tag === 'button' && n.textContent === label);
 const dialog = root => root.find(n => n.getAttribute('role') === 'alertdialog');
 const labels = box => box.findAll(n => n.tag === 'button').map(b => b.textContent);
+const dateLi = (view, label) => view.findAll(n => n.tag === 'li' && n.cls.includes('sx-date')).find(li => words(li).startsWith(label));
 
-test(['SC-3', 'SC-4', 'NF-7'], 'Sessions screen: every confirm puts the safe button first and focused, Escape keeps things as they were, and paused enrollments are counted in what a change ends', async () => {
+test(['SC-4', 'SC-5', 'NF-7'], 'Schedules screen: each row shows days, seats, waiting and the next change; days lock once families are in; every date change asks first, safe button focused', async () => {
   const w = await world(); // Wed 14 Oct 2026, 10:00 in Los Angeles
   const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
-  const act = w.t.fx.family(w.a), pau = w.t.fx.family(w.a);
-  w.t.fx.enroll(act.student, s, 1);
-  w.t.fx.enroll(pau.student, s, 1, { status: 'paused' });
-  waitlist(w.t, w.t.fx.family(w.a).student, s, 1);
+  w.t.fx.session(w.a, { name: 'Quiet Room TTh', weekdays: '2,4', start: '16:30', end: '18:30', capacity: 2 });
+  w.t.fx.enroll(w.t.fx.family(w.a).student, s);
+  w.t.fx.enroll(w.t.fx.family(w.a).student, s, 0, { status: 'paused' });
+  w.t.fx.waitlist(w.t.fx.family(w.a).student, s);
+  w.t.fx.sessionDate(s, MON, 'skip', { reason: 'Staff training day' });
+  w.t.fx.sessionDate(s, '2026-11-24', 'add', { moved_from: MON, reason: 'Staff training day' });
   const tab = sessionsTab(w.t, w.dirA);
+  assert.equal(tab.title(), 'Schedules');
   let view = await tab.open();
-  const openSession = () => view.find(n => n.tag === 'button' && n.cls.includes('sx-slot')).click();
+  const rows = () => view.findAll(n => n.tag === 'button' && n.cls.includes('sx-slot'));
+  assert.deepEqual(rows().map(words), [
+    'Afternoon Study Mon Wed Fri 1pm – 4pm 1 of 10 seats 1 waiting 3 days a week Moves Mon Nov 23 → Tue Nov 24',
+    'Quiet Room TTh Tue Thu 4:30pm – 6:30pm 0 of 2 seats 2 days a week',
+  ]);
+  const boxes = () => view.findAll(n => n.tag === 'input' && n.getAttribute('type') === 'checkbox');
 
-  // Cancel this session: the box says what ends, the paused enrollment included.
-  openSession();
-  const kill = btn(view, 'Cancel this session');
-  kill.focus();
-  kill.click();
+  // Nobody in Quiet Room yet: its days can change.
+  rows()[1].click();
+  assert.equal(boxes().filter(b => b.attrs.has('disabled')).length, 0);
+  assert.ok(!/days are fixed/.test(words(view)));
+  boxes().find(b => b.value === '4').checked = false;
+  view.find(n => n.tag === 'form').dispatch('submit');
+  await tab.settle();
+  assert.equal(w.t.db.prepare("SELECT weekdays FROM sessions WHERE name = 'Quiet Room TTh'").get().weekdays, '2');
+
+  // Afternoon Study has families: its days are fixed, and the note says why.
+  rows()[0].click();
+  assert.equal(boxes().length, 7);
+  assert.ok(boxes().every(b => b.attrs.has('disabled') && b.getAttribute('aria-describedby') === 'sx-days-locked'));
+  assert.match(words(view), /Families are enrolled or waiting, so the days are fixed\./);
+  await tab.settle();
+
+  // Its dates: moved ones are labelled, past ones can't change.
+  assert.equal(words(dateLi(view, 'Mon, Nov 23')), 'Mon, Nov 23 Moved to Tue Nov 24 Staff training day Undo');
+  assert.equal(words(dateLi(view, 'Tue, Nov 24')), 'Tue, Nov 24 Moved here from Mon Nov 23 Staff training day Undo');
+  assert.equal(words(dateLi(view, 'Mon, Oct 12')), 'Mon, Oct 12 Past');
+  assert.deepEqual(labels(dateLi(view, 'Wed, Oct 14')), ['Skip', 'Move…']);
+  assert.equal(btn(dateLi(view, 'Wed, Oct 14'), 'Skip').getAttribute('aria-label'), 'Skip Wed, Oct 14');
+  assert.ok(view.find(n => n.tag === 'h4' && n.textContent === 'November 2026'));
+
+  // Skip: the safe button comes first and has focus; Escape keeps the date.
+  let skip = btn(dateLi(view, 'Mon, Nov 30'), 'Skip');
+  skip.focus();
+  skip.click();
   let box = dialog(view);
-  assert.equal(words(box), 'Cancel Afternoon Study? This ends 2 enrollments and 1 waitlist spot, and those families are told. This can\'t be undone. Keep session Cancel session');
-  assert.deepEqual(labels(box), ['Keep session', 'Cancel session']);
-  assert.equal(tab.doc.activeElement, btn(box, 'Keep session'), 'focus starts on the safe button');
+  assert.equal(words(box), 'Skip Afternoon Study on Mon, Nov 30? 2 families are told now. Their other dates go ahead as usual. Keep this date Skip this date');
+  assert.equal(tab.doc.activeElement, btn(box, 'Keep this date'));
   tab.doc.activeElement.dispatch('keydown', { key: 'Escape' });
   await tab.settle();
   assert.equal(dialog(view), undefined);
-  assert.equal(tab.doc.activeElement, kill, 'focus goes back to Cancel this session');
-  assert.equal(row(w.t, s.id).status, 'active');
+  assert.equal(tab.doc.activeElement, skip, 'focus goes back to Skip');
   assert.ok(!tab.requests.some(r => r.startsWith('POST')), tab.requests.join('\n'));
+  skip.click();
+  btn(dialog(view), 'Skip this date').click();
+  await tab.settle();
+  assert.deepEqual(dateRows(w.t, s).map(r => [r.date, r.kind]), [[MON, 'skip'], ['2026-11-24', 'add'], ['2026-11-30', 'skip']]);
+  // The panel stays open on the same schedule, with fresh dates.
+  assert.match(words(dateLi(view, 'Mon, Nov 30')), /Skipped/);
 
-  // Taking Monday off: the warning and the confirm count the paused enrollment too.
-  const monday = view.find(n => n.tag === 'input' && n.getAttribute('type') === 'checkbox' && n.value === '1');
-  monday.checked = false;
-  monday.dispatch('change');
-  assert.match(words(view), /Taking off Monday ends 2 enrollments and 1 waitlist spot for that day\. Those families will be told\./);
-  view.find(n => n.tag === 'form').dispatch('submit');
+  // Move…: a date input, then a confirm.
+  btn(dateLi(view, 'Wed, Dec 2'), 'Move…').click();
+  const moveForm = view.find(n => n.tag === 'form' && n.getAttribute('data-date') === 'move');
+  const to = moveForm.find(n => n.id === 'sx-move-date');
+  assert.equal(tab.doc.activeElement, to);
+  assert.deepEqual([to.getAttribute('min'), to.getAttribute('max')], ['2026-10-14', '2026-12-18']);
+  to.value = '2026-12-03';
+  moveForm.dispatch('submit');
   box = dialog(view);
-  assert.deepEqual(labels(box), ['Keep that day', 'End that day and save']);
-  assert.equal(tab.doc.activeElement, btn(box, 'Keep that day'));
+  assert.equal(words(box), 'Move Afternoon Study to Thu, Dec 3? It no longer meets Wed, Dec 2. 2 families are told now. Keep the date Move and tell families');
+  assert.equal(tab.doc.activeElement, btn(box, 'Keep the date'));
   tab.doc.activeElement.dispatch('keydown', { key: 'Escape' });
   await tab.settle();
-  assert.equal(row(w.t, s.id).weekdays, '1,3,5');
-  assert.ok(!tab.requests.some(r => r.startsWith('PUT')), tab.requests.join('\n'));
-  view.find(n => n.tag === 'form').dispatch('submit');
-  btn(dialog(view), 'End that day and save').click();
+  assert.equal(dateRows(w.t, s).length, 3);
+  moveForm.dispatch('submit');
+  btn(dialog(view), 'Move and tell families').click();
   await tab.settle();
-  assert.equal(row(w.t, s.id).weekdays, '3,5');
-  assert.equal(count(w.t, "SELECT COUNT(*) AS n FROM enrollments WHERE session_id = ? AND status = 'dropped'", s.id), 2);
+  assert.deepEqual(dateRows(w.t, s).slice(3).map(r => [r.date, r.kind, r.moved_from]), [['2026-12-02', 'skip', null], ['2026-12-03', 'add', '2026-12-02']]);
+
+  // Undo the Thursday: both halves of the move go.
+  btn(dateLi(view, 'Thu, Dec 3'), 'Undo').click();
+  box = dialog(view);
+  assert.equal(words(box), 'Undo the change on Thu, Dec 3? This also undoes Wed, Dec 2. 2 families are told now. Keep change Undo change');
+  assert.equal(tab.doc.activeElement, btn(box, 'Keep change'));
+  btn(box, 'Undo change').click();
+  await tab.settle();
+  assert.equal(dateRows(w.t, s).length, 3);
+
+  // Add a date.
+  btn(view, 'Add a date').click();
+  const addForm = view.find(n => n.tag === 'form' && n.getAttribute('data-date') === 'add');
+  addForm.find(n => n.id === 'sx-add-date').value = '2026-12-05';
+  addForm.find(n => n.id === 'sx-add-reason').value = 'Exam prep';
+  addForm.dispatch('submit');
+  box = dialog(view);
+  assert.equal(words(box), 'Add Sat, Dec 5 to Afternoon Study? 1pm – 4pm, the schedule\'s usual time. 2 families are told now. Don\'t add Add and tell families');
+  btn(box, 'Add and tell families').click();
+  await tab.settle();
+  assert.deepEqual(dateRows(w.t, s).pop(), { date: '2026-12-05', kind: 'add', moved_from: null, reason: 'Exam prep', created_by: w.dirA.id });
+
+  // Cancel this schedule: what ends counts the paused enrollment too.
+  const kill = btn(view, 'Cancel this schedule');
+  kill.focus();
+  kill.click();
+  box = dialog(view);
+  assert.equal(words(box), 'Cancel Afternoon Study? This ends 2 enrollments and 1 waitlist spot, and those families are told. This can\'t be undone. Keep schedule Cancel schedule');
+  assert.equal(tab.doc.activeElement, btn(box, 'Keep schedule'));
+  tab.doc.activeElement.dispatch('keydown', { key: 'Escape' });
+  await tab.settle();
+  assert.equal(row(w.t, s.id).status, 'active');
+  btn(view, 'Cancel this schedule').click();
+  btn(dialog(view), 'Cancel schedule').click();
+  await tab.settle();
+  assert.equal(row(w.t, s.id).status, 'cancelled');
+  view = await tab.open();
+  assert.deepEqual(rows().map(b => b.find(n => n.tag === 'strong').textContent), ['Quiet Room TTh']);
+});
+
+test(['SC-3', 'NF-7'], 'Schedules screen: closures and periods ask first; the period form fills this or next month, and an overlap is refused with its reason', async () => {
+  const w = await world(); // Wed 14 Oct 2026
+  w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const tab = sessionsTab(w.t, w.dirA);
+  let view = await tab.open();
 
   // A closure: today or later only (R3), and its confirm starts on the safe button too.
-  view = await tab.open();
   btn(view, 'Add a closure').click();
   const date = view.find(n => n.getAttribute('id') === 'sx-cdate');
   assert.equal(date.getAttribute('min'), '2026-10-14');
   date.value = '2026-10-16';
   view.find(n => n.tag === 'form').dispatch('submit');
-  box = dialog(view);
+  let box = dialog(view);
   assert.deepEqual(labels(box), ['Keep it open', 'Close and tell families']);
   assert.equal(tab.doc.activeElement, btn(box, 'Keep it open'));
   tab.doc.activeElement.dispatch('keydown', { key: 'Escape' });
@@ -1051,83 +1570,45 @@ test(['SC-3', 'SC-4', 'NF-7'], 'Sessions screen: every confirm puts the safe but
   await tab.settle();
   assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM closures'), 1);
 
-  // And Cancel session goes through when it is chosen.
-  openSession();
-  btn(view, 'Cancel this session').click();
-  btn(dialog(view), 'Cancel session').click();
+  // Periods: "This month" and "Next month" fill the dates.
+  assert.ok(btn(view, 'Edit period'));
+  btn(view, 'Add a period').click();
+  const form = view.find(n => n.getAttribute('data-panel') === 'term');
+  const start = form.find(n => n.id === 'sx-tstart'), end = form.find(n => n.id === 'sx-tend');
+  btn(form, 'This month').click();
+  assert.deepEqual([start.value, end.value], ['2026-10-01', '2026-10-31']);
+  btn(form, 'Next month').click();
+  assert.deepEqual([start.value, end.value], ['2026-11-01', '2026-11-30']);
+  form.find(n => n.id === 'sx-tname').value = 'November 2026';
+  form.find(n => n.tag === 'form').dispatch('submit');
   await tab.settle();
-  assert.equal(row(w.t, s.id).status, 'cancelled');
+  assert.match(words(tab.toasts), /Fall 2026 already covers Nov 1 - Nov 30\. Periods at one location can't overlap\./);
+  assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM terms WHERE location_id = ?', w.a.id), 1);
+  start.value = '2027-01-04';
+  end.value = '2027-01-29';
+  form.find(n => n.id === 'sx-tname').value = 'January 2027';
+  form.find(n => n.tag === 'form').dispatch('submit');
+  await tab.settle();
+  assert.deepEqual(w.t.db.prepare('SELECT name, start_date, end_date FROM terms WHERE location_id = ? ORDER BY start_date').all(w.a.id).map(x => x.name), ['Fall 2026', 'January 2027']);
 });
 
-// ---------------- Sweep fixes: L36, L38 (server) and L35, L39, L41 (screen) ----------------
-
-// L36 runs the enrollment module's waitlist job. A run scoped to sessions alone
-// does not load that module, so there the edit must simply leave the line alone;
-// the full run and any run that includes integration load it and check the fill.
-const enrollmentLoaded = !process.env.ELITE_MODULES || process.env.ELITE_MODULES.split(',').includes('enrollment');
-
-test(['SC-2', 'SC-4'], 'raising capacity fills the new seats from the waitlist at once, first in line first (L36)', async () => {
-  const w = await world();
-  const s = w.t.fx.session(w.a, { weekdays: '1,3', capacity: 1 });
-  const held = w.t.fx.family(w.a);
-  w.t.fx.enroll(held.student, s, 1);
-  const first = w.t.fx.family(w.a), second = w.t.fx.family(w.a), third = w.t.fx.family(w.a);
-  const lines = [first, second, third].map(f => waitlist(w.t, f.student, s, 1));
-
-  const r = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { capacity: 3 });
-  assert.equal(r.status, 200);
-  assert.equal(r.body.notified, 2, 'the edit itself tells the family already enrolled');
-  const monday = r.body.session.slots.find(x => x.weekday === 1);
-  if (!enrollmentLoaded) {
-    assert.deepEqual(lines.map(id => waitRow(w.t, id).status), ['waiting', 'waiting', 'waiting']);
-    return;
-  }
-  // No job run: the Save itself served the line, and the reply shows it.
-  assert.deepEqual(lines.map(id => waitRow(w.t, id).status), ['enrolled', 'enrolled', 'waiting']);
-  assert.deepEqual([monday.enrolled, monday.waiting, monday.seats_left], [3, 1, 0]);
-  for (const f of [first, second]) {
-    assert.equal(count(w.t, "SELECT COUNT(*) AS n FROM enrollments WHERE student_id = ? AND session_id = ? AND weekday = 1 AND status = 'active'", f.student.id, s.id), 1);
-    assert.equal(sent(w.t, f.parent, 'waitlist_promoted'), 1);
-  }
-  assert.equal(sent(w.t, third.parent, 'waitlist_promoted'), 0);
-  const list = await w.t.as(w.dirA).get('/api/sessions');
-  assert.deepEqual(list.body.sessions[0].slots.map(x => [x.weekday, x.enrolled, x.waiting]), [[1, 3, 1], [3, 0, 0]]);
-});
-
-test(['SC-4'], 'one edit that tells a person twice counts them once in "notified" (L38)', async () => {
-  const w = await world();
-  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
-  const both = w.t.fx.family(w.a); // Monday and Friday: told the day is gone and the name changed
-  w.t.fx.enroll(both.student, s, 1);
-  w.t.fx.enroll(both.student, s, 5);
-  const monOnly = w.t.fx.family(w.a); // Monday only: told the name changed
-  w.t.fx.enroll(monOnly.student, s, 1);
-  const before = count(w.t, 'SELECT COUNT(*) AS n FROM notifications');
-
-  const r = await w.t.as(w.dirA).put('/api/sessions/' + s.id, { weekdays: [1, 3], name: 'Afternoon Study MW' });
-  assert.equal(r.status, 200);
-  assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM notifications') - before, 6, 'six notices went out');
-  assert.equal(r.body.notified, 4, 'to four people');
-  for (const u of [both.student, both.parent]) {
-    assert.equal(sent(w.t, u, 'session_day_removed'), 1);
-    assert.equal(sent(w.t, u, 'session_changed'), 1);
-  }
-});
-
-test(['SC-3', 'SC-4'], 'Sessions screen: schedule buttons name their day, the closure form is dismissed with Cancel, and closure and session notices open a screen from the Inbox (L35, L39, L41)', async () => {
+test(['SC-3', 'SC-4', 'SC-5'], 'Schedules screen: staff read only, the closure form is dismissed with Cancel, notices open a screen from the Inbox, and Home shows added dates (L35, L39)', async () => {
   const w = await world(); // Wed 14 Oct 2026
   const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const tth = w.t.fx.session(w.a, { name: 'Tue/Thu Study', weekdays: '2,4' });
+  w.t.fx.sessionDate(tth, '2026-10-14', 'add');
   const fam = w.t.fx.family(w.a);
-  w.t.fx.enroll(fam.student, s, 1);
+  w.t.fx.enroll(fam.student, s);
+
+  // Staff see the list but no buttons to change it.
+  const staffView = await sessionsTab(w.t, w.staffA).open();
+  assert.equal(staffView.findAll(n => n.tag === 'button' && n.cls.includes('sx-slot')).length, 0);
+  assert.equal(staffView.findAll(n => n.tag === 'div' && n.cls.includes('sx-slot')).length, 2);
+  assert.equal(btn(staffView, '+ New schedule'), undefined);
+  assert.equal(btn(staffView, 'Add a closure'), undefined);
+
   const tab = sessionsTab(w.t, w.dirA);
   const view = await tab.open();
-
-  // L41: each slot button carries its day for screen readers; what shows is unchanged.
-  const slots = view.findAll(n => n.tag === 'button' && n.cls.includes('sx-slot'));
-  assert.deepEqual(slots.map(b => b.textContent.split('1pm')[0]),
-    ['Monday: Afternoon Study', 'Wednesday: Afternoon Study', 'Friday: Afternoon Study']);
-  for (const b of slots) assert.ok(b.childNodes[0].cls.includes('sr-only'), 'the day is screen-reader text');
-
   // L39: the closure form's dismiss button doesn't start with "Close" too.
   btn(view, 'Add a closure').click();
   const form = view.find(n => n.getAttribute('data-panel') === 'closure');
@@ -1136,9 +1617,16 @@ test(['SC-3', 'SC-4'], 'Sessions screen: schedule buttons name their day, the cl
   assert.equal(view.find(n => n.getAttribute('data-panel') === 'closure'), undefined);
   assert.equal(count(w.t, 'SELECT COUNT(*) AS n FROM closures'), 0);
 
-  // L35: a closure and a session change reach the family; both open the Schedule.
+  // Home: today's schedules, with the added date marked.
+  const card = await tab.card('sessions-today');
+  assert.match(words(card), /^Today's schedules All schedules Afternoon Study/);
+  const items = card.findAll(n => n.tag === 'li').map(li => words(li).split(' 1:00')[0]);
+  assert.deepEqual(items, ['Afternoon Study', 'Tue/Thu Study Added today']);
+
+  // L35: a closure, a schedule change and a date change reach the family; all open the Schedule.
   assert.equal((await w.t.as(w.dirA).post('/api/sessions/closures', { date: MON })).status, 201);
   assert.equal((await w.t.as(w.dirA).put('/api/sessions/' + s.id, { name: 'Afternoon Study+' })).status, 200);
+  assert.equal((await w.t.as(w.dirA).post(datesUrl(s), { action: 'move', date: '2026-11-30', to: '2026-12-01' })).status, 201);
   const hrefs = async user => {
     const box = await sessionsTab(w.t, user, ['public/js/views/enrollment.js']).inbox();
     return box.findAll(n => n.tag === 'li').map(li => {
@@ -1147,10 +1635,11 @@ test(['SC-3', 'SC-4'], 'Sessions screen: schedule buttons name their day, the cl
     });
   };
   assert.deepEqual(await hrefs(fam.parent), [
+    ['Afternoon Study+ moves from Mon, Nov 30 to Tue, Dec 1', '#/schedule'],
     ['Afternoon Study at Irvine has changed', '#/schedule'],
     ['Irvine is closed Mon, Nov 23', '#/schedule'],
   ]);
-  // Staff open the Sessions screen instead.
+  // Staff open the Schedules screen instead.
   const ins = w.t.db.prepare('INSERT INTO notifications (user_id, kind, title, ref_type, ref_id, priority, created_at) VALUES (?,?,?,?,?,?,?)');
   ins.run(w.dirA.id, 'session_closure', 'Closure notice', 'closure', 1, 'normal', w.t.clock.now() - 1000);
   ins.run(w.dirA.id, 'session_changed', 'Session notice', 'session', s.id, 'normal', w.t.clock.now() - 2000);
