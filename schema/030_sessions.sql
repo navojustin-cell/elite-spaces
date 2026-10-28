@@ -21,3 +21,21 @@ CREATE TABLE IF NOT EXISTS session_times (
   changed_at  INTEGER NOT NULL,              -- when the edit that ended these times was made
   PRIMARY KEY (session_id, until_date)
 );
+
+-- v1.1 (D-46): one schedule's own date changes. 'skip' cancels one meeting date of
+-- this schedule only. 'add' makes an extra meeting date, at the times the schedule
+-- has that day (D-34). A move is a skip and an add written together; the add
+-- carries moved_from. Closures stay location-wide (closures table).
+-- Only today or later can be changed, so past dates never change.
+CREATE TABLE IF NOT EXISTS session_dates (
+  id          INTEGER PRIMARY KEY,
+  session_id  INTEGER NOT NULL REFERENCES sessions(id),
+  date        TEXT NOT NULL,                 -- 'YYYY-MM-DD', location-local
+  kind        TEXT NOT NULL CHECK (kind IN ('skip','add')),
+  moved_from  TEXT,                          -- on an 'add' made by a move: the date it replaces
+  reason      TEXT,                          -- shown to families, up to 120 chars
+  created_by  INTEGER REFERENCES users(id),
+  created_at  INTEGER NOT NULL,
+  UNIQUE (session_id, date)
+);
+CREATE INDEX IF NOT EXISTS session_dates_by_date ON session_dates(date);

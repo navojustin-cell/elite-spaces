@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const crypto = require('crypto');
-const { test, makeApp, assert, at, ROOT } = require('./lib');
+const { test, makeApp, assert, at, ROOT, load } = require('./lib');
 
 const MON = '2026-11-23'; // a Monday inside the default Fall 2026 term (Aug 17 - Dec 18)
 
@@ -1158,4 +1158,123 @@ test(['SC-3', 'SC-4'], 'Sessions screen: schedule buttons name their day, the cl
     ['Closure notice', '#/sessions'],
     ['Session notice', '#/sessions'],
   ]);
+});
+
+// ---------------- SC-5: meeting dates (src/modules/sessions/dates.js, D-47) ----------------
+
+const dates = () => load('src/modules/sessions/dates.js');
+// A Mon/Wed/Fri schedule in the default Fall 2026 term (Mon Aug 17 - Fri Dec 18), read with its term dates,
+// and a second Mon/Wed/Fri schedule at the same location.
+async function schedules() {
+  const t = await makeApp();
+  const loc = t.fx.location({ name: 'Irvine' });
+  t.fx.term(loc);
+  const withTerm = s => t.db.prepare(`SELECT s.*, t.start_date AS term_start, t.end_date AS term_end
+    FROM sessions s JOIN terms t ON t.id = s.term_id WHERE s.id = ?`).get(s.id);
+  return { t, loc, s: withTerm(t.fx.session(loc, { name: 'Mornings MWF' })), other: withTerm(t.fx.session(loc, { name: 'Afternoons MWF' })) };
+}
+// Mon Nov 23 moves to Tue Nov 24, and Sat Dec 5 is an extra date.
+function moveAndAdd(t, s) {
+  t.fx.sessionDate(s, '2026-11-23', 'skip', { reason: 'Staff training day' });
+  t.fx.sessionDate(s, '2026-11-24', 'add', { moved_from: '2026-11-23', reason: 'Staff training day' });
+  t.fx.sessionDate(s, '2026-12-05', 'add', { reason: 'Exam prep' });
+}
+
+test(['SC-5'], 'a schedule meets on its weekdays inside its term, and on no other date', async () => {
+  const { t, s } = await schedules();
+  const { overrides, meets } = dates();
+  const ov = overrides(t.ctx);
+  assert.equal(ov.size, 0);
+  const on = d => meets(s, ov, d);
+  assert.deepEqual(['2026-11-22', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26', '2026-11-27', '2026-11-28'].map(on),
+    [false, true, false, true, false, true, false]); // Sun..Sat
+  // The term's first and last days count; the days just outside don't.
+  assert.deepEqual(['2026-08-14', '2026-08-17', '2026-12-18', '2026-12-21'].map(on), [false, true, true, false]);
+  // Weekdays read the same from the row ('1,3,5') or a shaped session ([1, 3, 5]).
+  assert.deepEqual(['2026-11-23', '2026-11-24'].map(d => meets(Object.assign({}, s, { weekdays: [1, 3, 5] }), ov, d)), [true, false]);
+  // No overrides map at all means no date changes.
+  assert.equal(meets(s, null, '2026-11-23'), true);
+});
+
+test(['SC-5'], 'a skipped date doesn\'t meet, an added date does, a move is both, and only for that schedule', async () => {
+  const { t, s, other } = await schedules();
+  moveAndAdd(t, s);
+  const { overrides, meets } = dates();
+  const ov = overrides(t.ctx);
+  assert.equal(meets(s, ov, '2026-11-23'), false); // skipped (moved away)
+  assert.equal(meets(s, ov, '2026-11-24'), true); // moved here
+  assert.equal(meets(s, ov, '2026-12-05'), true); // added Saturday
+  assert.equal(meets(s, ov, '2026-11-25'), true); // the rest of the week goes ahead
+  // Another schedule at the location keeps its own calendar.
+  assert.deepEqual(['2026-11-23', '2026-11-24', '2026-12-05'].map(d => meets(other, ov, d)), [true, false, false]);
+  // A change outside the term is ignored: shortening the term to Nov 20 drops the move and the extra date.
+  const shortened = Object.assign({}, s, { term_end: '2026-11-20' });
+  assert.deepEqual(['2026-11-20', '2026-11-23', '2026-11-24', '2026-12-05'].map(d => meets(shortened, ov, d)), [true, false, false, false]);
+  const late = Object.assign({}, s, { term_start: '2026-12-01' });
+  assert.equal(meets(late, ov, '2026-11-24'), false);
+
+  // overrides(): every change, per schedule and date, with its kind, moved_from and reason.
+  assert.deepEqual([...ov.keys()], [s.id]);
+  assert.deepEqual(Object.fromEntries(ov.get(s.id)), {
+    '2026-11-23': { kind: 'skip', moved_from: null, reason: 'Staff training day' },
+    '2026-11-24': { kind: 'add', moved_from: '2026-11-23', reason: 'Staff training day' },
+    '2026-12-05': { kind: 'add', moved_from: null, reason: 'Exam prep' },
+  });
+  // Limited to some schedules.
+  assert.deepEqual([...overrides(t.ctx, [s.id]).keys()], [s.id]);
+  assert.equal(overrides(t.ctx, [other.id]).size, 0);
+  assert.equal(overrides(t.ctx, []).size, 0);
+  t.fx.sessionDate(other, '2026-11-30', 'skip');
+  assert.deepEqual([...overrides(t.ctx, [other.id]).keys()], [other.id]);
+  assert.deepEqual([...overrides(t.ctx).keys()].sort(), [s.id, other.id].sort());
+});
+
+test(['SC-5'], 'datesOf lists a schedule\'s meeting dates in a range, oldest first, inside its term', async () => {
+  const { t, s, other } = await schedules();
+  moveAndAdd(t, s);
+  const { overrides, datesOf } = dates();
+  const ov = overrides(t.ctx);
+  assert.deepEqual(datesOf(s, ov, '2026-11-16', '2026-11-29'),
+    ['2026-11-16', '2026-11-18', '2026-11-20', '2026-11-24', '2026-11-25', '2026-11-27']);
+  assert.deepEqual(datesOf(other, ov, '2026-11-16', '2026-11-29'),
+    ['2026-11-16', '2026-11-18', '2026-11-20', '2026-11-23', '2026-11-25', '2026-11-27']);
+  // Both ends of the range are included.
+  assert.deepEqual(datesOf(s, ov, '2026-11-18', '2026-11-20'), ['2026-11-18', '2026-11-20']);
+  assert.deepEqual(datesOf(s, ov, '2026-12-05', '2026-12-05'), ['2026-12-05']);
+  // Only dates inside the term.
+  assert.deepEqual(datesOf(s, ov, '2026-12-14', '2027-01-10'), ['2026-12-14', '2026-12-16', '2026-12-18']);
+  assert.deepEqual(datesOf(s, ov, '2026-08-10', '2026-08-19'), ['2026-08-17', '2026-08-19']);
+  assert.deepEqual(datesOf(s, ov, '2026-11-21', '2026-11-22'), []); // a weekend
+  assert.deepEqual(datesOf(s, ov, '2026-11-25', '2026-11-18'), []); // from after to
+  // The whole term: 18 weeks of Mon/Wed/Fri, less the moved Monday, plus its Tuesday and the extra Saturday.
+  const all = datesOf(s, ov, s.term_start, s.term_end);
+  assert.equal(all.length, 18 * 3 - 1 + 2);
+  assert.deepEqual(all, [...all].sort());
+});
+
+test(['SC-5'], 'a whole-schedule enrollment counts on every meeting date; a v1 weekday row only on its weekday', async () => {
+  const { t, loc, s } = await schedules();
+  moveAndAdd(t, s);
+  const { overrides, datesOf, counts } = dates();
+  const ov = overrides(t.ctx);
+  const week = datesOf(s, ov, '2026-11-16', '2026-11-29');
+  const whole = t.fx.enroll(t.fx.family(loc).student, s);
+  const v1Mon = t.fx.enroll(t.fx.family(loc).student, s, 1);
+  const v1Wed = t.fx.enroll(t.fx.family(loc).student, s, 3, { status: 'dropped' });
+  const waiting = t.fx.waitlist(t.fx.family(loc).student, s);
+  assert.deepEqual(week.filter(d => counts(whole, d)), week); // the moved-to Tuesday included
+  assert.deepEqual(week.filter(d => counts(waiting, d)), week);
+  // The v1 Monday row: Nov 16 only. Nov 23 moved away, and the Tuesday it moved to isn't a Monday.
+  assert.deepEqual(week.filter(d => counts(v1Mon, d)), ['2026-11-16']);
+  assert.deepEqual(week.filter(d => counts(v1Wed, d)), ['2026-11-18', '2026-11-25']);
+});
+
+test(['SC-5'], 'days a week is the schedule\'s weekday count, whatever its date changes', async () => {
+  const { t, s } = await schedules();
+  moveAndAdd(t, s);
+  const { daysPerWeek } = dates();
+  assert.equal(daysPerWeek(s), 3);
+  assert.equal(daysPerWeek({ weekdays: '2,4' }), 2);
+  assert.equal(daysPerWeek({ weekdays: '6' }), 1);
+  assert.equal(daysPerWeek({ weekdays: [1, 2, 3, 4, 5] }), 5);
 });

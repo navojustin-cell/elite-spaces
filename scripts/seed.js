@@ -126,7 +126,6 @@ for (const [s, schedules] of plan) for (const sess of schedules) enroll(s, sess)
 enroll(kim.students[0], afternoonsMWF, 'paused');
 
 // Meeting dates come only from the sessions module's helper (D-47, D-26 (6)).
-// src/modules/sessions/dates.js arrives in v1.1 step 1; until then this seed can't run.
 const dates = require('../src/modules/sessions/dates');
 const ov = dates.overrides(ctx); // no date changes exist yet; the sessions seed adds its move later
 const withTerm = sess => db.prepare(`SELECT s.*, t.start_date AS term_start, t.end_date AS term_end

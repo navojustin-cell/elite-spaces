@@ -2,6 +2,7 @@
 // Sessions mutations: each breaks one scheduling rule; sessions.test.js must catch it.
 const F = 'src/modules/sessions/index.js';
 const V = 'public/js/views/sessions.js';
+const D = 'src/modules/sessions/dates.js';
 module.exports = [
   // ---- SC-1: 2-3 hour blocks on set days ----
   { name: 'allow sessions shorter than 2 hours', covers: ['SC-1'], file: F,
@@ -249,4 +250,40 @@ module.exports = [
     find: "for (const refType of ['closure', 'session'])", repl: "for (const refType of ['closure'])" },
   { name: 'register only session notices in the Inbox', covers: ['SC-3'], file: V,
     find: "for (const refType of ['closure', 'session'])", repl: "for (const refType of ['session'])" },
+  // ---- SC-5, D-47: meeting dates (sessions/dates.js), read by every module ----
+  { name: 'let a schedule meet before its term starts', covers: ['SC-5'], file: D,
+    find: 'date < s.term_start || ', repl: '' },
+  { name: 'let a schedule meet after its term ends', covers: ['SC-5'], file: D,
+    find: ' || date > s.term_end', repl: '' },
+  { name: 'meet on a skipped date', covers: ['SC-5'], file: D,
+    find: "if (change) return change.kind === 'add';", repl: "if (change && change.kind === 'add') return true;" },
+  { name: 'ignore added dates', covers: ['SC-5'], file: D,
+    find: "return change.kind === 'add';", repl: 'return false;' },
+  { name: "apply one schedule's date changes to every schedule", covers: ['SC-5'], file: D,
+    find: 'const change = ov && ov.get(s.id) && ov.get(s.id).get(date);',
+    repl: 'const change = ov && [...ov.values()].map(m => m.get(date)).find(Boolean);' },
+  { name: 'read the weekday one day off', covers: ['SC-5'], file: D,
+    find: 'days(s).includes(weekdayOfDate(date))', repl: 'days(s).includes(weekdayOfDate(date) % 7 + 1)' },
+  { name: 'read weekdays only from a comma list', covers: ['SC-5'], file: D,
+    find: "String(s.weekdays).split(',')", repl: "s.weekdays.split(',')" },
+  { name: "return every schedule's changes when asked for some", covers: ['SC-5'], file: D,
+    find: 'const where = sessionIds ?', repl: 'const where = false ?' },
+  { name: "drop a change's reason", covers: ['SC-5'], file: D,
+    find: 'reason: r.reason }', repl: 'reason: null }' },
+  { name: 'drop the date a move came from', covers: ['SC-5'], file: D,
+    find: 'moved_from: r.moved_from,', repl: 'moved_from: null,' },
+  { name: 'leave the last day of the range out of datesOf', covers: ['SC-5'], file: D,
+    find: 'd <= end;', repl: 'd < end;' },
+  { name: 'list meeting dates newest first', covers: ['SC-5'], file: D,
+    find: 'if (meets(s, ov, d)) out.push(d);', repl: 'if (meets(s, ov, d)) out.unshift(d);' },
+  { name: 'ignore the start of the range in datesOf', covers: ['SC-5'], file: D,
+    find: 'from > s.term_start ? from : s.term_start', repl: 's.term_start' },
+  { name: 'ignore the end of the range in datesOf', covers: ['SC-5'], file: D,
+    find: 'to < s.term_end ? to : s.term_end', repl: 's.term_end' },
+  { name: 'count a whole-schedule enrollment only on weekday 0', covers: ['SC-5'], file: D,
+    find: 'wd === 0 || ', repl: '' },
+  { name: 'count a v1 weekday row on every meeting date', covers: ['SC-5'], file: D,
+    find: '|| wd === weekdayOfDate(date)', repl: '|| wd > 0' },
+  { name: 'count the characters of the days list as days a week', covers: ['SC-5'], file: D,
+    find: 'new Set(days(s)).size', repl: 'String(s.weekdays).length' },
 ];
