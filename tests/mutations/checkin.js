@@ -448,4 +448,11 @@ module.exports = [
     find: "if (g.status === 'set') {", repl: 'if (false) {' },
   { name: 'a skipped day asks again', covers: ['DG-3'], file: VIEW,
     find: "if (g.status !== 'none') { box.remove(); return; }", repl: '' },
+  { name: 'the dev scan button still says it scans at my location', covers: ['NF-5', 'CI-2'], file: VIEW,
+    find: "'Simulate scan (dev)'", repl: "'Simulate scan at my location (dev)'" },
+  { name: 'the scan-twice question puts the reversing answer first and focused', covers: ['CI-4'], file: VIEW,
+    find: 'App.confirm({ el: result, title: message, confirmLabel: yes, cancelLabel: no })',
+    repl: 'App.confirm({ el: result, title: message, confirmLabel: no, cancelLabel: yes })' },
+  { name: 'keeping the visit drops focus to the top of the page', covers: ['CI-4'], file: VIEW,
+    find: 'note.focus(); // the question is gone', repl: '// the question is gone' },
 ];

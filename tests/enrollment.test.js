@@ -1353,6 +1353,11 @@ test(['EN-2', 'EN-5'], 'enrollment and waitlist notices in the Inbox open Schedu
   assert.ok(parent.main().find(n => n.id === 'en-week-h'), 'this week is shown');
   await parent.go('#/schedule');
   assert.deepEqual(shown(parent), [['Leo'], "Leo's schedule"]);
+  // A schedule notice (a date change, ref_type 'session') opens the tab of the student who holds that schedule.
+  await parent.go('#/schedule/session/' + sess.id);
+  assert.deepEqual(shown(parent), [['Sofia'], "Sofia's schedule"]);
+  await parent.go('#/schedule/session/99999');
+  assert.deepEqual(shown(parent), [['Leo'], "Leo's schedule"]);
   // The student's own notice opens their schedule, with this week shown.
   const student = shellTab(t);
   await student.open(sofia, '#/inbox');

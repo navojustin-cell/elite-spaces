@@ -62,9 +62,17 @@
     setTimeout(() => t.remove(), kind === 'error' ? 6000 : 3500);
   };
   // Wrap an async action: shows errors as toasts, disables the button while running.
+  // A disabled button loses focus to <body>; if the keyboard was on it and it is still on
+  // the page, focus goes back to it, so a refused save keeps the user's place (NF-7).
   App.run = async (btn, fn) => {
+    const had = !!btn && document.activeElement === btn;
     if (btn) btn.disabled = true;
-    try { return await fn(); } catch (e) { if (!e.accountChanged) App.toast(e.message, 'error'); } finally { if (btn) btn.disabled = false; }
+    try { return await fn(); } catch (e) { if (!e.accountChanged) App.toast(e.message, 'error'); } finally {
+      if (btn) {
+        btn.disabled = false;
+        if (had && btn.isConnected && (!document.activeElement || document.activeElement === document.body)) btn.focus();
+      }
+    }
   };
 
   // Ask before a consequential action, inline, never with window.confirm:

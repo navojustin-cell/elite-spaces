@@ -3,7 +3,9 @@
 // Goals (D-50): about 70% of past visit days have 1-3 goals (subjects and texts from
 // goals.js examples), about 15% are skipped, and the rest unanswered. On each
 // location's most recent visit day the students there are set, skipped and
-// unanswered in turn, so staff see all three (as far as that day has students).
+// unanswered in turn, so staff see all three. That needs three students: when the
+// most recent day had fewer, the most recent day that had three or more is handed
+// the three in turn as well.
 // Notes: a posted note for most past visit days, so parents have a history to
 // browse; some comments answer the day's goals (D-51). On each location's most
 // recent visit day some notes are left unwritten and one is a saved draft, so staff
@@ -29,7 +31,7 @@ const REPLIES = [
   g => `You stuck with your ${g.label} goal ("${g.text}") all session.`,
 ];
 
-module.exports = function seed(ctx) {
+module.exports = function seed(ctx, demo = {}) {
   const db = ctx.db;
   const items = db.prepare('SELECT id, label, position FROM note_items WHERE active = 1 ORDER BY position, id').all();
   let n = 11;
@@ -41,9 +43,17 @@ module.exports = function seed(ctx) {
     FROM visits v JOIN users u ON u.id = v.student_id
     GROUP BY v.student_id, v.location_id, v.local_date ORDER BY v.local_date, u.name, v.student_id`).all();
   const staffAt = db.prepare("SELECT id, name FROM users WHERE role IN ('staff','director') AND location_id = ? AND active = 1 ORDER BY role DESC, id LIMIT 1");
-  const today = new Map(db.prepare('SELECT id, timezone FROM locations').all().map(l => [l.id, time.localDate(l, Date.now())]));
+  const today = new Map(db.prepare('SELECT id, timezone FROM locations').all().map(l => [l.id, time.localDate(l, demo.NOW || Date.now())]));
   const lastDay = new Map(); // location -> its most recent past visit day
-  for (const d of days) if (d.local_date < today.get(d.location_id)) lastDay.set(d.location_id, d.local_date); // days are in date order
+  const visitors = new Map(); // 'location|date' -> how many students came
+  for (const d of days) {
+    if (d.local_date >= today.get(d.location_id)) continue;
+    lastDay.set(d.location_id, d.local_date); // days are in date order
+    const k = d.location_id + '|' + d.local_date;
+    visitors.set(k, (visitors.get(k) || 0) + 1);
+  }
+  const goalDay = new Map(lastDay); // location -> the day that shows all three goal states
+  for (const [k, n] of visitors) if (n >= 3) goalDay.set(Number(k.split('|')[0]), k.split('|')[1]); // in date order: the latest wins
 
   const insDay = db.prepare('INSERT INTO daily_goal_days (student_id, local_date, location_id, status, updated_at) VALUES (?,?,?,?,?)');
   const insGoal = db.prepare('INSERT INTO daily_goals (student_id, local_date, position, subject, text) VALUES (?,?,?,?,?)');
@@ -52,7 +62,7 @@ module.exports = function seed(ctx) {
   const insRating = db.prepare('INSERT INTO daily_note_ratings (note_id, item_id, label, position, rating) VALUES (?,?,?,?,?)');
   const latest = new Map(); // student -> { noteId, posted_at, ... }
   const draftLeft = new Set();
-  const recentTurn = new Map(); // location -> how many students its most recent day has handed a goal status
+  const turns = new Map(); // 'location|date' -> how many students that day has handed a goal status
   const tally = { set: 0, skipped: 0, none: 0 };
   let posted = 0;
 
@@ -63,9 +73,10 @@ module.exports = function seed(ctx) {
 
     // ---- the day's goals, set a few minutes after the first check-in
     let status;
-    if (recent) {
-      const turn = recentTurn.get(d.location_id) || 0;
-      recentTurn.set(d.location_id, turn + 1);
+    if (recent || d.local_date === goalDay.get(d.location_id)) {
+      const k = d.location_id + '|' + d.local_date;
+      const turn = turns.get(k) || 0;
+      turns.set(k, turn + 1);
       status = ['set', 'skipped', 'none'][turn % 3];
     } else {
       const r = rnd();

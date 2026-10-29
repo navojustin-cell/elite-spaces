@@ -142,7 +142,7 @@
           return card;
         }
         const pickTerm = d.terms.length > 1 && field('Showing period',
-          h('select', { id: 'sx-term', onchange: e => { ui.termId = Number(e.target.value); draw(); } },
+          h('select', { id: 'sx-term', onchange: e => { ui.termId = Number(e.target.value); ui.panel = null; draw(); } }, // a panel belongs to the period it opened in
             d.terms.map(x => h('option', { value: x.id, selected: x.id === t.id }, `${x.name} (${shortDate(x.start_date)} – ${shortDate(x.end_date, true)})`))));
         card.append(
           h('div', { class: 'row between' },
@@ -349,11 +349,16 @@
         const acts = h('div', { class: 'sx-acts' });
         if (d.kind === 'regular') {
           const skip = h('button', { class: 'btn', type: 'button', 'aria-label': 'Skip ' + dayDate(d.date), onclick: async () => {
-            const ok = await App.confirm({ el: host, opener: skip, title: `Skip ${s.name} on ${dayDate(d.date)}?`,
+            // An optional reason (families see it, 3.1), right above the question.
+            const reason = h('input', { id: 'sx-skip-reason', maxlength: 120, placeholder: 'For example, Staff training day' });
+            const why = field('Reason (optional)', reason, 'Families see this.');
+            host.replaceChildren(why);
+            const ok = await App.confirm({ anchor: why, opener: skip, title: `Skip ${s.name} on ${dayDate(d.date)}?`,
               body: `${tellLine(s)} Their other dates go ahead as usual.`, confirmLabel: 'Skip this date', cancelLabel: 'Keep this date' });
+            host.replaceChildren();
             if (!ok) return;
             await App.run(skip, async () => {
-              const r = await App.api.post('/api/sessions/' + s.id + '/dates', { action: 'skip', date: d.date });
+              const r = await App.api.post('/api/sessions/' + s.id + '/dates', { action: 'skip', date: d.date, reason: reason.value });
               App.toast(`${s.name} doesn't meet ${dayDate(d.date)}.` + told(r.notified));
               await reopen(s.id);
             });
@@ -481,9 +486,10 @@
   });
 
   // L35: closure and schedule notices open the family's Schedule (enrollment's view),
-  // or this Schedules screen for staff; the first one the role can open wins.
+  // or this Schedules screen for staff; the first one the role can open wins. A schedule
+  // notice opens the tab of the student who holds that schedule (#/schedule/session/<id>).
   for (const refType of ['closure', 'session']) {
-    App.inboxLink(refType, 'schedule');
+    App.inboxLink(refType, refType === 'session' ? n => 'schedule/session/' + n.ref_id : 'schedule');
     App.inboxLink(refType, 'sessions');
   }
 

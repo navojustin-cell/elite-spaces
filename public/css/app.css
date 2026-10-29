@@ -219,8 +219,10 @@ table.table { width: 100%; border-collapse: collapse; font-size: .92rem; }
 .notify-steps li + li { margin-top: .25rem; }
 
 /* Narrow phones (320px): five tabs share the bar evenly instead of overflowing it.
-   Each stays at least 64px wide (44px target); a long label shortens with an ellipsis. */
+   Each stays at least 64px wide (44px target); a long label ("In the building") wraps
+   onto a second line, centered, instead of being cut off (NF-8). */
 @media (max-width: 899px) {
   #nav a, #nav .nav-more { flex: 1 1 0; min-width: 0; padding-left: 2px; padding-right: 2px; }
-  #nav a > span:last-child, #nav .nav-more > span:last-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #nav a > span:last-child, #nav .nav-more > span:last-child { max-width: 100%; text-align: center; line-height: 1.2;
+    overflow-wrap: break-word; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 }

@@ -3,8 +3,16 @@
 const F = 'src/modules/notes/index.js';
 const VIEW = 'public/js/views/notes.js';
 const G = 'src/modules/notes/goals.js';
+const SEED = 'src/modules/notes/seed.js';
 
 module.exports = [
+  // ---- the demo seed (5.3) and the goal list read aloud (NF-7)
+  { name: 'the seed hands the three goal states to the latest day however few students came', covers: ['DG-2'], file: SEED,
+    find: 'if (n >= 3) goalDay.set(', repl: 'if (n >= 0) goalDay.set(' },
+  { name: 'the seed leaves the latest day to chance when it had fewer than three students', covers: ['DG-2'], file: SEED,
+    find: 'if (recent || d.local_date === goalDay.get(d.location_id)) {', repl: 'if (d.local_date === goalDay.get(d.location_id)) {' },
+  { name: 'a goal reads as one run-on word: subject and text with nothing between', covers: ['DG-2'], file: VIEW,
+    find: "h('span', { class: 'sr-only' }, ', '), g.text)", repl: 'g.text)' },
   // ---- DN-1: a note only for a student who visited this location that day
   { name: 'let staff write a note for a student with no visit that day', covers: ['DN-1'], file: F,
     find: 'if (!visitsFor(db, studentId, loc.id, date).length) {', repl: 'if (false) {' },

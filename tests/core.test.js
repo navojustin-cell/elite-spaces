@@ -236,6 +236,50 @@ function shellTab(t, hash = '', extras = {}, jar = { cookie: '' }) {
 const words = n => n.all().filter(c => !c.tag).map(c => c.data).join(' ').replace(/\s+/g, ' ').trim();
 const byTag = (root, tag) => root.findAll(n => n.tag === tag);
 
+test(['CORE', 'NF-7'], 'App.run keeps the keyboard\'s place: a refused action puts focus back on the button the browser dropped it from when disabled', async () => {
+  const t = await makeApp();
+  const tab = shellTab(t);
+  // As in a browser, disabling the focused button sends focus to <body>.
+  const button = () => {
+    const b = tab.el('button');
+    let off = false;
+    Object.defineProperty(b, 'disabled', { get: () => off, set(v) { off = !!v; if (off && tab.doc.focused === b) tab.doc.focused = null; } });
+    tab.main().append(b);
+    return b;
+  };
+  const refused = () => Promise.reject(Object.assign(new Error('Choose a subject for goal 2.'), { code: 'bad_subject' }));
+  const save = button();
+  save.focus();
+  await tab.App.run(save, refused);
+  assert.equal(tab.doc.activeElement, save, 'focus is back on Save');
+  assert.equal(save.disabled, false);
+  // A tapped button that never had focus (Safari) doesn't take it, and focus moved elsewhere on purpose stays there.
+  const tapped = button(), field = tab.el('input');
+  tab.main().append(field);
+  tab.doc.focused = null;
+  await tab.App.run(tapped, refused);
+  assert.equal(tab.doc.activeElement, tab.doc.body);
+  const other = button();
+  other.focus();
+  await tab.App.run(other, () => { field.focus(); return refused(); });
+  assert.equal(tab.doc.activeElement, field);
+  // A button the action took off the page isn't focused.
+  const gone = button();
+  gone.focus();
+  await tab.App.run(gone, () => { gone.remove(); return refused(); });
+  assert.equal(tab.doc.activeElement, tab.doc.body);
+});
+
+test(['CORE', 'NF-8'], 'tab bar labels at phone width wrap onto a second line instead of being cut off with an ellipsis', async () => {
+  const css = fs.readFileSync(path.join(ROOT, 'public/css/app.css'), 'utf8');
+  const narrow = css.slice(css.indexOf('@media (max-width: 899px)'));
+  const rule = narrow.slice(narrow.indexOf('#nav a > span:last-child'), narrow.indexOf('}', narrow.indexOf('#nav a > span:last-child')));
+  assert.ok(rule.startsWith('#nav a > span:last-child, #nav .nav-more > span:last-child {'), rule);
+  assert.doesNotMatch(rule, /nowrap|ellipsis/);
+  assert.match(rule, /-webkit-line-clamp: 2;/);
+  assert.match(rule, /text-align: center;/);
+});
+
 test(['CORE', 'NF-7'], 'App.confirm asks inline: a labelled alertdialog with the safe button first and focused; Escape cancels, and focus goes back to the opener', async () => {
   const t = await makeApp();
   const tab = shellTab(t);

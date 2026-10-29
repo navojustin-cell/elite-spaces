@@ -111,7 +111,7 @@
       h('span', { 'aria-hidden': 'true' }, '📷'), h('span', { class: 'ci-scan-label' }, 'Scan to check in'));
     // Staff can check a student in or out by hand; the line follows the button (check out while here).
     const helpLine = h('p', { class: 'muted small', style: 'margin:0' }, 'Having trouble? Ask staff at the front desk to check you in.');
-    const devBtn = App.me && App.me.dev && h('button', { class: 'btn btn-block', type: 'button', onclick: simulate }, 'Simulate scan at my location (dev)');
+    const devBtn = App.me && App.me.dev && h('button', { class: 'btn btn-block', type: 'button', onclick: simulate }, 'Simulate scan (dev)');
     el.append(statusBox, result, camBox,
       h('div', { class: 'card' }, scanBtn,
         helpLine,
@@ -185,13 +185,17 @@
       box.append(h('h2', null, 'What are you working on today?'),
         h('div', { class: 'ci-actions' }, h('a', { class: 'btn btn-primary', href: '#/goals' }, "Set today's goals"), skip));
     }
-    // A second scan soon after checking in (or out) asks before undoing it.
-    function askFirst(message, { yes, no, kept }, go) {
-      result.replaceChildren(h('div', { class: 'card ci-result', role: 'alert' },
-        h('p', null, h('strong', null, message)),
-        h('div', { class: 'ci-actions', style: 'justify-content:center' },
-          h('button', { class: 'btn btn-primary', type: 'button', onclick: go }, yes),
-          h('button', { class: 'btn', type: 'button', onclick: () => result.replaceChildren(h('p', { class: 'notice' }, kept)) }, no))));
+    // A second scan soon after checking in (or out) asks before undoing it, with the shell's
+    // confirm: the safe answer ("Stay checked in") comes first and has focus.
+    async function askFirst(message, { yes, no, kept }, go) {
+      result.replaceChildren();
+      if (!(await App.confirm({ el: result, title: message, confirmLabel: yes, cancelLabel: no }))) {
+        const note = h('p', { class: 'notice', tabindex: '-1' }, kept);
+        result.replaceChildren(note);
+        note.focus(); // the question is gone, so focus stays on its answer
+        return;
+      }
+      go();
     }
 
     const TITLES = {
@@ -207,8 +211,9 @@
         showSuccess(r);
         loadStatus();
       } catch (e) {
-        if (e.code === 'confirm_checkout') return askFirst(e.message, { yes: 'Check out', no: 'Stay checked in', kept: "OK, you're still checked in." }, () => submit(target, true));
-        if (e.code === 'confirm_checkin') return askFirst(e.message, { yes: 'Check back in', no: 'Stay checked out', kept: "OK, you're still checked out." }, () => submit(target, true));
+        // Not awaited: the scan is finished, and the question waits for the student.
+        if (e.code === 'confirm_checkout') { askFirst(e.message, { yes: 'Check out', no: 'Stay checked in', kept: "OK, you're still checked in." }, () => submit(target, true)); return; }
+        if (e.code === 'confirm_checkin') { askFirst(e.message, { yes: 'Check back in', no: 'Stay checked out', kept: "OK, you're still checked out." }, () => submit(target, true)); return; }
         // After any refused scan the status card is refreshed so it matches the message; on a closure
         // day (which keeps the no_session code) it also says whether today is closed (L31).
         await loadStatus();

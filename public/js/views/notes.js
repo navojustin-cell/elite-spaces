@@ -69,9 +69,10 @@
     (v.check_out_at ? App.fmtTime(v.check_in_at, tz) + '–' + App.fmtTime(v.check_out_at, tz) : 'since ' + App.fmtTime(v.check_in_at, tz));
   const ratingSummary = ratings => h('ul', { class: 'note-summary' }, ratings.map(r =>
     h('li', null, r.label + ': ', h('strong', null, WORDS[r.rating] || 'Not rated'))));
-  // A day's goals: a subject badge, then the student's own words (D-50).
+  // A day's goals: a subject badge, then the student's own words (D-50). The hidden comma
+  // keeps them apart for screen readers ("Math, Review for my next quiz").
   const goalList = items => h('ul', { class: 'note-goal-list' }, items.map(g =>
-    h('li', null, h('span', { class: 'badge badge-accent' }, g.subject_label), g.text)));
+    h('li', null, h('span', { class: 'badge badge-accent' }, g.subject_label), h('span', { class: 'sr-only' }, ', '), g.text)));
   // Parents see goals only when they were set; skipped or unanswered shows nothing (D-50).
   const parentGoals = (name, items) => items && items.length
     ? h('div', { class: 'note-goals' }, h('h3', { class: 'note-goals-label' }, first(name) + "'s goals today"), goalList(items))

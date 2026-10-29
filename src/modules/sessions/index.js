@@ -35,6 +35,7 @@ const notify = require('../../notify');
 const audit = require('../../audit');
 const time = require('../../time');
 const dates = require('./dates');
+const times = require('./times');
 const { bad, forbidden, notFound, conflict } = require('../../errors');
 
 const DAY = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -268,8 +269,21 @@ function studentsCutByTerm(ctx, termId, before, after, today) {
 
 // ---------- date changes (D-46) ----------
 
-// A visit already linked to this schedule on that date.
-const hasVisits = (ctx, sessionId, date) => !!ctx.db.prepare('SELECT 1 FROM visits WHERE session_id = ? AND local_date = ? LIMIT 1').get(sessionId, date);
+// A visit for this schedule on that date: one linked to it, or a staff check-in with no
+// schedule (D-15a) by one of its students that overlaps its hours that day, so a date
+// that stops meeting never leaves a visit behind (design section 6).
+function hasVisits(ctx, s, date) {
+  if (ctx.db.prepare('SELECT 1 FROM visits WHERE session_id = ? AND local_date = ? LIMIT 1').get(s.id, date)) return true;
+  const loc = locationRow(ctx, s.location_id);
+  const t = times.timesOn(times.history(ctx), s.id, date, s);
+  return !!ctx.db.prepare(`SELECT 1 FROM visits WHERE session_id IS NULL AND location_id = ? AND local_date = ?
+      AND check_in_at < ? AND (check_out_at IS NULL OR check_out_at > ?)
+      AND student_id IN (SELECT student_id FROM enrollments WHERE session_id = ? AND status IN ('active','paused')) LIMIT 1`)
+    .get(s.location_id, date, time.toMs(loc, date, t.end_time), time.toMs(loc, date, t.start_time), s.id);
+}
+
+// A closure at the location that day: it cancels the date for every schedule (D-47).
+const closedOn = (ctx, locationId, date) => !!ctx.db.prepare('SELECT 1 FROM closures WHERE location_id = ? AND date = ?').get(locationId, date);
 
 // Skip, add or move one date of one schedule. `b` = { action, date, to?, reason? }.
 // Used by POST /:id/dates and by this module's demo seed. Returns { change, notified }.
@@ -297,14 +311,17 @@ function changeDate(ctx, user, s, b) {
   const from = action === 'add' ? null : date;                 // the date that stops meeting
   const added = action === 'skip' ? null : (action === 'add' ? date : to); // the date that starts meeting
   if (from && !dates.meets(st, ov, from)) throw bad('not_a_meeting_date', `${s.name} doesn't meet on ${fmtDate(from)}.`);
-  if (added && dates.meets(st, ov, added)) throw bad('already_meets', `${s.name} already meets on ${fmtDate(added)}.`);
+  // A closed day isn't a meeting date (D-47), so there is nothing to skip or move away.
+  if (from && closedOn(ctx, loc.id, from)) throw bad('not_a_meeting_date', `${loc.name} is closed on ${fmtDate(from)}, so ${s.name} doesn't meet then.`);
+  // The closure is checked first: on a closed regular weekday the schedule doesn't meet either.
   if (added && ctx.db.prepare('SELECT 1 FROM closures WHERE location_id = ? AND date = ?').get(loc.id, added)) {
     throw bad('closed_that_day', `${loc.name} is closed on ${fmtDate(added)}, so ${s.name} can't meet then.`);
   }
+  if (added && dates.meets(st, ov, added)) throw bad('already_meets', `${s.name} already meets on ${fmtDate(added)}.`);
   for (const d of [from, added]) {
     if (d && mine.has(d)) throw conflict('already_changed', `${s.name} already has a change on ${fmtDate(d)}. Undo that change first.`);
   }
-  if (from && hasVisits(ctx, s.id, from)) {
+  if (from && hasVisits(ctx, s, from)) {
     throw conflict('date_has_visits', `Students already checked in to ${s.name} on ${fmtDate(from)}, so that date can't be skipped or moved.`);
   }
   const now = ctx.clock.now();
@@ -339,8 +356,12 @@ function undoDate(ctx, user, s, date) {
   for (const r of rows) {
     if (r.date < today) throw bad('past_date', `${fmtDate(r.date)} has already passed at ${loc.name}. Only today or a later date can change.`);
   }
+  // Undoing a skip makes that date meet again, which a closure forbids (D-46, D-47): the closure wins.
+  if (skip && closedOn(ctx, loc.id, skip.date)) {
+    throw bad('closed_that_day', `${loc.name} is closed on ${fmtDate(skip.date)}, so ${s.name} can't meet then. Reopen that day first to undo this change.`);
+  }
   // Undoing an added date cancels it, so it can't leave a visit pointing at a date that no longer meets.
-  if (add && hasVisits(ctx, s.id, add.date)) {
+  if (add && hasVisits(ctx, s, add.date)) {
     throw conflict('date_has_visits', `Students already checked in to ${s.name} on ${fmtDate(add.date)}, so that date can't be taken back.`);
   }
   return tx(ctx.db, () => {
@@ -578,7 +599,7 @@ module.exports = {
         const ch = mine.get(d);
         let kind = null;
         if (dates.meets(st, ov, d)) kind = closed.has(d) ? 'closed' : ch ? 'added' : 'regular';
-        else if (ch && ch.kind === 'skip') kind = 'skipped';
+        else if (ch && ch.kind === 'skip') kind = closed.has(d) ? 'closed' : 'skipped'; // the closure wins (D-47)
         if (!kind) continue;
         out.push({ date: d, kind, reason: kind === 'closed' ? closed.get(d) : ch ? ch.reason : null,
           moved_from: ch && ch.kind === 'add' ? ch.moved_from : null, past: d < today });

@@ -250,8 +250,10 @@
 
   // ---------- parent screen ----------
 
-  // #/schedule/enrollment/<id>, from an Inbox item (L35).
-  const inboxRef = params => params[0] === 'enrollment' ? { id: Number(params[1]) } : null;
+  // #/schedule/enrollment/<id> or #/schedule/session/<schedule id>, from an Inbox item (L35).
+  const inboxRef = params => params[0] === 'enrollment' ? { id: Number(params[1]) }
+    : params[0] === 'session' ? { session: Number(params[1]) } : null;
+  const refers = (ref, e) => (ref.session ? e.session_id === ref.session : e.id === ref.id);
 
   async function renderParent(el, params) {
     const { students } = await App.api.get(API + '/students');
@@ -262,7 +264,7 @@
       return;
     }
     const ref = inboxRef(params);
-    const pick = !ref ? params[0] : (students.find(s => s.enrollments.some(e => e.id === ref.id)) || {}).id;
+    const pick = !ref ? params[0] : (students.find(s => s.enrollments.some(e => refers(ref, e))) || {}).id;
     const sel = students.find(s => String(s.id) === String(pick)) || students[0];
     const from = ref ? null : params[1] || null;
     const [cat, sched] = await Promise.all([App.api.get(`${API}/students/${sel.id}/catalog`), App.api.get(scheduleUrl(sel.id, from))]);

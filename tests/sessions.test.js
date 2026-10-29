@@ -836,6 +836,79 @@ test(['SC-5'], 'undo takes a change back (both halves of a move), today or later
   assert.equal((await undo('2026-10-12')).body.error, 'cancelled');
 });
 
+test(['SC-5', 'SC-3'], 'a closure wins over date changes (D-47): a skipped day that closes lists as closed and its skip can\'t be undone onto it, and a closed day can\'t be skipped, moved from, added or moved to', async () => {
+  const w = await world(); // Wed 14 Oct 2026
+  const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
+  const fam = w.t.fx.family(w.a);
+  w.t.fx.enroll(fam.student, s);
+  const post = body => w.t.as(w.dirA).post(datesUrl(s), body);
+  const undo = date => w.t.as(w.dirA).del(datesUrl(s) + '/' + date);
+  const told = () => w.t.fx.notifications(fam.parent).filter(n => n.kind.startsWith('schedule_date_')).length;
+  assert.equal((await post({ action: 'skip', date: '2026-11-25' })).status, 201);
+  assert.equal((await post({ action: 'move', date: '2026-11-30', to: '2026-12-01' })).status, 201);
+  for (const [date, reason] of [['2026-11-25', 'Thanksgiving eve'], ['2026-11-27', 'Thanksgiving'], ['2026-11-30', 'Inservice']]) {
+    assert.equal((await w.t.as(w.dirA).post('/api/sessions/closures', { date, reason })).status, 201);
+  }
+  assert.equal(told(), 2);
+  const on = async date => (await w.t.as(fam.parent).get(datesUrl(s))).body.dates.find(d => d.date === date);
+  assert.deepEqual(await on('2026-11-25'), { date: '2026-11-25', kind: 'closed', reason: 'Thanksgiving eve', moved_from: null, past: false });
+  assert.deepEqual(await on('2026-11-30'), { date: '2026-11-30', kind: 'closed', reason: 'Inservice', moved_from: null, past: false });
+  // Undoing would tell families the schedule meets on a closed day: refused, for a skip and for either half of a move.
+  for (const d of ['2026-11-25', '2026-12-01', '2026-11-30']) {
+    const r = await undo(d);
+    assert.deepEqual([r.status, r.body.error], [400, 'closed_that_day'], d);
+  }
+  assert.equal((await undo('2026-11-25')).body.message, 'Irvine is closed on Wed, Nov 25, so Afternoon Study can\'t meet then. Reopen that day first to undo this change.');
+  assert.equal(dateRows(w.t, s).length, 3);
+  // A closed regular day isn't a meeting date: nothing to skip or move away, and nothing to add.
+  const refused = [
+    [{ action: 'skip', date: '2026-11-27' }, 'not_a_meeting_date', 'Irvine is closed on Fri, Nov 27, so Afternoon Study doesn\'t meet then.'],
+    [{ action: 'move', date: '2026-11-27', to: '2026-11-28' }, 'not_a_meeting_date', 'Irvine is closed on Fri, Nov 27, so Afternoon Study doesn\'t meet then.'],
+    [{ action: 'add', date: '2026-11-27' }, 'closed_that_day', 'Irvine is closed on Fri, Nov 27, so Afternoon Study can\'t meet then.'],
+    [{ action: 'move', date: '2026-11-23', to: '2026-11-27' }, 'closed_that_day', 'Irvine is closed on Fri, Nov 27, so Afternoon Study can\'t meet then.'],
+  ];
+  for (const [body, code, message] of refused) {
+    const r = await post(body);
+    assert.deepEqual([r.status, r.body.error, r.body.message], [400, code, message], JSON.stringify(body));
+  }
+  assert.equal(dateRows(w.t, s).length, 3);
+  assert.equal(told(), 2, 'nobody was told anything more');
+  // Once the day reopens, the skip can be undone as usual.
+  const c = w.t.db.prepare("SELECT id FROM closures WHERE date = '2026-11-25'").get();
+  assert.equal((await w.t.as(w.dirA).del('/api/sessions/closures/' + c.id)).status, 200);
+  assert.equal((await undo('2026-11-25')).status, 200);
+  assert.equal(told(), 3);
+});
+
+test(['SC-5', 'CI-7'], 'a staff check-in with no schedule (D-15a) counts as a visit for the date: today\'s date can\'t then be skipped, moved or taken back', async () => {
+  const w = await world({ now: at(LA, '2026-11-10', '08:00') }); // Tue Nov 10, 8:00 AM
+  const s = w.t.fx.session(w.a, { name: 'Mornings MWF', weekdays: '1,3,5', start: '09:00', end: '12:00' });
+  const fam = w.t.fx.family(w.a), other = w.t.fx.family(w.a);
+  w.t.fx.enroll(fam.student, s);
+  assert.equal((await w.t.as(w.dirA).post(datesUrl(s), { action: 'add', date: '2026-11-10' })).status, 201);
+  const visit = (student, o) => w.t.fx.visit(student, w.a, Object.assign({ local_date: '2026-11-10', checkin_method: 'staff', checked_in_by: w.staffA.id }, o));
+  // A student not in the schedule, and one who left before it started, don't hold the date.
+  const early = visit(fam.student, { check_in_at: at(LA, '2026-11-10', '07:30'), check_out_at: at(LA, '2026-11-10', '08:00') });
+  const stranger = visit(other.student, { check_in_at: at(LA, '2026-11-10', '08:00') });
+  const notAfter = await w.t.as(w.dirA).del(datesUrl(s) + '/2026-11-10');
+  assert.equal(notAfter.status, 200);
+  assert.equal((await w.t.as(w.dirA).post(datesUrl(s), { action: 'add', date: '2026-11-10' })).status, 201);
+  w.t.db.prepare('DELETE FROM visits WHERE id IN (?, ?)').run(early.id, stranger.id);
+  // Sofia's staff check-in at 8:00 is still open, so it runs into the 9:00 date.
+  const here = visit(fam.student, { check_in_at: at(LA, '2026-11-10', '08:00') });
+  const r = await w.t.as(w.dirA).del(datesUrl(s) + '/2026-11-10');
+  assert.deepEqual([r.status, r.body.error], [409, 'date_has_visits']);
+  assert.equal(dateRows(w.t, s).length, 1);
+  // The same on a regular date: Wednesday's can't be skipped or moved once she is in for it.
+  w.t.clock.set(at(LA, '2026-11-11', '08:45'));
+  w.t.db.prepare('DELETE FROM visits WHERE id = ?').run(here.id);
+  visit(fam.student, { local_date: '2026-11-11', check_in_at: at(LA, '2026-11-11', '08:40') });
+  for (const body of [{ action: 'skip', date: '2026-11-11' }, { action: 'move', date: '2026-11-11', to: '2026-11-12' }]) {
+    const x = await w.t.as(w.dirA).post(datesUrl(s), body);
+    assert.deepEqual([x.status, x.body.error], [409, 'date_has_visits'], body.action);
+  }
+});
+
 test(['SC-5'], 'the dates route lists the whole period: regular, added, skipped and closed dates, with reasons and what has passed', async () => {
   const w = await world(); // Wed 14 Oct 2026
   const s = w.t.fx.session(w.a, { name: 'Afternoon Study', weekdays: '1,3,5' });
@@ -1472,11 +1545,18 @@ test(['SC-4', 'SC-5', 'NF-7'], 'Schedules screen: each row shows days, seats, wa
   await tab.settle();
   assert.equal(dialog(view), undefined);
   assert.equal(tab.doc.activeElement, skip, 'focus goes back to Skip');
+  assert.equal(view.find(n => n.id === 'sx-skip-reason'), undefined, 'the reason goes with the question');
   assert.ok(!tab.requests.some(r => r.startsWith('POST')), tab.requests.join('\n'));
+  // An optional reason sits right above the question, and families see it (3.1).
   skip.click();
+  const why = dateLi(view, 'Mon, Nov 30').find(n => n.id === 'sx-skip-reason');
+  assert.equal(why.getAttribute('maxlength'), '120');
+  assert.ok(dateLi(view, 'Mon, Nov 30').find(n => n.tag === 'label' && words(n).startsWith('Reason (optional)')));
+  why.value = 'Staff training day';
   btn(dialog(view), 'Skip this date').click();
   await tab.settle();
   assert.deepEqual(dateRows(w.t, s).map(r => [r.date, r.kind]), [[MON, 'skip'], ['2026-11-24', 'add'], ['2026-11-30', 'skip']]);
+  assert.equal(dateRows(w.t, s)[2].reason, 'Staff training day');
   // The panel stays open on the same schedule, with fresh dates.
   assert.match(words(dateLi(view, 'Mon, Nov 30')), /Skipped/);
 
@@ -1591,6 +1671,16 @@ test(['SC-3', 'NF-7'], 'Schedules screen: closures and periods ask first; the pe
   form.find(n => n.tag === 'form').dispatch('submit');
   await tab.settle();
   assert.deepEqual(w.t.db.prepare('SELECT name, start_date, end_date FROM terms WHERE location_id = ? ORDER BY start_date').all(w.a.id).map(x => x.name), ['Fall 2026', 'January 2027']);
+
+  // A schedule's panel belongs to its period: showing another period closes it.
+  view = await tab.open();
+  view.find(n => n.tag === 'button' && n.cls.includes('sx-slot')).click();
+  assert.equal(view.find(n => n.getAttribute('data-panel')).getAttribute('data-panel'), 'session');
+  const pick = view.find(n => n.id === 'sx-term');
+  pick.value = String(w.t.db.prepare("SELECT id FROM terms WHERE name = 'January 2027'").get().id);
+  pick.dispatch('change');
+  assert.equal(view.find(n => n.getAttribute('data-panel')), undefined);
+  assert.match(words(view), /No schedules in January 2027 yet/);
 });
 
 test(['SC-3', 'SC-4', 'SC-5'], 'Schedules screen: staff read only, the closure form is dismissed with Cancel, notices open a screen from the Inbox, and Home shows added dates (L35, L39)', async () => {
@@ -1635,9 +1725,10 @@ test(['SC-3', 'SC-4', 'SC-5'], 'Schedules screen: staff read only, the closure f
       return [li.find(n => n.tag === 'strong').textContent, a ? a.getAttribute('href') : null];
     });
   };
+  // A schedule notice opens the tab of the student holding that schedule; a closure is the whole center's.
   assert.deepEqual(await hrefs(fam.parent), [
-    ['Afternoon Study+ moves from Mon, Nov 30 to Tue, Dec 1', '#/schedule'],
-    ['Afternoon Study at Irvine has changed', '#/schedule'],
+    ['Afternoon Study+ moves from Mon, Nov 30 to Tue, Dec 1', '#/schedule/session/' + s.id],
+    ['Afternoon Study at Irvine has changed', '#/schedule/session/' + s.id],
     ['Irvine is closed Mon, Nov 23', '#/schedule'],
   ]);
   // Staff open the Schedules screen instead.

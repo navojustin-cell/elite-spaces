@@ -1872,6 +1872,50 @@ test(['CI-2', 'NF-5'], "the Check in screen sends the code only and never asks f
   assert.equal(asked, 0, 'the screen never asked for the location');
 });
 
+test(['CI-2', 'NF-5'], "the dev scan button doesn't suggest a location check (D-49)", async () => {
+  const t = await setup({ dev: true });
+  const tab = shellTab(t);
+  await tab.open(t.fam.student, '#/checkin');
+  const dev = byTag(tab.main(), 'button').filter(b => /Simulate/.test(b.textContent)).map(b => b.textContent);
+  assert.deepEqual(dev, ['Simulate scan (dev)']);
+  assert.doesNotMatch(words(tab.main()), /location/i);
+});
+
+test(['CI-4', 'NF-7'], 'a second scan soon after asks with the shell confirm: the safe answer comes first and has focus, on the Check in screen and the #/scan link', async () => {
+  const t = await setup({ dev: true });
+  const tab = shellTab(t, { stub: { 'GET /api/notes/goals/today': () => [200, { status: 'skipped', goals: [] }] } });
+  await tab.open(t.fam.student, '#/checkin');
+  const simulate = async () => {
+    byTag(tab.main(), 'button').find(b => /Simulate scan/.test(b.textContent)).click();
+    await tab.settle();
+  };
+  const ask = () => tab.main().find(n => n.getAttribute('role') === 'alertdialog');
+  await simulate();
+  setClock(t, '13:08');
+  await simulate();
+  let box = ask();
+  assert.equal(tab.doc.getElementById(box.getAttribute('aria-labelledby')).textContent, 'You checked in at 1:05 PM. Check out now?');
+  assert.deepEqual(byTag(box, 'button').map(b => b.textContent), ['Stay checked in', 'Check out']);
+  assert.equal(tab.doc.activeElement, byTag(box, 'button')[0], 'focus starts on the safe answer');
+  tab.doc.activeElement.click();
+  await tab.settle();
+  assert.equal(ask(), undefined);
+  assert.equal(tab.doc.activeElement.textContent, "OK, you're still checked in.");
+  assert.equal(visitsOf(t, t.fam.student)[0].check_out_at, null);
+  await simulate();
+  byTag(ask(), 'button').find(b => b.textContent === 'Check out').click();
+  await tab.settle();
+  assert.match(words(tab.main().find(n => n.getAttribute('role') === 'status')), /^✓ Checked out 1:08 PM/);
+  // The entrance link: "Check back in?" takes focus on "Stay checked out" too.
+  setClock(t, '13:10');
+  const link = shellTab(t);
+  await link.open(t.fam.student, `#/scan/${t.loc.id}/${t.code()}`);
+  box = link.main().find(n => n.getAttribute('role') === 'alertdialog');
+  assert.deepEqual(byTag(box, 'button').map(b => b.textContent), ['Stay checked out', 'Check back in']);
+  assert.equal(link.doc.activeElement, byTag(box, 'button')[0]);
+  assert.equal(visitsOf(t, t.fam.student).length, 1);
+});
+
 test(['DG-3', 'CI-2'], "after a check-in (never a check-out) the Check in screen asks for today's goals through the notes API", async () => {
   const t = await setup({ dev: true });
   let goals = { date: '2026-10-14', checked_in: true, status: 'none', goals: [] };

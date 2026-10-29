@@ -1,6 +1,13 @@
 'use strict';
 // Foundation mutations: each breaks one core rule; core.test.js must catch it.
 module.exports = [
+  { name: 'a refused App.run action leaves keyboard focus on <body>', covers: ['CORE'], file: 'public/js/app.js',
+    find: "if (had && btn.isConnected && (!document.activeElement || document.activeElement === document.body)) btn.focus();", repl: '' },
+  { name: 'App.run takes focus to its button even when the action moved it on purpose', covers: ['CORE'], file: 'public/js/app.js',
+    find: '(!document.activeElement || document.activeElement === document.body)) btn.focus();', repl: 'true) btn.focus();' },
+  { name: 'tab bar labels cut off with an ellipsis at phone width', covers: ['CORE'], file: 'public/css/app.css',
+    find: 'overflow-wrap: break-word; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }',
+    repl: 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' },
   { name: 'let a pending-link student sign in', covers: ['CORE'], file: 'src/auth.js',
     find: "if (row.role === 'student' && !studentLinked(ctx, row.id)) {", repl: 'if (false) {' },
   { name: 'accept any password', covers: ['CORE'], file: 'src/auth.js',
