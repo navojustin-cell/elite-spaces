@@ -75,7 +75,13 @@ function seedGoals(ctx, now) {
   const noGoals = thisWeekers.length >= 2 ? thisWeekers[thisWeekers.length - 1] : null;
 
   let turn = 0, pick = 0;
-  const nextText = subject => { const list = TEXTS.get(subject); return list[pick++ % list.length]; };
+  // The next text in that subject's list (every list has at least 2), never `avoid`: a goal is
+  // never replaced by itself, even when a Done picks the same subject again.
+  const nextText = (subject, avoid) => {
+    const list = TEXTS.get(subject);
+    const t = list[pick++ % list.length];
+    return t === avoid ? list[pick++ % list.length] : t;
+  };
   [...byStudent.values()].forEach((s, k) => {
     for (const [ws, list] of s.weeks) {
       if (ws === s.thisWeek && s.name === noGoals) continue;
@@ -85,8 +91,9 @@ function seedGoals(ctx, now) {
       // Three subjects, starting at a different one for each student.
       const open = [0, 1, 2].map(i => {
         const subject = SUBJECT_IDS[(k * 3 + i) % SUBJECT_IDS.length];
-        const id = Number(insGoal.run(weekId, i + 1, subject, nextText(subject), first.local_date, at).lastInsertRowid);
-        return { id, position: i + 1, subject };
+        const text = nextText(subject);
+        const id = Number(insGoal.run(weekId, i + 1, subject, text, first.local_date, at).lastInsertRowid);
+        return { id, position: i + 1, subject, text };
       });
       for (const d of list.slice(1)) {
         const when = d.first_in + 4 * 60000;
@@ -98,9 +105,10 @@ function seedGoals(ctx, now) {
           const others = open.filter(x => x !== g).map(x => x.subject);
           const start = SUBJECT_IDS.indexOf(g.subject) + (answer === 'done' ? 0 : 1);
           const subject = [...Array(SUBJECT_IDS.length).keys()].map(n => SUBJECT_IDS[(start + n) % SUBJECT_IDS.length]).find(x => !others.includes(x));
-          const id = Number(insGoal.run(weekId, g.position, subject, nextText(subject), d.local_date, when).lastInsertRowid);
+          const text = nextText(subject, g.text);
+          const id = Number(insGoal.run(weekId, g.position, subject, text, d.local_date, when).lastInsertRowid);
           close.run(answer === 'done' ? 'done' : 'replaced', answer === 'done' ? d.local_date : null, answer === 'done' ? null : d.local_date, id, g.id);
-          open[i] = { id, position: g.position, subject };
+          open[i] = { id, position: g.position, subject, text };
         });
         touch.run(when, weekId);
       }

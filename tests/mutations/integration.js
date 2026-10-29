@@ -21,7 +21,7 @@ module.exports = [
     find: 'const ov = dates.overrides(ctx, [...new Set(rows.map(r => r.session_id))]);', repl: 'const ov = new Map();' },
   { name: "a posted note leaves out the student's goals (flow 2)", covers: ['DN-2', 'DN-5'],
     file: 'src/modules/notes/index.js',
-    find: 'goals: week.goalsOn(db, n.student_id, n.local_date),', repl: 'goals: [],' },
+    find: '...week.goalsAt(db, n.student_id, n.local_date),', repl: 'goals: [], earlier: [],' },
   { name: "goals don't see the check-in module's visits, so a student who scanned in can't set them (flow 2)", covers: ['DG-1'],
     file: 'src/modules/notes/week.js',
     find: "'SELECT 1 FROM visits WHERE student_id = ? AND location_id = ? AND local_date = ?'", repl: "'SELECT 1 FROM visits WHERE 0 AND ? AND ? AND ?'" },

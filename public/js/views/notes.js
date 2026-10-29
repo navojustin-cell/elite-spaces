@@ -51,6 +51,10 @@
     .note-goal-list li { overflow-wrap: anywhere; }
     .note-goal-list .badge { margin-right: .4rem; }
     .note-goal-list .goal-answer { margin: 0 0 0 .4rem; }
+    /* Goals done or changed earlier in the week sit under the current 3, smaller. */
+    .note-goals-label.note-goals-sub { margin: .55rem 0 .25rem; font-size: .82rem; color: var(--muted); }
+    .note-goal-earlier { font-size: .88rem; }
+    .note-goal-earlier .goal-next { margin-left: .4rem; }
     /* Students' goal screens: phone first, one column, 44px+ targets (NF-7). */
     .goal-label { display: block; font-weight: 600; font-size: .95rem; margin: .75rem 0 .35rem; }
     .goal-subjects { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem; }
@@ -76,6 +80,8 @@
     .goal-same { margin: .4rem 0 0; }
     .goal-own { color: var(--text); font-weight: 600; margin: .35rem 0 0; }
     .goal-own:empty { display: none; }
+    .goal-undo-row { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .75rem; }
+    .goal-undo { font-size: .9rem; padding: .3rem .6rem; }
     /* Focus moves to these on a new step or form; the sticky top bar must not cover them. */
     .goal-steps, .goal-form h3, #goal-done { scroll-margin-top: 84px; }
     h2:focus, h3:focus { outline: 3px solid var(--focus); outline-offset: 2px; }
@@ -103,9 +109,19 @@
   const goalList = items => h('ul', { class: 'note-goal-list' }, items.map(g =>
     h('li', null, h('span', { class: 'badge badge-accent' }, g.subject_label), h('span', { class: 'sr-only' }, ', '), g.text,
       g.answer && [h('span', { class: 'sr-only' }, '. '), h('span', { class: ANSWER[g.answer][1] + ' goal-answer' }, ANSWER[g.answer][0])])));
+  // The week's goals as they stood on `day` (D-57): the open ones first, with that day's answers, then,
+  // smaller and only when there are any, the ones done or changed earlier that week and what took their place.
+  const CLOSED = { done: ['Done', 'badge badge-ok'], replaced: ['Changed', 'badge badge-warn'] };
+  const weekGoals = (items, earlier, day) => [goalList(items), earlier && earlier.length > 0 && [
+    h('p', { class: 'note-goals-label note-goals-sub' }, 'Earlier this week'),
+    h('ul', { class: 'note-goal-list note-goal-earlier' }, earlier.map(g => h('li', null,
+      h('span', { class: 'badge' }, g.subject_label), h('span', { class: 'sr-only' }, ', '), g.text, h('span', { class: 'sr-only' }, '. '),
+      h('span', { class: CLOSED[g.status][1] + ' goal-answer' }, CLOSED[g.status][0] + ' ' +
+        (g.closed_on === day ? 'today' : App.fmtDate(g.closed_on, { weekday: 'short', month: undefined, day: undefined }))),
+      h('span', { class: 'muted goal-next' }, h('span', { 'aria-hidden': 'true' }, '→ '), 'replaced by ' + g.replaced_by_label))))]];
   // Parents see the week's goals as they stood on the note's day; a week with none shows nothing.
-  const parentGoals = (name, items) => items && items.length
-    ? h('div', { class: 'note-goals' }, h('h3', { class: 'note-goals-label' }, first(name) + "'s goals this week"), goalList(items))
+  const parentGoals = (name, items, earlier, day) => items && items.length
+    ? h('div', { class: 'note-goals' }, h('h3', { class: 'note-goals-label' }, first(name) + "'s goals this week"), weekGoals(items, earlier, day))
     : null;
   // "Mon, Oct 26 – Sun, Nov 1"
   const weekText = w => App.fmtDate(w.week_start) + ' – ' + App.fmtDate(w.week_end);
@@ -213,7 +229,7 @@
           h('span', { class: statusClass }, statusText));
         // The student's goals sit between the visit line and the ratings, so staff write the note with them in view (D-51).
         const goals = h('div', { class: 'note-goals' }, h('h3', { class: 'note-goals-label' }, 'Goals this week'),
-          s.goals.length ? goalList(s.goals) : h('span', { class: 'badge' }, 'No goals this week'));
+          s.goals.length ? weekGoals(s.goals, s.earlier, data.date) : h('span', { class: 'badge' }, 'No goals this week'));
         const art = h('article', { class: 'card', id: 'dn-' + s.id, tabindex: '-1', 'aria-labelledby': 'dn-name-' + s.id }, head, goals);
 
         // A posted note shows as a summary until someone chooses to edit it.
@@ -332,7 +348,7 @@
         h('h2', { style: 'margin:0' }, App.fmtDate(n.local_date, { weekday: 'long', month: 'short', day: 'numeric' })),
         showName && h('span', { class: 'badge badge-accent' }, first(n.student_name))),
       h('p', { class: 'muted small', style: 'margin:.25rem 0 .5rem' }, [n.location_name, ...n.visits.map(v => visitText(v, tz))].join(' · ')),
-      parentGoals(n.student_name, n.goals),
+      parentGoals(n.student_name, n.goals, n.earlier, n.local_date),
       h('ul', { class: 'list' }, n.ratings.map(r => h('li', null, h('span', { class: 'grow' }, r.label),
         h('span', { class: BADGE[r.rating] || 'badge' }, r.word || 'Not rated')))),
       n.comment && h('div', null, h('div', { class: 'muted small', style: 'margin-top:.5rem' }, 'Comment from ' + first(n.posted_by_name || 'staff')),
@@ -485,7 +501,9 @@
   // A subject another open goal uses is shown but can't be picked (D-57), with the tip to put
   // more than one thing in that goal. Errors show right under the subject buttons or the text
   // box, and never clear what was typed. `g` is { subject, text }; `changed` runs after each edit.
-  function goalEditor(base, meta, g, taken, changed = () => {}) {
+  // `was` is the goal a Change replaces ({ subject, text }): its words, left as they were, clear when
+  // another subject is picked, so they don't end up under the wrong subject.
+  function goalEditor(base, meta, g, taken, changed = () => {}, was = null) {
     const subjErr = h('p', { class: 'goal-error', id: base + '-subject-err', 'aria-live': 'polite' });
     const textErr = h('p', { class: 'goal-error', id: base + '-text-err', 'aria-live': 'polite' });
     const text = h('textarea', { id: base + '-text', rows: '3', maxlength: String(meta.text_max), 'aria-describedby': base + '-text-err' });
@@ -500,12 +518,23 @@
       const s = meta.subjects.find(x => x.id === g.subject);
       own.textContent = s && s.examples.includes(g.text.trim()) ? "Now make it yours: change the chapter, unit or assignment to the one you're doing." : '';
     };
-    text.addEventListener('input', () => { g.text = text.value; clear('text'); nudge(); changed(); });
+    // An example tapped over the student's own words (anything but an example, or the goal being
+    // changed) can be undone, until they type, pick a subject or the editor is drawn again.
+    const examplesAll = new Set(meta.subjects.flatMap(s => s.examples));
+    let mine = null;
+    const undo = h('button', { type: 'button', class: 'btn btn-ghost goal-undo', id: base + '-undo', 'aria-label': 'Undo: bring back what you typed' }, 'Undo');
+    const undoSlot = h('span');
+    const dropUndo = () => { mine = null; undoSlot.replaceChildren(); };
+    undo.addEventListener('click', () => { text.value = g.text = mine; dropUndo(); clear('text'); nudge(); changed(); text.focus(); });
+    text.addEventListener('input', () => { g.text = text.value; dropUndo(); clear('text'); nudge(); changed(); });
     const examples = h('div');
     const chips = meta.subjects.map(s => h('button', {
       type: 'button', class: 'btn' + (g.subject === s.id ? ' btn-primary' : ''), 'data-subject': s.id,
       'aria-pressed': String(g.subject === s.id), disabled: taken.has(s.id),
-      onclick: () => { g.subject = s.id; mark(); drawExamples(); clear('subject'); nudge(); changed(); },
+      onclick: () => {
+        if (was && s.id !== was.subject && text.value.trim() === was.text) { g.text = ''; text.value = ''; clear('text'); }
+        g.subject = s.id; dropUndo(); mark(); drawExamples(); clear('subject'); nudge(); changed();
+      },
     }, s.label, taken.has(s.id) && h('span', { class: 'goal-used' }, ' · ' + taken.get(s.id))));
     function mark() {
       chips.forEach(b => { const on = b.dataset.subject === g.subject; b.classList.toggle('btn-primary', on); b.setAttribute('aria-pressed', String(on)); });
@@ -516,7 +545,11 @@
       examples.replaceChildren(...(s ? [
         h('p', { class: 'goal-label', id: base + '-ex' }, 'Tap an example, then make it yours'),
         h('div', { class: 'goal-examples', role: 'group', 'aria-labelledby': base + '-ex' }, s.examples.map(x =>
-          h('button', { type: 'button', class: 'btn', onclick: () => { g.text = x; text.value = x; clear('text'); nudge(); changed(); text.focus(); } }, x))),
+          h('button', { type: 'button', class: 'btn', onclick: () => {
+            const typed = text.value.trim();
+            if (mine === null && typed && (!examplesAll.has(typed) || (was && typed === was.text))) { mine = text.value; undoSlot.replaceChildren(undo); }
+            g.text = x; text.value = x; clear('text'); nudge(); changed(); text.focus();
+          } }, x))),
       ] : []));
     }
     drawExamples();
@@ -528,7 +561,7 @@
       h('p', { class: 'goal-tip' }, meta.tip),
       examples,
       h('label', { class: 'goal-label', for: base + '-text' }, 'Your goal ', h('span', { class: 'muted', style: 'font-weight:400' }, '(up to 3 sentences)')),
-      text, textErr, own];
+      text, h('div', { class: 'goal-undo-row' }, undoSlot, own), textErr];
     const el = h('div', { class: 'goal-editor' }, kids);
     // Shows a refusal next to its field and moves focus there.
     function show(field, message) {
@@ -582,6 +615,9 @@
     d.picks.every(x => x && typeof x.subject === 'string' && typeof x.text === 'string')
     ? { step: d.step, picks: d.picks.map(x => ({ subject: x.subject, text: x.text })) } : null);
 
+  // The day's goals are all answered: say so and go Home. Setting the week and the daily update end the same way.
+  const setForToday = () => { App.toast("You're set for today."); App.go('home'); };
+
   // Setting the week: 3 short steps, "Goal 1 of 3", each checked by the server before the next.
   function setFlow(el, meta, wk) {
     const key = 'elite.goals.' + App.me.user.id + '.' + wk.week_start;
@@ -613,8 +649,7 @@
           return draw(true, fieldOf(e.code), m[2]);
         }
         draftStore.del(key);
-        App.toast("You're set for today.");
-        App.go('home');
+        setForToday();
       }));
       const title = h('h2', { id: 'goal-step', tabindex: '-1' }, 'Goal ' + n + ' of ' + picks.length);
       // replaceChildren (unlike h) would print a false as text, so the parts are filtered first.
@@ -652,13 +687,11 @@
       list.replaceChildren(...wk.goals.map(card));
       doneBox.replaceChildren(...(wk.done.length ? [doneCard(wk.done)] : []));
     }
-    // After an answer: say so when the day is done, else move on to the next goal still asked about.
+    // After an answer: the answer that finishes the day ends on Home, like setting the week; any other
+    // (including one after the day was already done) stays here and moves on to the next goal still asked about.
     function after(was, id) {
+      if (wk.state === 'done' && was !== 'done') return setForToday();
       draw();
-      if (wk.state === 'done' && was !== 'done') {
-        App.toast("You're set for today.");
-        return focusId('goal-done');
-      }
       const nextAsk = wk.goals.find(g => g.asks);
       focusFirst(nextAsk ? nextAsk.id : id);
     }
@@ -702,7 +735,7 @@
     function nextGoalForm(g) {
       const f = form;
       const taken = new Map(wk.goals.filter(x => x.id !== g.id).map(x => [x.subject, 'Goal ' + x.position]));
-      const ed = goalEditor('goal-' + g.id, meta, f.draft, taken);
+      const ed = goalEditor('goal-' + g.id, meta, f.draft, taken, undefined, f.answer === 'change' ? { subject: g.subject, text: g.text } : null);
       const save = h('button', { type: 'button', class: 'btn btn-primary btn-lg btn-block' }, 'Save new goal');
       save.addEventListener('click', () => App.run(save, async () => {
         if (!f.draft.subject) return ed.show('subject', 'Pick a subject.');
@@ -763,6 +796,11 @@
   // Parents: each student's goals this week with today's answers, any time (D-57).
   const todaysAnswers = w => w.goals.filter(g => g.status === 'open')
     .map(g => Object.assign({}, g, { answer: (w.checks.find(c => c.goal_id === g.id && c.date === w.today) || {}).answer }));
+  // The week's goals done or changed so far, newest first, with the subject that took each one's place.
+  const closedGoals = w => w.goals.filter(g => g.status !== 'open')
+    .map(g => Object.assign({}, g, { closed_on: g.done_on || g.replaced_on,
+      replaced_by_label: (w.goals.find(x => x.id === g.replaced_by) || {}).subject_label }))
+    .sort((a, b) => b.closed_on.localeCompare(a.closed_on) || a.position - b.position);
   App.card({
     id: 'notes-week-goals', roles: ['parent'], order: 31,
     async render(el) {
@@ -773,7 +811,7 @@
         h('ul', { class: 'list' }, weeks.map(w => h('li', { style: 'align-items:flex-start' },
           h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(w.student.name)),
           h('div', { class: 'grow' }, h('strong', null, w.student.name),
-            w.goals.length ? goalList(todaysAnswers(w)) : h('div', { class: 'muted small' }, first(w.student.name) + " hasn't set this week's goals yet."),
+            w.goals.length ? weekGoals(todaysAnswers(w), closedGoals(w), w.today) : h('div', { class: 'muted small' }, first(w.student.name) + " hasn't set this week's goals yet."),
             w.goals.length > 0 && h('a', { class: 'btn', style: 'margin-top:.5rem', href: '#/week-goals/' + w.student.id,
               'aria-label': 'See updates for ' + w.student.name }, 'See updates')))))));
     },
@@ -827,7 +865,7 @@
               h('div', { class: 'grow' }, h('strong', null, s.name), h('div', { class: 'muted small' }, why)));
           }
           return h('li', { style: 'align-items:flex-start' }, h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(s.name)),
-            h('div', { class: 'grow' }, h('strong', null, s.name), parentGoals(s.name, n.goals), ratingSummary(n.ratings),
+            h('div', { class: 'grow' }, h('strong', null, s.name), parentGoals(s.name, n.goals, n.earlier, n.local_date), ratingSummary(n.ratings),
               n.comment && h('p', { class: 'note-comment' }, n.comment.length > 160 ? n.comment.slice(0, 157) + '…' : n.comment),
               h('div', { class: 'muted small', style: 'margin-top:.4rem' }, 'Posted by ' + n.posted_by_name + ' at ' + App.fmtTime(n.posted_at, n.timezone) +
                 (n.edited_at ? ' · Edited' : ''))));

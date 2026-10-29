@@ -115,6 +115,8 @@
     const camBox = h('div');
     const scanBtn = h('button', { class: 'btn btn-primary btn-lg btn-block ci-hideable', type: 'button', onclick: startCamera },
       h('span', { 'aria-hidden': 'true' }, '📷'), h('span', { class: 'ci-scan-label' }, 'Scan to check in'));
+    // While the goals box asks (set or update), its link is the one big button and the scan button steps back (D-57).
+    const scanBig = big => { scanBtn.className = big ? 'btn btn-primary btn-lg btn-block ci-hideable' : 'btn btn-block ci-hideable'; };
     // Staff can check a student in or out by hand; the line follows the button (check out while here).
     const helpLine = h('p', { class: 'muted small', style: 'margin:0' }, 'Having trouble? Ask staff at the front desk to check you in.');
     const devBtn = App.me && App.me.dev && h('button', { class: 'btn btn-block', type: 'button', onclick: simulate }, 'Simulate scan (dev)');
@@ -168,7 +170,7 @@
       box.focus({ preventScroll: false });
       // After a check-in (never a check-out) the student is asked for the week's goals (D-57, DG-3).
       if (r.action === 'checkin') askGoals();
-      else { goalsAsked = true; goalsSeq++; goalsBox.replaceChildren(); }
+      else { goalsAsked = true; goalsSeq++; goalsBox.replaceChildren(); scanBig(true); }
     }
     // This week's goals, from the notes module: none yet -> set 3; an open goal not answered today ->
     // the daily update; otherwise "You're set for today". Each opens My goals (#/goals) in one tap.
@@ -177,8 +179,9 @@
       goalsAsked = true;
       const n = ++goalsSeq;
       let g;
-      try { g = await App.api.get('/api/notes/goals/week'); } catch (_) { return; }
+      try { g = await App.api.get('/api/notes/goals/week'); } catch (_) { scanBig(true); return; }
       if (n !== goalsSeq) return; // checked out meanwhile: a check-out never asks
+      scanBig(g.state !== 'set' && g.state !== 'update');
       const go = (label, primary) => h('a', { class: primary ? 'btn btn-primary btn-lg btn-block' : 'btn', href: '#/goals' }, label);
       goalsBox.replaceChildren(h('div', { class: 'card' }, ...(g.state === 'set'
         ? [h('h2', null, 'Set your 3 goals for this week'), h('p', { class: 'muted' }, 'It takes a minute. Your mentors check in on them.'),

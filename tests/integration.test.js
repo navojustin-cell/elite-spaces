@@ -198,18 +198,21 @@ test(['DG-1', 'DG-2', 'DN-2', 'DN-5'], "flow 2: a student checks in and sets 3 g
     text: 'Sketch three thumbnail ideas for my next portfolio piece.' }] });
   assert.deepEqual([done.body.state, done.body.goals.map(g => g.subject)], ['done', ['math', 'history', 'art']]);
 
-  // Staff see the week with the day's answers on Daily notes, and post the note.
+  // Staff see the week on Daily notes: the 3 open at the end of the day with the day's answers, then
+  // the goals done or changed earlier that week, each with what replaced it. Then they post the note.
   const day = await t.as(staff).get(`/api/notes/day?location=${loc.id}&date=2026-10-16`);
   assert.deepEqual(day.body.goal_counts, { set: 1, none: 0 });
   const entry = day.body.students.find(x => x.id === fam.student.id);
-  assert.deepEqual(entry.goals.map(g => [g.subject_label, g.answer]), [['Math', 'yes'], ['English', 'done'], ['History', null], ['Science', 'change'], ['Art', null]]);
+  assert.deepEqual(entry.goals.map(g => [g.subject_label, g.answer]), [['Math', 'yes'], ['History', null], ['Art', null]]);
+  const earlier = [['English', 'done', '2026-10-16', 'History'], ['Science', 'replaced', '2026-10-16', 'Art']];
+  assert.deepEqual(entry.earlier.map(g => [g.subject_label, g.status, g.closed_on, g.replaced_by_label]), earlier);
   const ratings = Object.fromEntries(day.body.items.map(i => [i.id, 3]));
   const post = await t.as(staff).put(`/api/notes/students/${fam.student.id}/2026-10-16`,
     { ratings, comment: 'Nice work finishing the English reading.', post: true });
   assert.equal(post.status, 200);
   const note = (await t.as(fam.parent).get('/api/notes/today')).body.students[0].note;
-  assert.deepEqual(note.goals.map(g => [g.subject, g.status, g.answer]), [
-    ['math', 'open', 'yes'], ['english', 'done', 'done'], ['history', 'open', null], ['science', 'replaced', 'change'], ['art', 'open', null]]);
+  assert.deepEqual(note.goals.map(g => [g.subject, g.status, g.answer]), [['math', 'open', 'yes'], ['history', 'open', null], ['art', 'open', null]]);
+  assert.deepEqual(note.earlier.map(g => [g.subject_label, g.status, g.closed_on, g.replaced_by_label]), earlier);
 
   // The parent's goals page has the week and every answer, any time.
   const page = await t.as(fam.parent).get('/api/notes/goals/student/' + fam.student.id);

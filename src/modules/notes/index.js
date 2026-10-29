@@ -111,14 +111,15 @@ function ratingsToEdit(db, note) {
   return currentItems(db).map(i => ({ item_id: i.id, label: i.label, rating: saved.has(i.id) ? saved.get(i.id) : null }));
 }
 
-// One row of the staff attendance list (DN-4), with the student's goals as of that day (D-57).
+// One row of the staff attendance list (DN-4), with the student's goals as of that day: the open ones,
+// then the ones done or changed earlier that week (D-57).
 function dayEntry(db, student, loc, date) {
   const note = noteFor(db, student.id, date);
   return {
     id: student.id,
     name: student.name,
     visits: visitsFor(db, student.id, loc.id, date),
-    goals: week.goalsOn(db, student.id, date),
+    ...week.goalsAt(db, student.id, date),
     status: note ? note.status : 'none',
     comment: note ? note.comment : null,
     ratings: ratingsToEdit(db, note),
@@ -142,7 +143,8 @@ function slotEnds(ctx, s, date) {
 }
 
 // What a parent sees (DN-5): date, location, visits, ratings in words, comment, who posted, "Edited",
-// and the week's goals as they stood that day, with that day's answers (D-57).
+// and the week's goals as they stood at the end of that day, with that day's answers, plus the ones
+// done or changed earlier that week (D-57).
 function parentNote(db, n) {
   return {
     id: n.id, student_id: n.student_id, student_name: n.student_name, local_date: n.local_date,
@@ -150,7 +152,7 @@ function parentNote(db, n) {
     posted_at: n.posted_at, posted_by_name: n.posted_by_name, edited_at: n.edited_at,
     ratings: savedRatings(db, n.id).map(r => ({ label: r.label, rating: r.rating, word: SCALE[r.rating] })),
     visits: visitsFor(db, n.student_id, n.location_id, n.local_date),
-    goals: week.goalsOn(db, n.student_id, n.local_date),
+    ...week.goalsAt(db, n.student_id, n.local_date),
   };
 }
 

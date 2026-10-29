@@ -37,6 +37,20 @@ function goalsOn(db, studentId, date) {
     .map(g => Object.assign(shape(g), { status: (g.done_on || g.replaced_on) === date ? g.status : 'open', answer: g.answer || null }));
 }
 
+// The week's goals at the end of `date`, for staff and parents (D-57). `goals`: the ones open then
+// (normally exactly 3), with that day's answer; a goal closed on a later day reads as open.
+// `earlier`: the week's goals done or changed on or before `date`, newest close first, each with
+// the day it closed (`closed_on`) and the subject of the goal that took its place.
+function goalsAt(db, studentId, date) {
+  const w = weekOf(db, studentId, date);
+  if (!w) return { goals: [], earlier: [] };
+  const earlier = db.prepare(`SELECT g.*, COALESCE(g.done_on, g.replaced_on) AS closed_on, n.subject AS next_subject
+    FROM week_goals g LEFT JOIN week_goals n ON n.id = g.replaced_by
+    WHERE g.week_id = ? AND COALESCE(g.done_on, g.replaced_on) <= ? ORDER BY closed_on DESC, g.position, g.id`).all(w.id, date)
+    .map(g => Object.assign(shape(g), { closed_on: g.closed_on, replaced_by_label: goals.subjectLabel(g.next_subject) }));
+  return { goals: goalsOn(db, studentId, date).filter(g => g.status === 'open'), earlier };
+}
+
 // The signed-in student's week today. state: 'set' (no 3 goals yet), 'update' (an open goal from
 // an earlier day has no answer today) or 'done'. A goal added today isn't asked about until tomorrow.
 // `done` lists the week's finished goals.
@@ -123,4 +137,4 @@ function history(db, student, now) {
     goals: list, checks };
 }
 
-module.exports = { goalsOn, studentWeek, setWeek, answer, history };
+module.exports = { goalsOn, goalsAt, studentWeek, setWeek, answer, history };

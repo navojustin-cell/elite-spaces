@@ -1916,7 +1916,7 @@ test(['CI-4', 'NF-7'], 'a second scan soon after asks with the shell confirm: th
   assert.equal(visitsOf(t, t.fam.student).length, 1);
 });
 
-test(['DG-3', 'CI-2'], "after a check-in (never a check-out) the Check in screen asks for this week's goals through the notes API: set 3, the daily update, or set for today", async () => {
+test(['DG-3', 'CI-2', 'NF-7'], "after a check-in (never a check-out) the Check in screen asks for this week's goals through the notes API: set 3, the daily update, or set for today; while it asks, its link is the one big button", async () => {
   const t = await setup({ dev: true });
   const three = [['math', 'Math'], ['english', 'English'], ['science', 'Science']].map(([subject, subject_label], i) =>
     ({ id: i + 1, position: i + 1, subject, subject_label, text: 'Finish the practice problems and check every answer.' }));
@@ -1931,13 +1931,20 @@ test(['DG-3', 'CI-2'], "after a check-in (never a check-out) the Check in screen
   };
   const asked = () => tab.requests.filter(r => r.url.startsWith('/api/notes/')).length;
   const link = () => box().find(n => n.tag === 'a');
+  // The scan button, and every big main button on the screen (Oct 28: one at a time).
+  const scan = x => byTag(x.main(), 'button').find(b => b.find(n => n.cls.includes('ci-scan-label')));
+  const bigOnes = x => x.main().findAll(n => n.cls.includes('btn-primary') && n.cls.includes('btn-lg'));
+  const SMALL = ['btn', 'btn-block', 'ci-hideable'], BIG = ['btn', 'btn-primary', 'btn-lg', 'btn-block', 'ci-hideable'];
   assert.equal(asked(), 0, 'not checked in yet: nothing asked');
   assert.equal(words(box()), '');
+  assert.deepEqual(scan(tab).cls, BIG, 'not asked: the scan button is the big one');
 
   // No goals this week yet: set 3, one big button to #/goals.
   assert.match(await simulate(), /^✓ Checked in 1:05 PM/);
   assert.equal(words(box()), 'Set your 3 goals for this week It takes a minute. Your mentors check in on them. Set my 3 goals');
   assert.deepEqual([link().getAttribute('href'), link().cls.includes('btn-primary')], ['#/goals', true]);
+  assert.deepEqual(bigOnes(tab), [link()], 'the goals link is the only big main button');
+  assert.deepEqual(scan(tab).cls, SMALL, 'the scan button steps back, still a 44px block button');
   assert.equal(asked(), 1);
 
   // A check-out asks nothing, and clears the question.
@@ -1945,6 +1952,7 @@ test(['DG-3', 'CI-2'], "after a check-in (never a check-out) the Check in screen
   assert.match(await simulate(), /^✓ Checked out/);
   assert.equal(words(box()), '');
   assert.equal(asked(), 1);
+  assert.deepEqual(scan(tab).cls, BIG, 'the question is gone, so the scan button is big again');
 
   // Checking back in with goals from an earlier day not answered today: the daily update.
   week = Object.assign({}, week, { state: 'update', goals: three.map(g => Object.assign({ asks: true, answer: null }, g)) });
@@ -1952,6 +1960,9 @@ test(['DG-3', 'CI-2'], "after a check-in (never a check-out) the Check in screen
   assert.match(await simulate(), /^✓ Checked in 3:10 PM/);
   assert.equal(words(box()), 'Still working on your goals? Tap Yes, Done or Change for each one. Update my goals');
   assert.equal(link().getAttribute('href'), '#/goals');
+  assert.deepEqual(bigOnes(tab), [link()]);
+  assert.deepEqual([scan(tab).cls, words(scan(tab))], [SMALL, '📷 Scan to check out'], 'smaller, same label');
+  assert.equal(box().findAll(n => n.tag === 'li').length, 0, 'no goal cards on the Check in screen');
 
   // Every goal answered today: no question, just the confirmation and the subjects.
   week = Object.assign({}, week, { state: 'done', goals: three.map(g => Object.assign({ asks: false, answer: 'yes' }, g)) });
@@ -1960,6 +1971,15 @@ test(['DG-3', 'CI-2'], "after a check-in (never a check-out) the Check in screen
   const goals = again.main().find(n => n.cls.includes('ci-goals'));
   assert.equal(words(goals), "✓ You're set for today. This week: Math · English · Science See my goals");
   assert.equal(goals.find(n => n.tag === 'a').getAttribute('href'), '#/goals');
+  assert.deepEqual(bigOnes(again), [scan(again)], 'set for today: the scan button is the big one again');
+  assert.deepEqual(scan(again).cls, BIG);
+
+  // The goals request fails: nothing is shown and the scan button stays big.
+  const failed = shellTab(t, { stub: { 'GET /api/notes/goals/week': () => [500, { error: { code: 'server', message: 'Something went wrong.' } }] } });
+  await failed.open(t.fam.student, '#/checkin');
+  assert.equal(failed.requests.filter(r => r.url === '/api/notes/goals/week').length, 1);
+  assert.equal(words(failed.main().find(n => n.cls.includes('ci-goals'))), '');
+  assert.deepEqual(scan(failed).cls, BIG);
 
   // A screen opened after checking out doesn't ask.
   setClock(t, '15:20');
