@@ -502,8 +502,9 @@
   // more than one thing in that goal. Errors show right under the subject buttons or the text
   // box, and never clear what was typed. `g` is { subject, text }; `changed` runs after each edit.
   // `was` is the goal a Change replaces ({ subject, text }): its words, left as they were, clear when
-  // another subject is picked, so they don't end up under the wrong subject.
-  function goalEditor(base, meta, g, taken, changed = () => {}, was = null) {
+  // another subject is picked, so they don't end up under the wrong subject. `finished` is the text of
+  // the goal a Done closes: it isn't offered as an example, since the next goal must be a new one.
+  function goalEditor(base, meta, g, taken, changed = () => {}, was = null, finished = null) {
     const subjErr = h('p', { class: 'goal-error', id: base + '-subject-err', 'aria-live': 'polite' });
     const textErr = h('p', { class: 'goal-error', id: base + '-text-err', 'aria-live': 'polite' });
     const text = h('textarea', { id: base + '-text', rows: '3', maxlength: String(meta.text_max), 'aria-describedby': base + '-text-err' });
@@ -543,9 +544,10 @@
     // Tapping an example fills the text box, so the student tweaks it instead of typing from scratch.
     function drawExamples() {
       const s = meta.subjects.find(x => x.id === g.subject);
-      examples.replaceChildren(...(s ? [
+      const offer = s ? s.examples.filter(x => x !== finished) : [];
+      examples.replaceChildren(...(offer.length ? [
         h('p', { class: 'goal-label', id: base + '-ex' }, 'Tap an example, then make it yours'),
-        h('div', { class: 'goal-examples', role: 'group', 'aria-labelledby': base + '-ex' }, s.examples.map(x =>
+        h('div', { class: 'goal-examples', role: 'group', 'aria-labelledby': base + '-ex' }, offer.map(x =>
           h('button', { type: 'button', class: 'btn', onclick: () => {
             const typed = text.value.trim();
             if (mine === null && typed && (!examplesAll.has(typed) || (was && typed === was.text))) { mine = text.value; undoSlot.replaceChildren(undo); }
@@ -736,10 +738,13 @@
     function nextGoalForm(g) {
       const f = form;
       const taken = new Map(wk.goals.filter(x => x.id !== g.id).map(x => [x.subject, 'Goal ' + x.position]));
-      const ed = goalEditor('goal-' + g.id, meta, f.draft, taken, undefined, f.answer === 'change' ? { subject: g.subject, text: g.text } : null);
+      const ed = goalEditor('goal-' + g.id, meta, f.draft, taken, undefined, f.answer === 'change' ? { subject: g.subject, text: g.text } : null,
+        f.answer === 'done' ? g.text : null);
       const save = h('button', { type: 'button', class: 'btn btn-primary btn-lg btn-block' }, 'Save new goal');
       save.addEventListener('click', () => App.run(save, async () => {
         if (!f.draft.subject) return ed.show('subject', 'Pick a subject.');
+        // A Done needs a new goal: the finished one word for word is never its own next goal.
+        if (f.answer === 'done' && f.draft.text.trim() === g.text) return ed.show('text', "That's the goal you just finished. Write what you'll do next.");
         const was = wk.state;
         try {
           wk = await send({ goalId: g.id, answer: f.answer, subject: f.draft.subject, text: f.draft.text });

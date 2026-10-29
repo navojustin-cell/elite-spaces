@@ -2326,6 +2326,50 @@ test(['DG-2', 'NF-7'], "in the Change form, the goal's own words count as the st
   assert.deepEqual([byId(view, `goal-${m}-text`).value, byId(view, `goal-${m}-undo`)], [MATH.text, undefined]);
 });
 
+test(['DG-2', 'NF-7'], "the Done form doesn't offer the finished goal as an example, and saving its words shows why under the box, keeping them", async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  const SAT = { subject: 'test_prep', text: 'Do one full timed SAT math section and review every question I missed.' }; // Test prep's only example
+  await setWeek(w, leo, [MATH, ENG, SAT]);
+  const [, e, t] = goalRows(w, leo).map(g => g.id);
+  await nextDay(w, leo, THU);
+  const tab = notesTab(w.t);
+  await tab.signIn(leo);
+  let view = await tab.open('goals');
+  const formOf = id => byId(view, 'goal-card-' + id).find(n => n.cls.includes('goal-form'));
+  const offered = id => { const x = formOf(id).find(n => n.cls.includes('goal-examples')); return x ? x.findAll(n => n.tag === 'button').map(b => b.textContent) : []; };
+  const second = 'Write the full first draft of my essay, from the introduction to the conclusion.';
+  // Done on English: English offers only its other example.
+  await tab.click(buttonIn(byId(view, 'goal-card-' + e), 'Done'));
+  await tab.click(subjectChip(formOf(e), 'English'));
+  assert.deepEqual(offered(e), [second]);
+  // Typing the finished goal anyway: refused under the box, the words stay.
+  type(view, `goal-${e}-text`, ENG.text);
+  await tab.click(buttonIn(formOf(e), 'Save new goal'));
+  assert.equal(errorText(view, `goal-${e}-text-err`), "That's the goal you just finished. Write what you'll do next.");
+  assert.deepEqual([byId(view, `goal-${e}-text`).value, byId(view, `goal-${e}-text`).getAttribute('aria-invalid')], [ENG.text, 'true']);
+  // Under another subject, with spaces around it, it is still the finished goal.
+  await tab.click(subjectChip(formOf(e), 'History'));
+  type(view, `goal-${e}-text`, ' ' + ENG.text + ' ');
+  await tab.click(buttonIn(formOf(e), 'Save new goal'));
+  assert.equal(errorText(view, `goal-${e}-text-err`), "That's the goal you just finished. Write what you'll do next.");
+  assert.deepEqual([goalRows(w, leo).length, checkRows(w, leo)], [3, []]);
+  // A Change still offers both English examples: its own words are the start, not a finished goal.
+  await tab.click(buttonIn(byId(view, 'goal-card-' + e), 'Change'));
+  assert.deepEqual(offered(e), [ENG.text, second]);
+  // Done on Test prep, whose only example is the finished goal: no examples to tap, no label for them.
+  view = await tab.open('goals');
+  await tab.click(buttonIn(byId(view, 'goal-card-' + t), 'Done'));
+  await tab.click(subjectChip(formOf(t), 'Test prep'));
+  assert.deepEqual([offered(t), formOf(t).find(n => n.id === `goal-${t}-ex`)], [[], undefined]);
+  // New words in the same subject save.
+  const fresh = 'Do two full timed SAT reading sections and review every question I missed.';
+  type(view, `goal-${t}-text`, fresh);
+  await tab.click(buttonIn(formOf(t), 'Save new goal'));
+  assert.deepEqual(goalRows(w, leo).filter(g => g.status === 'open').map(g => [g.subject, g.text]),
+    [['math', MATH.text], ['english', ENG.text], ['test_prep', fresh]]);
+});
+
 test(['DG-2'], "the answer that finishes the day ends on Home with \"You're set for today.\", like setting the week; an answer once the day is done stays on My goals", async () => {
   const w = await world();
   const leo = w.fa.students[0];
@@ -2618,6 +2662,11 @@ test(['DG-2'], "the notes seed's second visit day of each week answers Yes, Done
       assert.notEqual(next.text, g.text, `${s.name}: a ${g.status} goal is never replaced by the same words`);
       if (g.status === 'replaced') assert.notEqual(next.subject, g.subject, 'a Change brings another subject');
     }
+    // A goal closed this week doesn't come back that week as a current one (every subject here has words left).
+    for (const ws of weeks(s)) {
+      const texts = rows.filter(g => g.week_start === ws).map(g => g.text);
+      assert.equal(new Set(texts).size, texts.length, `${s.name} ${ws}: no words used twice in a week`);
+    }
     assert.ok(checks.every(c => c[1] < THU) && rows.every(g => g.created_on < THU), 'today is left to the students');
   }
   assert.equal(later.length, 27, "Ava's Oct 7 to 9, Leo's Oct 9 and Sofia's Oct 7 to 11");
@@ -2626,4 +2675,21 @@ test(['DG-2'], "the notes seed's second visit day of each week answers Yes, Done
   w.t.clock.set(at(LA, THU, '09:00'));
   const sofiaWeek = (await w.t.as(w.fa.parent).get('/api/notes/goals/student/' + sofia.id)).body;
   assert.deepEqual(sofiaWeek.current.earlier.map(g => [g.status, g.closed_on]).sort(), [['done', '2026-10-14'], ['replaced', '2026-10-14']]);
+});
+
+test(['DG-2'], "the notes seed never replaces a goal with itself, even once a subject's words have all been used that week", async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students, anh = w.fb.student;
+  // By name Anh, Leo, Sofia: Sofia starts at Test prep and Other, which have two texts each, and
+  // comes every day of last week, so her Other goal runs out of new words and a Done has to skip the old ones.
+  w.visit(anh, w.A, '2026-10-05', { session: null });
+  w.visit(leo, w.A, '2026-10-05', { session: null });
+  for (const d of ['2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11']) w.visit(sofia, w.A, d, { session: null });
+  load('src/modules/notes/seed.js')(w.t.ctx, { NOW: at(LA, THU, '09:00') });
+  const rows = goalRows(w, sofia);
+  const texts = rows.map(g => g.text);
+  assert.ok(new Set(texts).size < texts.length, 'some words come back once their subject has no new ones');
+  const closed = rows.filter(g => g.status !== 'open');
+  assert.ok(closed.length >= 6, JSON.stringify(rows));
+  for (const g of closed) assert.notEqual(rows.find(x => x.id === g.replaced_by).text, g.text, `${g.subject} ${g.done_on || g.replaced_on}`);
 });

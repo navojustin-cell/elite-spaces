@@ -7,7 +7,8 @@
 // anyone who came two days that week shows Earlier this week; at the third and later visit days
 // each open goal in turn Yes, Yes, Done, Yes, Change, ... so staff and parents see a mix. Done and
 // Change bring the next goal: a Change another subject than the old one and the other two open
-// ones; a Done may keep the subject but never the words, so no goal is replaced by itself. At each
+// ones; a Done may keep the subject but never the words, so no goal is replaced by itself, and the
+// next goal takes words not used yet that week while the subject has some left. At each
 // home location where two or more students visited this week, one has no goals this week, so staff
 // see "No goals this week": the last by name of those who came only one day this week (or, when
 // all came two days or more, the last by name), so that example never takes away the only student
@@ -93,12 +94,16 @@ function seedGoals(ctx, now) {
   }
 
   let turn = 0, pick = 0;
-  // The next text in that subject's list (every list has at least 2), never `avoid`: a goal is
-  // never replaced by itself, even when a Done picks the same subject again.
-  const nextText = (subject, avoid) => {
+  // The next text in that subject's list not used yet that week (`used`), so a goal closed this week
+  // doesn't come back as a current one. Once all were used, the first that isn't `avoid` (every list
+  // has at least 2): a goal is never replaced by itself, even when a Done picks the same subject again.
+  const nextText = (subject, used, avoid) => {
     const list = TEXTS.get(subject);
-    const t = list[pick++ % list.length];
-    return t === avoid ? list[pick++ % list.length] : t;
+    for (let n = 0; n < list.length; n++) {
+      const t = list[pick++ % list.length];
+      if (!used.has(t)) return t;
+    }
+    return list.find(t => t !== avoid);
   };
   [...byStudent.values()].forEach((s, k) => {
     for (const [ws, list] of s.weeks) {
@@ -106,10 +111,12 @@ function seedGoals(ctx, now) {
       const first = list[0], at = first.first_in + 5 * 60000;
       const weekId = Number(insWeek.run(first.student_id, first.location_id, ws, at, at).lastInsertRowid);
       tally.weeks++;
+      const used = new Set();
       // Three subjects, starting at a different one for each student.
       const open = [0, 1, 2].map(i => {
         const subject = SUBJECT_IDS[(k * 3 + i) % SUBJECT_IDS.length];
-        const text = nextText(subject);
+        const text = nextText(subject, used);
+        used.add(text);
         const id = Number(insGoal.run(weekId, i + 1, subject, text, first.local_date, at).lastInsertRowid);
         return { id, position: i + 1, subject, text };
       });
@@ -124,7 +131,8 @@ function seedGoals(ctx, now) {
           const others = open.filter(x => x !== g).map(x => x.subject);
           const start = SUBJECT_IDS.indexOf(g.subject) + (answer === 'done' ? 0 : 1);
           const subject = [...Array(SUBJECT_IDS.length).keys()].map(n => SUBJECT_IDS[(start + n) % SUBJECT_IDS.length]).find(x => !others.includes(x));
-          const text = nextText(subject, g.text);
+          const text = nextText(subject, used, g.text);
+          used.add(text);
           const id = Number(insGoal.run(weekId, g.position, subject, text, d.local_date, when).lastInsertRowid);
           close.run(answer === 'done' ? 'done' : 'replaced', answer === 'done' ? d.local_date : null, answer === 'done' ? null : d.local_date, id, g.id);
           open[i] = { id, position: g.position, subject, text };
