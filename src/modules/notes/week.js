@@ -124,7 +124,8 @@ function answer(ctx, user, body) {
 }
 
 // A student's current week for a parent or staff (read-only): every goal of the week with its
-// dates, and every daily answer, newest day first.
+// dates, and every daily answer, newest day first. `current` is the week as of the end of today
+// (goalsAt: the open goals with today's answers, then Earlier this week), for the parent's Home card.
 function history(db, student, now) {
   const loc = home(db, student.id);
   if (!loc) throw notFound('No home location.');
@@ -134,7 +135,7 @@ function history(db, student, now) {
   const checks = w ? db.prepare(`SELECT c.goal_id, c.date, c.answer, c.answered_at FROM goal_checks c JOIN week_goals g ON g.id = c.goal_id
     WHERE g.week_id = ? ORDER BY c.date DESC, g.position, g.id`).all(w.id) : [];
   return { student: { id: student.id, name: student.name }, timezone: loc.timezone, today, week_start: start, week_end: time.addDays(start, 6),
-    goals: list, checks };
+    goals: list, checks, current: goalsAt(db, student.id, today) };
 }
 
 module.exports = { goalsOn, goalsAt, studentWeek, setWeek, answer, history };

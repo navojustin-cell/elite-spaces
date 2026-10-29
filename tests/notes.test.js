@@ -1815,7 +1815,7 @@ test(['DG-2', 'DN-4', 'DN-3'], "a staff note card shows the student's goals this
   assert.deepEqual(order(leo), ['note-head', 'note-goals', 'note-summary']);
 });
 
-test(['DG-2', 'DN-5'], "a parent's note and Home card show the student's goals as of that day above the ratings, and nothing for a student with none", async () => {
+test(['DG-2', 'DN-5'], "a parent's note shows the student's goals as of that day above the ratings, and nothing for a student with none; Home shows each goal once, in This week's goals", async () => {
   const w = await world();
   const [leo, sofia] = w.fa.students;
   await setWeek(w, leo);
@@ -1823,7 +1823,9 @@ test(['DG-2', 'DN-5'], "a parent's note and Home card show the student's goals a
   w.visit(sofia, w.A);
   await nextDay(w, leo, THU);
   await answer(w, leo, { goalId: s, answer: 'change', subject: 'art', text: ART.text });
-  for (const [st, d] of [[leo, TODAY], [sofia, TODAY], [leo, THU]]) assert.equal((await w.save(w.staffA, st, d, { ratings: w.all(3), post: true })).status, 200);
+  for (const [st, d] of [[leo, TODAY], [sofia, TODAY]]) assert.equal((await w.save(w.staffA, st, d, { ratings: w.all(3), post: true })).status, 200);
+  const COMMENT = 'Good start on the new art goal today.';
+  assert.equal((await w.save(w.staffA, leo, THU, { ratings: w.all(3), comment: COMMENT, post: true })).status, 200);
   const tab = notesTab(w.t);
   await tab.signIn(w.fa.parent);
 
@@ -1843,12 +1845,26 @@ test(['DG-2', 'DN-5'], "a parent's note and Home card show the student's goals a
   assert.ok(kids.indexOf(goalsOf(thu)) < kids.findIndex(n => n.tag === 'ul' && n.cls.includes('list')), 'the goals come before the ratings');
   assert.equal(goalsOf(cards.find(a => /Sofia/.test(a.childNodes[0].textContent))), undefined, 'no goals, nothing shown');
 
-  const home = await tab.card('notes-today');
-  const leoLi = home.findAll(n => n.tag === 'li' && n.parentNode.cls.includes('list')).find(li => li.find(n => n.tag === 'strong').textContent === 'Leo Garcia');
-  const grow = leoLi.find(n => n.cls.includes('grow')).childNodes;
-  const idx = grow.findIndex(n => n.cls.includes('note-goals'));
-  assert.ok(idx >= 0 && idx < grow.findIndex(n => n.cls.includes('note-summary')), 'the goals, above the ratings');
-  assert.deepEqual(lists(grow[idx]), lists(goalsOf(thu)), "today's note on Home shows the same 3, then Earlier this week");
+  // Home (owner's call, Oct 29): Today's notes shows the ratings and comment only; the goals are
+  // shown once, in This week's goals: the 3 now, then Earlier this week, as on the note.
+  const rowOf = (box, name) => box.findAll(n => n.tag === 'li' && n.parentNode.cls.includes('list')).find(li => li.find(n => n.tag === 'strong').textContent === name);
+  const today = await tab.card('notes-today');
+  const leoRow = rowOf(today, 'Leo Garcia');
+  const grow = leoRow.find(n => n.cls.includes('grow')).childNodes;
+  assert.deepEqual(grow.map(n => n.tag + '.' + n.cls.join('.')), ['strong.', 'ul.note-summary', 'p.note-comment', 'div.muted.small'], 'name, ratings, comment, Posted by');
+  assert.equal(grow[0].textContent, 'Leo Garcia');
+  assert.equal(grow[2].textContent, COMMENT);
+  assert.match(grow[3].textContent, /^Posted by Chris Ortiz at /);
+  assert.equal(leoRow.find(n => n.cls.includes('note-goals')), undefined, "no goals in Today's notes");
+  for (const g of [MATH, ENG, SCI, ART]) assert.ok(!today.textContent.includes(g.text), "no goal text in Today's notes: " + g.subject);
+  assert.equal(today.find(n => n.textContent === 'Earlier this week'), undefined);
+  const week = await tab.card('notes-week-goals');
+  assert.deepEqual(lists(rowOf(week, 'Leo Garcia')), lists(goalsOf(thu)), "This week's goals: the same 3, then Earlier this week");
+  assert.ok(rowOf(week, 'Leo Garcia').find(n => n.tag === 'p' && n.textContent === 'Earlier this week'));
+  const homeText = today.textContent + week.textContent;
+  for (const g of [MATH, ENG, SCI, ART]) assert.equal(homeText.split(g.text).length - 1, 1, 'each goal once on Home: ' + g.subject);
+  // The posted note on Notes still shows them (above).
+  assert.equal(goalsOf(thu).findAll(n => n.tag === 'li').length, 4);
 });
 
 test(['DG-2', 'NF-7'], 'the daily update before checking in says to check in, with a button to the Check in screen; after checking in the button is gone', async () => {
@@ -2429,6 +2445,64 @@ test(['DG-2', 'DN-5'], "a parent's Home card shows each student's goals this wee
   const none = await tab.open('week-goals', String(sofia.id));
   assert.match(words(none), /Sofia hasn't set this week's goals yet\./);
 });
+test(['DG-2', 'DN-5'], "the parent's Home goals card and Working on now show the week as of the day shown (w.today), as Daily notes does", async () => {
+  const w = await world();
+  const [leo] = w.fa.students;
+  await setWeek(w, leo); // Wed
+  const [m, e, s] = goalRows(w, leo).map(g => g.id);
+  await nextDay(w, leo, THU);
+  await answer(w, leo, { goalId: m, answer: 'yes' }, { goalId: e, answer: 'done', subject: 'history', text: HIST.text }, { goalId: s, answer: 'yes' });
+  await nextDay(w, leo, FRI);
+  await answer(w, leo, { goalId: m, answer: 'yes' }, { goalId: s, answer: 'change', subject: 'art', text: ART.text });
+  const p = w.t.as(w.fa.parent);
+  const tab = notesTab(w.t);
+  await tab.signIn(w.fa.parent);
+  const lists = box => box.findAll(n => n.tag === 'ul').map(ul => [ul.cls.join(' '), ul.findAll(n => n.tag === 'li').map(li => li.textContent)]);
+  const leoOn = async () => (await tab.card('notes-week-goals')).findAll(n => n.tag === 'li' && n.parentNode.cls.includes('list'))
+    .find(li => li.find(n => n.tag === 'strong').textContent === 'Leo Garcia');
+  const nowList = async () => (await tab.open('week-goals', String(leo.id))).findAll(n => n.tag === 'section')[0];
+  const shown = c => [c.goals.map(g => [g.subject_label, g.answer]), c.earlier.map(g => [g.subject_label, g.status, g.closed_on, g.replaced_by_label])];
+  const still = '. Still working on it';
+
+  // The clock set back to Thursday: Science (changed Friday) reads open with Thursday's answer, Art isn't there yet,
+  // and Earlier this week is only Thursday's Done.
+  w.t.clock.set(at(LA, THU, '15:00'));
+  let h = (await p.get('/api/notes/goals/student/' + leo.id)).body;
+  assert.deepEqual(Object.keys(h), ['student', 'timezone', 'today', 'week_start', 'week_end', 'goals', 'checks', 'current']);
+  assert.equal(h.today, THU);
+  assert.equal(h.goals.length, 5, 'goals: still every goal of the week');
+  assert.equal(h.checks.length, 5, 'checks: still every answer of the week');
+  assert.deepEqual(shown(h.current), [[['Math', 'yes'], ['History', null], ['Science', 'yes']], [['English', 'done', THU, 'History']]]);
+  // The same as staff see for that day on Daily notes (goalsAt).
+  const day = (await w.t.as(w.staffA).get('/api/notes/day?date=' + THU)).body.students.find(x => x.id === leo.id);
+  assert.deepEqual(h.current, { goals: day.goals, earlier: day.earlier });
+  const thuGoals = ['Math, ' + MATH.text + still, 'History, ' + HIST.text, 'Science, ' + SCI.text + still];
+  let li = await leoOn();
+  assert.deepEqual(lists(li), [['note-goal-list', thuGoals], ['note-goal-list note-goal-earlier', ['English, ' + ENG.text + '. Done today, → replaced by History']]]);
+  assert.ok(!li.textContent.includes(ART.text));
+  assert.deepEqual(lists(await nowList()), [['note-goal-list', thuGoals]]);
+
+  // Wednesday: the 3 originals, nothing closed, so no Earlier this week.
+  w.t.clock.set(at(LA, TODAY, '15:00'));
+  h = (await p.get('/api/notes/goals/student/' + leo.id)).body;
+  assert.deepEqual(shown(h.current), [[['Math', null], ['English', null], ['Science', null]], []]);
+  li = await leoOn();
+  const wedGoals = ['Math, ' + MATH.text, 'English, ' + ENG.text, 'Science, ' + SCI.text];
+  assert.deepEqual(lists(li), [['note-goal-list', wedGoals]]);
+  assert.equal(li.find(n => n.textContent === 'Earlier this week'), undefined);
+  assert.ok(li.find(n => n.tag === 'a' && n.textContent === 'See updates'));
+  assert.deepEqual(lists(await nowList()), [['note-goal-list', wedGoals]]);
+
+  // Friday: both closes, newest first.
+  w.t.clock.set(at(LA, FRI, '15:00'));
+  h = (await p.get('/api/notes/goals/student/' + leo.id)).body;
+  assert.deepEqual(shown(h.current), [[['Math', 'yes'], ['History', null], ['Art', null]],
+    [['Science', 'replaced', FRI, 'Art'], ['English', 'done', THU, 'History']]]);
+  li = await leoOn();
+  assert.deepEqual(lists(li), [['note-goal-list', ['Math, ' + MATH.text + still, 'History, ' + HIST.text, 'Art, ' + ART.text]],
+    ['note-goal-list note-goal-earlier', ['Science, ' + SCI.text + '. Changed today, → replaced by Art', 'English, ' + ENG.text + '. Done Thu, → replaced by History']]]);
+});
+
 // ---------------------------------------------------------------- the demo seed (docs/v1.1-design.md 5.3)
 
 test(['DG-2'], 'the notes seed writes last week and this week: 3 goals in 3 subjects at the first visit, a mix of daily answers at later visits, and one student with no goals this week', async () => {
@@ -2485,4 +2559,71 @@ test(['DG-2'], 'the notes seed writes last week and this week: 3 goals in 3 subj
   const day = await w.t.as(w.staffA).get('/api/notes/day?date=' + YESTERDAY);
   assert.deepEqual(day.body.goal_counts, { set: 2, none: 1 });
   assert.ok(day.body.students.find(s => s.id === leo.id).goals.every(g => g.answer || g.created_on === YESTERDAY));
+});
+
+test(['DG-2'], "the notes seed's second visit day of each week answers Yes, Done, Change; later days follow the cycle; the no-goals example is per location, preferring a student who came once that week", async () => {
+  const w = await world(); // the seed runs as of Thursday Oct 15: this week is Oct 12-18 (12, 13, 14 before today), last week Oct 5-11
+  const [leo, sofia] = w.fa.students, anh = w.fb.student, noah = w.fc.student;
+  const C = w.t.fx.location({ name: 'Pasadena' });
+  const ava = w.t.fx.user('student', { location: w.B, name: 'Ava Brooks' }), kim = w.t.fx.user('student', { location: C, name: 'Kim Lee' });
+  const plan = new Map([
+    // Irvine: Sofia (last by name) is the only one who came two days this week; Anh and Leo came once.
+    [leo, [w.A, ['2026-10-05', '2026-10-07', '2026-10-09', '2026-10-12']]],
+    [sofia, [w.A, ['2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11', '2026-10-12', '2026-10-14', THU]]],
+    [anh, [w.A, ['2026-10-06', '2026-10-08', YESTERDAY]]],
+    // Arcadia: both came twice this week, so the last by name (Noah) is the example.
+    [noah, [w.B, ['2026-10-12', YESTERDAY]]],
+    [ava, [w.B, ['2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09', '2026-10-12', '2026-10-14']]],
+    // Pasadena: one student this week keeps goals.
+    [kim, [C, ['2026-10-05', '2026-10-06', '2026-10-12']]],
+  ]);
+  // The extra days last week make the seed's two guards do real work: Ava's three later days put a
+  // cycle Change on Leo's goal 1 on Oct 9 while goal 2 still has the next subject, and Kim's Oct 6
+  // Done on Other picks the very words it replaces, so it has to skip them.
+  for (const [s, [loc, days]] of plan) for (const d of days) w.visit(s, loc, d, { session: null });
+  load('src/modules/notes/seed.js')(w.t.ctx, { NOW: at(LA, THU, '09:00') });
+
+  const weeks = s => w.t.db.prepare('SELECT week_start FROM goal_weeks WHERE student_id = ? ORDER BY week_start').all(s.id).map(r => r.week_start);
+  const LAST = '2026-10-05', THIS = '2026-10-12';
+  assert.deepEqual(weeks(leo), [LAST], "Irvine's example: the last by name of those who came once this week");
+  assert.deepEqual(weeks(sofia), [LAST, THIS], 'the only two-day student keeps goals, though last by name');
+  assert.deepEqual(weeks(anh), [LAST, THIS]);
+  assert.deepEqual(weeks(noah), [], "Arcadia's example: everyone came twice, so the last by name");
+  assert.deepEqual(weeks(ava), [LAST, THIS]);
+  assert.deepEqual(weeks(kim), [LAST, THIS], 'a one-student location has nobody without goals');
+
+  const CYCLE = ['yes', 'yes', 'done', 'yes', 'change'];
+  const later = []; // answers on third and later visit days, in the seed's order (by name, week, day, position)
+  for (const s of [anh, ava, kim, leo, noah, sofia]) {
+    const rows = goalRows(w, s), checks = checkRows(w, s);
+    const posOf = id => rows.find(g => g.id === id).position;
+    for (const ws of weeks(s)) {
+      const days = plan.get(s)[1].filter(d => d >= ws && d < (ws === LAST ? THIS : '2026-10-19') && d < THU);
+      const inWeek = rows.filter(g => g.week_start === ws);
+      const byDay = d => checks.filter(c => c[1] === d).sort((a, b) => posOf(a[0]) - posOf(b[0])).map(c => c[2]);
+      days.forEach((d, i) => {
+        if (i === 1) assert.deepEqual(byDay(d), ['yes', 'done', 'change'], `${s.name} ${d}: the second visit day`);
+        if (i >= 2) later.push(...byDay(d));
+        // After every day the 3 open goals are 3 different subjects.
+        const open = inWeek.filter(g => g.created_on <= d && (g.done_on || g.replaced_on || '9999') > d);
+        assert.deepEqual([open.length, new Set(open.map(g => g.subject)).size], [3, 3], `${s.name} ${d}`);
+      });
+      if (days.length >= 2) {
+        assert.ok(inWeek.some(g => g.status === 'done') && inWeek.some(g => g.status === 'replaced'), `${s.name} ${ws}: a Done and a Change`);
+      }
+    }
+    for (const g of rows.filter(x => x.status !== 'open')) {
+      assert.ok(g.replaced_by, 'a closed goal points at its replacement');
+      const next = rows.find(x => x.id === g.replaced_by);
+      assert.notEqual(next.text, g.text, `${s.name}: a ${g.status} goal is never replaced by the same words`);
+      if (g.status === 'replaced') assert.notEqual(next.subject, g.subject, 'a Change brings another subject');
+    }
+    assert.ok(checks.every(c => c[1] < THU) && rows.every(g => g.created_on < THU), 'today is left to the students');
+  }
+  assert.equal(later.length, 27, "Ava's Oct 7 to 9, Leo's Oct 9 and Sofia's Oct 7 to 11");
+  assert.deepEqual(later, later.map((_, i) => CYCLE[i % CYCLE.length]), 'third and later days: Yes, Yes, Done, Yes, Change, ...');
+  // Thursday: Sofia's goals show Wednesday's Done and Change under Earlier this week.
+  w.t.clock.set(at(LA, THU, '09:00'));
+  const sofiaWeek = (await w.t.as(w.fa.parent).get('/api/notes/goals/student/' + sofia.id)).body;
+  assert.deepEqual(sofiaWeek.current.earlier.map(g => [g.status, g.closed_on]).sort(), [['done', '2026-10-14'], ['replaced', '2026-10-14']]);
 });

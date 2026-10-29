@@ -794,14 +794,8 @@
   }
   App.card({ id: 'notes-goals', roles: ['student'], order: 15, render: goalsCard });
 
-  // Parents: each student's goals this week with today's answers, any time (D-57).
-  const todaysAnswers = w => w.goals.filter(g => g.status === 'open')
-    .map(g => Object.assign({}, g, { answer: (w.checks.find(c => c.goal_id === g.id && c.date === w.today) || {}).answer }));
-  // The week's goals done or changed so far, newest first, with the subject that took each one's place.
-  const closedGoals = w => w.goals.filter(g => g.status !== 'open')
-    .map(g => Object.assign({}, g, { closed_on: g.done_on || g.replaced_on,
-      replaced_by_label: (w.goals.find(x => x.id === g.replaced_by) || {}).subject_label }))
-    .sort((a, b) => b.closed_on.localeCompare(a.closed_on) || a.position - b.position);
+  // Parents: each student's goals this week as of today (w.current, from the server), any time (D-57).
+  // This is the one place on Home with the goals; Today's notes shows the ratings and comment only.
   App.card({
     id: 'notes-week-goals', roles: ['parent'], order: 31,
     async render(el) {
@@ -812,8 +806,8 @@
         h('ul', { class: 'list' }, weeks.map(w => h('li', { style: 'align-items:flex-start' },
           h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(w.student.name)),
           h('div', { class: 'grow' }, h('strong', null, w.student.name),
-            w.goals.length ? weekGoals(todaysAnswers(w), closedGoals(w), w.today) : h('div', { class: 'muted small' }, first(w.student.name) + " hasn't set this week's goals yet."),
-            w.goals.length > 0 && h('a', { class: 'btn', style: 'margin-top:.5rem', href: '#/week-goals/' + w.student.id,
+            w.current.goals.length ? weekGoals(w.current.goals, w.current.earlier, w.today) : h('div', { class: 'muted small' }, first(w.student.name) + " hasn't set this week's goals yet."),
+            w.current.goals.length > 0 && h('a', { class: 'btn', style: 'margin-top:.5rem', href: '#/week-goals/' + w.student.id,
               'aria-label': 'See updates for ' + w.student.name }, 'See updates')))))));
     },
   });
@@ -831,7 +825,7 @@
         return;
       }
       const byId = new Map(w.goals.map(g => [g.id, g]));
-      el.append(h('section', { class: 'card', 'aria-labelledby': 'wg-now' }, h('h2', { id: 'wg-now' }, 'Working on now'), goalList(todaysAnswers(w))));
+      el.append(h('section', { class: 'card', 'aria-labelledby': 'wg-now' }, h('h2', { id: 'wg-now' }, 'Working on now'), goalList(w.current.goals)));
       const days = [...new Set(w.checks.map(c => c.date))];
       el.append(h('section', { class: 'card', 'aria-labelledby': 'wg-days' }, h('h2', { id: 'wg-days' }, 'Daily updates'),
         days.length ? days.map(d => h('div', { class: 'note-goals' }, h('h3', { class: 'note-goals-label' }, App.fmtDate(d, { weekday: 'long', month: 'short', day: 'numeric' })),
@@ -866,7 +860,7 @@
               h('div', { class: 'grow' }, h('strong', null, s.name), h('div', { class: 'muted small' }, why)));
           }
           return h('li', { style: 'align-items:flex-start' }, h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(s.name)),
-            h('div', { class: 'grow' }, h('strong', null, s.name), parentGoals(s.name, n.goals, n.earlier, n.local_date), ratingSummary(n.ratings),
+            h('div', { class: 'grow' }, h('strong', null, s.name), ratingSummary(n.ratings),
               n.comment && h('p', { class: 'note-comment' }, n.comment.length > 160 ? n.comment.slice(0, 157) + '…' : n.comment),
               h('div', { class: 'muted small', style: 'margin-top:.4rem' }, 'Posted by ' + n.posted_by_name + ' at ' + App.fmtTime(n.posted_at, n.timezone) +
                 (n.edited_at ? ' · Edited' : ''))));

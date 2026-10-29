@@ -3,9 +3,15 @@
 // Goals (D-57), last week and this week, only on days the student visited their home location
 // before today (today's are the students' to answer): at the first visit of each week the student
 // sets 3 goals in 3 different subjects, and at each later visit that week answers each open goal
-// in turn Yes, Yes, Done, Yes, Change, ... so staff and parents see a mix. Done and Change bring
-// the next goal (another subject than the other two open ones). When two or more students visited
-// this week, the last of them by name has no goals this week, so staff see "No goals this week".
+// by position: at their second visit day of the week goal 1 Yes, goal 2 Done, goal 3 Change, so
+// anyone who came two days that week shows Earlier this week; at the third and later visit days
+// each open goal in turn Yes, Yes, Done, Yes, Change, ... so staff and parents see a mix. Done and
+// Change bring the next goal: a Change another subject than the old one and the other two open
+// ones; a Done may keep the subject but never the words, so no goal is replaced by itself. At each
+// home location where two or more students visited this week, one has no goals this week, so staff
+// see "No goals this week": the last by name of those who came only one day this week (or, when
+// all came two days or more, the last by name), so that example never takes away the only student
+// who can show Earlier this week.
 // Every text is written to the high-school standard: specific and finishable.
 // Notes: a posted note for most past visit days, so parents have a history to
 // browse; some comments answer the day's goals (D-51). On each location's most
@@ -46,6 +52,7 @@ const MORE = {
 const TEXTS = new Map(goals.SUBJECTS.map(s => [s.id, [...s.examples, ...MORE[s.id]]]));
 const SUBJECT_IDS = goals.SUBJECTS.map(s => s.id);
 const CYCLE = ['yes', 'yes', 'done', 'yes', 'change'];
+const SECOND_DAY = ['yes', 'done', 'change'];
 
 // Goals for last week and this week. Returns a tally for the log line.
 function seedGoals(ctx, now) {
@@ -66,13 +73,24 @@ function seedGoals(ctx, now) {
     const today = time.localDate({ timezone: d.timezone }, now), thisWeek = time.weekStart(today);
     const ws = time.weekStart(d.local_date);
     if (d.local_date >= today || (ws !== thisWeek && ws !== time.addDays(thisWeek, -7))) continue;
-    if (!byStudent.has(d.student_id)) byStudent.set(d.student_id, { name: d.name, thisWeek, weeks: new Map() });
+    if (!byStudent.has(d.student_id)) byStudent.set(d.student_id, { id: d.student_id, name: d.name, location_id: d.location_id, thisWeek, weeks: new Map() });
     const s = byStudent.get(d.student_id);
     if (!s.weeks.has(ws)) s.weeks.set(ws, []);
     s.weeks.get(ws).push(d);
   }
-  const thisWeekers = [...byStudent.values()].filter(s => s.weeks.has(s.thisWeek)).map(s => s.name).sort();
-  const noGoals = thisWeekers.length >= 2 ? thisWeekers[thisWeekers.length - 1] : null;
+  // The "no goals this week" student, one per home location (see the top of this file).
+  const noGoals = new Set(), byLoc = new Map();
+  for (const s of byStudent.values()) {
+    if (!s.weeks.has(s.thisWeek)) continue;
+    if (!byLoc.has(s.location_id)) byLoc.set(s.location_id, []);
+    byLoc.get(s.location_id).push(s);
+  }
+  const lastByName = list => list.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.id - b.id))[list.length - 1];
+  for (const list of byLoc.values()) {
+    if (list.length < 2) continue;
+    const once = list.filter(s => s.weeks.get(s.thisWeek).length === 1);
+    noGoals.add(lastByName(once.length ? once : list).id);
+  }
 
   let turn = 0, pick = 0;
   // The next text in that subject's list (every list has at least 2), never `avoid`: a goal is
@@ -84,7 +102,7 @@ function seedGoals(ctx, now) {
   };
   [...byStudent.values()].forEach((s, k) => {
     for (const [ws, list] of s.weeks) {
-      if (ws === s.thisWeek && s.name === noGoals) continue;
+      if (ws === s.thisWeek && noGoals.has(s.id)) continue;
       const first = list[0], at = first.first_in + 5 * 60000;
       const weekId = Number(insWeek.run(first.student_id, first.location_id, ws, at, at).lastInsertRowid);
       tally.weeks++;
@@ -95,10 +113,11 @@ function seedGoals(ctx, now) {
         const id = Number(insGoal.run(weekId, i + 1, subject, text, first.local_date, at).lastInsertRowid);
         return { id, position: i + 1, subject, text };
       });
-      for (const d of list.slice(1)) {
+      list.slice(1).forEach((d, day) => {
         const when = d.first_in + 4 * 60000;
         open.forEach((g, i) => {
-          const answer = CYCLE[turn++ % CYCLE.length];
+          // The second visit day answers Yes, Done, Change by position; later days follow the cycle.
+          const answer = day === 0 ? SECOND_DAY[i] : CYCLE[turn++ % CYCLE.length];
           tally[answer]++;
           insCheck.run(g.id, d.local_date, answer, when);
           if (answer === 'yes') return;
@@ -111,7 +130,7 @@ function seedGoals(ctx, now) {
           open[i] = { id, position: g.position, subject, text };
         });
         touch.run(when, weekId);
-      }
+      });
     }
   });
   return tally;
