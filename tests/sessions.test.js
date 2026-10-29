@@ -139,7 +139,7 @@ test(['SC-2'], 'counts are per schedule from whole-schedule rows, paused ones ap
   assert.equal(r.status, 200);
   const x = r.body.sessions.find(y => y.id === s.id);
   assert.deepEqual([x.capacity, x.enrolled, x.paused, x.waiting, x.seats_left, x.days_per_week], [3, 2, 1, 1, 1, 2]);
-  // An overfull schedule (a v1.1 migration raise, say) shows no seats left, never a negative.
+  // An overfull schedule (seats set below the enrolled count by hand, say) shows no seats left, never a negative.
   const full = w.t.fx.session(w.a, { name: 'Full', weekdays: '2', capacity: 1 });
   w.t.fx.enroll(kids[0], full);
   w.t.fx.enroll(kids[1], full);
@@ -539,8 +539,9 @@ test(['SC-4'], 'D-45: a schedule\'s days are fixed once anyone is enrolled or wa
   w.t.fx.enroll(w.t.fx.family(w.a).student, s, 0, { status: 'dropped' });
   w.t.fx.waitlist(w.t.fx.family(w.a).student, s, { status: 'removed' });
   assert.equal((await put({ weekdays: [1, 3, 5] })).status, 200);
-  // One family waiting fixes the days.
-  const waiter = w.t.fx.waitlist(w.t.fx.family(w.a).student, s);
+  // One family waiting fixes the days. (Its membership is inactive, so the seat raise below
+  // can't promote it when the enrollment module is loaded too: it stays a waiting spot.)
+  const waiter = w.t.fx.waitlist(w.t.fx.family(w.a, { status: 'inactive' }).student, s);
   await locked([2, 4]);
   assert.equal(row(w.t, s.id).weekdays, '1,3,5');
   assert.equal((await w.t.as(w.staffA).get('/api/sessions')).body.sessions[0].days_locked, true);

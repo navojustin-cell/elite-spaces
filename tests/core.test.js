@@ -924,7 +924,7 @@ test(['CORE'], 'Inbox links work for every ref type modules send, whichever regi
   const App = tab.App;
   const types = { visit: 'hours', closure: 'schedule', session: 'schedule', enrollment: n => 'schedule/' + n.ref_id,
     enrollment_request: 'schedule', membership: 'family', announcement: n => 'news/' + n.ref_id,
-    daily_note: n => 'notes/note/' + n.ref_id, user: 'family', location: 'family' };
+    daily_note: n => 'notes/note/' + n.ref_id, user: 'family', location: 'family', missed_day: n => 'hours/missed/' + n.ref_id };
   for (const [type, route] of Object.entries(types)) App.inboxLink(type, route);
   for (const id of ['hours', 'schedule', 'family', 'news', 'notes']) App.register({ id, title: id, roles: ['parent'], render(el) { el.append(id); } });
   Object.keys(types).forEach((type, i) => notify.send(t.ctx, [fam.parent.id], { kind: type, title: 'About ' + type, refType: type, refId: i + 1 }));
@@ -934,6 +934,7 @@ test(['CORE'], 'Inbox links work for every ref type modules send, whichever regi
   assert.deepEqual(Object.fromEntries(inboxItems(tab).map(i => [i.text.replace(/^New About /, ''), i.href])), {
     visit: '#/hours', closure: '#/schedule', session: '#/schedule', enrollment: '#/schedule/4', enrollment_request: '#/schedule',
     membership: '#/family', announcement: '#/news/7', daily_note: '#/notes/note/8', user: '#/family', location: '#/family',
+    missed_day: '#/hours/missed/11',
   });
 });
 

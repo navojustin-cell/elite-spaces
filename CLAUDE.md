@@ -51,7 +51,7 @@ with every module loaded, including in `node tests/run.js integration`.
 
 | Path | Owner |
 |---|---|
-| `schema/000_core.sql`, `schema/005_push.sql`, `src/{app,auth,db,clock,time,notify,push,audit,errors}.js`, `server.js`, `public/sw.js`, `render.yaml`, `src/modules/index.js`, `public/js/app.js`, `public/css/app.css`, `public/index.html`, `tests/{lib,run,mutate,coverage}.js`, `tests/integration.test.js`, `tests/mutations/{core,integration}.js`, `scripts/seed.js`, `src/migrate-v1.1.js`, `scripts/migrate-v1.1.js` | **foundation**: shared, change only when integrating |
+| `schema/000_core.sql`, `schema/005_push.sql`, `src/{app,auth,db,clock,time,notify,push,audit,errors}.js`, `server.js`, `public/sw.js`, `render.yaml`, `src/modules/index.js`, `public/js/app.js`, `public/css/app.css`, `public/index.html`, `tests/{lib,run,mutate,coverage}.js`, `tests/integration.test.js`, `tests/mutations/{core,integration}.js`, `scripts/seed.js` | **foundation**: shared, change only when integrating |
 | `src/modules/<m>/` (routes, services, jobs, optional `seed.js`) | module `<m>` |
 | `schema/NNN_<m>.sql` (new tables and indexes only, never `ALTER TABLE`: D-55) | module `<m>` |
 | `public/js/views/<m>.js` | module `<m>` |

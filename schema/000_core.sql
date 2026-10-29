@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 -- Enrollment in one schedule for the rest of its period (EN-1).
 -- source keeps 'request' so v1 rows stay valid; v1.1 writes only 'parent',
--- 'waitlist' and 'staff' (the v1.1 migration uses 'staff').
+-- 'waitlist' and 'staff'.
 CREATE TABLE IF NOT EXISTS enrollments (
   id            INTEGER PRIMARY KEY,
   student_id    INTEGER NOT NULL REFERENCES users(id),

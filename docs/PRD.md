@@ -176,7 +176,9 @@ Two flows carry most of v1: enrolling in a session, and a student's visit on the
 
 Enrollment
 
-![Enrollment flow](enrollment-flow.png)
+![Enrollment flow (v1 only)](enrollment-flow.png)
+
+> **v1 only.** This picture is the v1 flow (student requests, per-day sessions). v1.1 replaced it with fixed schedules: only a parent enrolls, in one whole schedule per period, with the same membership, weekly-limit and seat checks (docs/decisions.md D-41..D-48, docs/v1.1-design.md).
 
 enrollment flow · 2 entry points, 3 checks
 

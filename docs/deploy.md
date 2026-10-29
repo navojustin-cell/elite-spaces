@@ -65,3 +65,11 @@ Do **not** add `ELITE_DEV`. Dev mode (one-tap demo sign-in, clock control) must 
 ## Good to know
 - Everyone is signed out when the service restarts or redeploys (sign-ins are kept in memory). They just sign in again.
 - The database is one file on the disk (`/var/data/elite-spaces.db`). Render's disk snapshots are its backup.
+
+## Upgrading from v1 to v1.1
+v1.1 (fixed schedules) does not convert a v1 database: v1 had no real families, so nothing migrates its per-day
+enrollments (MIG-1 and D-54 were retired on Oct 28, 2026). A v1 database must be reseeded instead:
+- **Locally:** `npm run seed` (it rebuilds `data/elite-spaces.db` from scratch).
+- **On Render:** the demo service (free plan, no disk, `ELITE_SEED_DEMO=1`) starts a fresh demo database on every
+  deploy, so deploying v1.1 is the reseed. A service with a disk keeps its file across deploys: delete
+  `/var/data/elite-spaces.db` (Shell tab) before the v1.1 deploy so it starts empty and the demo seed runs again.

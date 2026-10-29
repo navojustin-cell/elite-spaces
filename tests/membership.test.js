@@ -850,7 +850,7 @@ test(['MB-1', 'MB-2'], 'staff can\'t lower the weekly limit below the days a wee
   t.fx.enroll(student, t.fx.session(loc, { term: spring, name: 'Spring TTh', weekdays: '2,4' }));
   const mwf = t.fx.enroll(student, t.fx.session(loc, { term: summer, name: 'Summer MWF', weekdays: '1,3,5' }));
   // Nothing else holds days against the limit: a dropped or paused schedule, one in a term that has ended,
-  // one that was cancelled, or a live v1 per-day row (the migration moves those; D-54).
+  // one that was cancelled, or a live v1 per-day row (v1 history only; D-42).
   t.fx.enroll(student, t.fx.session(loc, { term: past, name: 'Summer Lab', weekdays: '1,2,3,4,5' }));
   t.fx.enroll(student, t.fx.session(loc, { term: fall, name: 'Fall Paused', weekdays: '1,2,3,4,5' }), 0, { status: 'paused' });
   const gone = t.fx.session(loc, { term: fall, name: 'Fall Cancelled', weekdays: '1,2,3,4,5' });

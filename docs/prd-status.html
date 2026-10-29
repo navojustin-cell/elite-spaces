@@ -1,4 +1,4 @@
-<title>ELITE Spaces v1 Build Status</title>
+<title>ELITE Spaces Build Status</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@500&display=swap">
@@ -141,15 +141,15 @@ footer { color: var(--muted); font-size: .86rem; }
 <div class="wrap">
   <header>
     <div class="eyebrow">ELITE Spaces · Build status against the PRD</div>
-    <h1>ELITE Spaces v1: what's built and what's left</h1>
-    <p class="lede">Measured against the ELITE Spaces App PRD (v1, Oct 6, 2026). Every requirement in the PRD is built into a working prototype that runs end to end with demo locations, families and staff.</p>
-    <div class="meta"><span>Status as of Wed, Oct 14, 2026, evening</span><span>Prototype runs locally; not yet hosted for a pilot</span></div>
+    <h1>ELITE Spaces v1.1: what's built and what's left</h1>
+    <p class="lede">Measured against the ELITE Spaces App PRD (v1, Oct 6, 2026) and Stephen's answers to its open questions (Oct 28, 2026), which made it v1.1: fixed schedules, no location check, daily goals, ending an emergency alert early, and a notice when a scheduled day is missed. Every requirement is built into a working prototype that runs end to end with demo locations, families and staff.</p>
+    <div class="meta"><span>Status as of Wed, Oct 28, 2026</span><span>v1.1 runs locally; the hosted demo still runs v1 until it is redeployed</span></div>
   </header>
 
   <div class="strip" aria-label="Summary">
-    <div class="tile done"><span class="n">44 / 44</span><span class="k">PRD requirements built</span><span class="s">All 7 modules plus users and roles, each with automated tests</span></div>
-    <div class="tile today"><span class="n">5 / 5</span><span class="k">Today's fixes done</span><span class="s">Found during hands-on walkthroughs and re-checked in a browser</span></div>
-    <div class="tile decide"><span class="n">15</span><span class="k">Decisions for ELITE</span><span class="s">9 open PRD questions answered with defaults, plus 6 ideas beyond the PRD</span></div>
+    <div class="tile done"><span class="n">50 / 50</span><span class="k">Requirements built</span><span class="s">All 7 modules, users and roles, and the v1.1 additions, each with automated tests</span></div>
+    <div class="tile today"><span class="n">5 / 5</span><span class="k">v1.1 changes built</span><span class="s">From Stephen's answers on Oct 28, listed below</span></div>
+    <div class="tile decide"><span class="n">15 / 15</span><span class="k">Questions answered</span><span class="s">Stephen's answers, Oct 28: 2 ideas added for the pilot, 2 later, 2 not needed</span></div>
     <div class="tile later"><span class="n">Oct 21</span><span class="k">Testable by staff</span><span class="s">Secure web address, real phone notifications, then an internal test at one location</span></div>
   </div>
 
@@ -163,8 +163,8 @@ footer { color: var(--muted); font-size: .86rem; }
         <summary><span class="title">1. Check-in and check-out</span><span class="count">7 of 7</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
         <ul class="reqs">
           <li><span class="id">CI-1</span><span>Entrance QR code per location that changes every day at a set time; yesterday's code is refused. Staff get a full-screen "today's code" display.</span></li>
-          <li><span class="id">CI-2</span><span>Students scan with their own phone; scans from outside the building's radius are refused.</span></li>
-          <li><span class="id">CI-3</span><span>Each check-in is tied to the student's enrolled session; no session now means a clear message and no check-in.</span></li>
+          <li><span class="id">CI-2</span><span>Students scan with their own phone. A scan of today's code at the location counts as being there: the app never asks for the phone's location (v1.1).</span></li>
+          <li><span class="id">CI-3</span><span>Each check-in is tied to the student's schedule for that date, moved and added dates included; no date now means a clear message and no check-in.</span></li>
           <li><span class="id">CI-4</span><span>The same code checks them out; a quick second scan asks before acting.</span></li>
           <li><span class="id">CI-5</span><span>Automatic check-out at session end or closing time, whichever comes first, flagged for staff review.</span></li>
           <li><span class="id">CI-6</span><span>Parents are notified at every check-in and check-out, with automatic ones labeled.</span></li>
@@ -172,64 +172,76 @@ footer { color: var(--muted); font-size: .86rem; }
         </ul>
       </details>
       <details>
-        <summary><span class="title">2. Sessions and scheduling</span><span class="count">4 of 4</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <summary><span class="title">2. Schedules and periods</span><span class="count">5 of 5</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
         <ul class="reqs">
-          <li><span class="id">SC-1</span><span>Directors create 2–3 hour study blocks on set days and times.</span></li>
-          <li><span class="id">SC-2</span><span>Capacity per session; no seat assignment.</span></li>
-          <li><span class="id">SC-3</span><span>Terms and holiday closures; closures cancel those days and notify enrolled families.</span></li>
-          <li><span class="id">SC-4</span><span>Editing or cancelling a session notifies enrolled families automatically.</span></li>
+          <li><span class="id">SC-1</span><span>Directors publish fixed schedules (for example, Mornings MWF 9:00–12:00) for a period: a month or a semester.</span></li>
+          <li><span class="id">SC-2</span><span>Seats per date; no seat assignment.</span></li>
+          <li><span class="id">SC-3</span><span>Periods and holiday closures. Periods at one location don't overlap; a closure cancels that date for every schedule and notifies enrolled families.</span></li>
+          <li><span class="id">SC-4</span><span>Editing or cancelling a schedule notifies enrolled families automatically. Once families are enrolled, its days are fixed.</span></li>
+          <li><span class="id">SC-5</span><span>Directors skip, add or move one date of one schedule; families are told, and check-in, the schedule and attendance follow the change (v1.1).</span></li>
         </ul>
       </details>
       <details>
-        <summary><span class="title">3. Enrollment and waitlists</span><span class="count">7 of 7</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <summary><span class="title">3. Enrollment and waitlists</span><span class="count">7 of 7, 1 retired</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
         <ul class="reqs">
-          <li><span class="id">EN-1</span><span>Recurring weekly enrollment for the rest of the term.</span></li>
-          <li><span class="id">EN-2</span><span>Parents enroll their students directly.</span></li>
-          <li><span class="id">EN-3</span><span>Students request a session; a parent approves or declines and the student is told.</span></li>
-          <li><span class="id">EN-4</span><span>Blocked when the membership is inactive, expired, or at its weekly cap.</span></li>
-          <li><span class="id">EN-5</span><span>Waitlist with automatic enrollment of the first eligible family when a seat opens.</span></li>
+          <li><span class="id">EN-1</span><span>A parent enrolls a student in one fixed schedule for its whole period; the student attends every listed date.</span></li>
+          <li><span class="id">EN-2</span><span>Only parents enroll, join a waitlist, switch or drop.</span></li>
+          <li><span class="id">EN-3</span><span>Retired in v1.1: students no longer request sessions; a parent picks the schedule.</span></li>
+          <li><span class="id">EN-4</span><span>Blocked when the membership is inactive or not valid on the schedule's first date, or when the schedule meets more days a week than the weekly limit.</span></li>
+          <li><span class="id">EN-5</span><span>A waitlist per schedule, with automatic enrollment of the first eligible student when a seat opens.</span></li>
           <li><span class="id">EN-6</span><span>Parents can drop anytime, which frees the seat for the waitlist.</span></li>
-          <li><span class="id">EN-7</span><span>No penalties; missed sessions simply show as absent.</span></li>
+          <li><span class="id">EN-7</span><span>No penalties; a missed date simply shows as absent (closed, skipped and moved-away dates never do).</span></li>
+          <li><span class="id">EN-8</span><span>One schedule per period: enrolling in (or being moved into) another one in the same period switches, and the old seat goes to its waitlist (v1.1).</span></li>
         </ul>
       </details>
       <details>
         <summary><span class="title">4. Membership status</span><span class="count">5 of 5</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
         <ul class="reqs">
-          <li><span class="id">MB-1</span><span>Status, weekly session cap, start date and expiration date per student.</span></li>
+          <li><span class="id">MB-1</span><span>Status, weekly limit in days a week, start date and expiration date per student.</span></li>
           <li><span class="id">MB-2</span><span>Staff enter and update memberships by hand; no payment data is stored.</span></li>
           <li><span class="id">MB-3</span><span>Parents and students see status, cap and expiration.</span></li>
           <li><span class="id">MB-4</span><span>Reminders 14 and 3 days before expiration.</span></li>
-          <li><span class="id">MB-5</span><span>On expiration, enrollments pause rather than disappear, and come back on renewal.</span></li>
+          <li><span class="id">MB-5</span><span>On expiration, schedules pause rather than disappear, and come back on renewal if the seat is free and the days fit the limit.</span></li>
         </ul>
       </details>
       <details>
-        <summary><span class="title">5. Announcements and emergency alerts</span><span class="count">6 of 6</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <summary><span class="title">5. Announcements and emergency alerts</span><span class="count">7 of 7</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
         <ul class="reqs">
           <li><span class="id">AN-1</span><span>Directors post to their location: events, workshops, holidays, session offerings, news.</span></li>
           <li><span class="id">AN-2</span><span>HQ posts to all locations or a chosen set.</span></li>
           <li><span class="id">AN-3</span><span>Notifications plus an in-app feed; posts can be scheduled ahead.</span></li>
-          <li><span class="id">AN-4</span><span>Audience: all families, parents only, students only, or one session's families.</span></li>
+          <li><span class="id">AN-4</span><span>Audience: all families, parents only, students only, or one schedule's families.</span></li>
           <li><span class="id">AN-5</span><span>Emergency alerts: visually distinct, cannot be muted, reach everyone at the location.</span></li>
           <li><span class="id">AN-6</span><span>Senders see delivered and read counts.</span></li>
+          <li><span class="id">AN-7</span><span>Directors (own location) and HQ end an emergency alert early: it stops being pinned, shows Ended, and everyone it reached gets an all-clear (v1.1).</span></li>
         </ul>
       </details>
       <details>
         <summary><span class="title">6. Daily notes</span><span class="count">5 of 5</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
         <ul class="reqs">
           <li><span class="id">DN-1</span><span>A short note for each student who attended that day.</span></li>
-          <li><span class="id">DN-2</span><span>The same four-item checklist at every location on a 3-point scale; HQ can edit the items.</span></li>
-          <li><span class="id">DN-3</span><span>Optional comment.</span></li>
+          <li><span class="id">DN-2</span><span>The same four-item checklist at every location on a 3-point scale; HQ can edit the items. The note shows the student's goals for the day.</span></li>
+          <li><span class="id">DN-3</span><span>Optional comment, where staff also reply to the day's goals.</span></li>
           <li><span class="id">DN-4</span><span>Written straight from the day's attendance list, ratings blank until set.</span></li>
-          <li><span class="id">DN-5</span><span>Parents are notified and can browse past notes by date; students don't see notes in v1.</span></li>
+          <li><span class="id">DN-5</span><span>Parents are notified and can browse past notes by date, each with that day's goals; students don't see notes.</span></li>
         </ul>
       </details>
       <details>
-        <summary><span class="title">7. Attendance and hours export</span><span class="count">4 of 4</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <summary><span class="title">Daily goals (v1.1)</span><span class="count">3 of 3</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
+        <ul class="reqs">
+          <li><span class="id">DG-1</span><span>After checking in, a student sets up to 3 goals for the day (a subject plus a sentence or two, with examples to start from) and can edit them that day.</span></li>
+          <li><span class="id">DG-2</span><span>Goals are optional: a student can skip a day. Staff see set, skipped or not answered for each student; parents see goals only in posted notes.</span></li>
+          <li><span class="id">DG-3</span><span>Every check-in asks for the day's goals until the day is answered, and the student Home card offers the same.</span></li>
+        </ul>
+      </details>
+      <details>
+        <summary><span class="title">7. Attendance and hours export</span><span class="count">5 of 5</span><span class="chip done">Built and tested</span><span class="caret" aria-hidden="true">›</span></summary>
         <ul class="reqs">
           <li><span class="id">AT-1</span><span>Every visit records in, out, total time, session and how check-out happened.</span></li>
           <li><span class="id">AT-2</span><span>Parents view history by week, month or term.</span></li>
           <li><span class="id">AT-3</span><span>Parents export an attendance and hours log as PDF or CSV for any date range.</span></li>
-          <li><span class="id">AT-4</span><span>Directors and HQ view and export reports by location, session and date range.</span></li>
+          <li><span class="id">AT-4</span><span>Directors and HQ view and export reports by location, schedule and date range.</span></li>
+          <li><span class="id">AT-5</span><span>When a scheduled day passes with no check-in at all, each parent gets one notice 30 minutes after it ends (v1.1).</span></li>
         </ul>
       </details>
       <details>
@@ -259,7 +271,7 @@ footer { color: var(--muted); font-size: .86rem; }
           <tr><td>No double-booking when two families take the last seat at once</td><td><span class="chip done">Built and tested</span></td><td>Tested with simultaneous requests.</td></tr>
           <tr><td>Each location on its own time zone</td><td><span class="chip done">Built and tested</span></td><td>Demo includes a Toronto location alongside California.</td></tr>
           <tr><td>Families see only their own data; staff only their location</td><td><span class="chip done">Built and tested</span></td><td>Checked on every screen's data.</td></tr>
-          <tr><td>Location checked only at the moment of a scan, never stored</td><td><span class="chip done">Built and tested</span></td><td>Coordinates are discarded after the radius check.</td></tr>
+          <tr><td>The phone's location is never asked for, read or stored</td><td><span class="chip done">Built and tested</span></td><td>v1.1 dropped the building radius (Stephen, S-5): a scan of today's code counts as being there.</td></tr>
           <tr><td>All staff edits logged</td><td><span class="chip done">Built and tested</span></td><td>Manual check-ins, membership changes and corrections.</td></tr>
           <tr><td>Mobile-first, installable web app; desktop layout for staff</td><td><span class="chip done">Built</span></td><td>Walked through as every role on phone and desktop sizes.</td></tr>
           <tr><td>WCAG 2.1 AA</td><td><span class="chip today">Mostly done</span></td><td>Labels, contrast and target sizes in place; a few keyboard-focus refinements remain.</td></tr>
@@ -273,22 +285,23 @@ footer { color: var(--muted); font-size: .86rem; }
 
   <section>
     <div class="section-head">
-      <h2>Fixed today</h2>
-      <p class="lede">Found by walking through the app as each role. Each one was re-checked in a real browser before it counted.</p>
+      <h2>New in v1.1 (Oct 28)</h2>
+      <p class="lede">Built from Stephen's answers to the open questions. Every one has automated tests across the modules it touches.</p>
     </div>
     <div class="list"><ul>
-      <li><span class="what">Invites can't claim an email reserved by another family's open invite</span><span class="chip done">Fixed and checked</span></li>
-      <li><span class="what">A guardian invite can't go to someone already in the family</span><span class="chip done">Fixed and checked</span></li>
-      <li><span class="what">"I have read this" on an emergency alert marks exactly that alert, and the unread count updates right away</span><span class="chip done">Fixed and checked</span></li>
-      <li><span class="what">Confirming an automatic check-out time keeps it recorded as automatic</span><span class="chip done">Fixed and checked</span></li>
-      <li><span class="what">HQ all-locations report names the location on every row and heading</span><span class="chip done">Fixed and checked</span></li>
+      <li><span class="what">Fixed schedules: a director publishes "Mornings MWF" for a month or a semester, a parent enrolls a student in one whole schedule per period, and the director can skip, add or move a single date</span><span class="chip done">Built and tested</span><span class="why">Students no longer request sessions, and the weekly limit is now days a week.</span></li>
+      <li><span class="what">No location check: a scan of today's code at the location counts as being there</span><span class="chip done">Built and tested</span></li>
+      <li><span class="what">Daily goals: after each check-in a student sets up to 3 goals or skips the day; staff see them on Daily notes and parents in the posted note</span><span class="chip done">Built and tested</span></li>
+      <li><span class="what">End an emergency alert early: it unpins, shows Ended, and everyone it reached gets an all-clear</span><span class="chip done">Built and tested</span></li>
+      <li><span class="what">Missed-day notice: a scheduled day with no check-in at all tells each parent once</span><span class="chip done">Built and tested</span></li>
+      <li><span class="what">Not built, as Stephen asked: a combined parent feed and more notification settings (later), a call button and the edit log in exports (not needed)</span><span class="chip later">Not in v1.1</span></li>
     </ul></div>
   </section>
 
   <section id="decisions">
     <div class="section-head">
       <h2>Decisions for ELITE</h2>
-      <p class="lede">Pick an answer for each one. Answers save for everyone who opens this page, and the list below turns them into next steps.</p>
+      <p class="lede">Stephen answered these on Oct 28 (the build's docs/decisions.md, S-1 to S-15), and v1.1 builds them. Answers saved here stay for everyone who opens this page, and the list below turns them into next steps.</p>
     </div>
     <div class="next" id="next" aria-live="polite">
       <div class="next-head"><h3>What the answers add up to</h3><span class="progress" id="progress">0 of 15 answered</span></div>
@@ -330,15 +343,15 @@ footer { color: var(--muted); font-size: .86rem; }
     </div>
     <div class="proof">
       <dl>
-        <dt>364 automated tests</dt><dd>Cover every PRD requirement, each tagged with its PRD number; all pass.</dd>
-        <dt>843 deliberate breaks</dt><dd>The code was broken on purpose 843 different ways to prove the tests notice; every one was caught.</dd>
+        <dt>503 automated tests</dt><dd>Cover every requirement, each tagged with its number, plus cross-module flows for every v1.1 change; all pass.</dd>
+        <dt>1,403 deliberate breaks</dt><dd>The code was broken on purpose 1,403 different ways to prove the tests notice; every one was caught.</dd>
         <dt>Hands-on walkthroughs and a full sweep</dt><dd>Reviewers used the app as student, parent, staff, director and HQ on phone and desktop sizes, then a 9-reviewer sweep re-checked everything, including privacy. More than 80 issues found and fixed; about 35 minor ones remain on the polish list.</dd>
         <dt>Independent reviewers</dt><dd>Each part was checked by a reviewer who didn't build it, against the PRD and a leading childcare app as the quality bar.</dd>
       </dl>
     </div>
   </section>
 
-  <footer>Source: ELITE Spaces App PRD (v1), Oct 6, 2026. Prototype built Oct 13–14, 2026.</footer>
+  <footer>Source: ELITE Spaces App PRD (v1), Oct 6, 2026, and Stephen's answers, Oct 28, 2026. Prototype built Oct 13–14, 2026; v1.1 built Oct 28, 2026.</footer>
 </div>
 
 <script>

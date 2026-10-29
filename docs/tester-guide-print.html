@@ -40,6 +40,7 @@ pre.template { white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5pt/1.7 
 <main>
 <h1>ELITE Spaces internal test: tester guide</h1>
 <p>This is the first test of the ELITE Spaces app (PRD rollout step 1). It runs at one location, and staff play every part: students, parents, staff and the director. Everything you enter is test data.</p>
+<p>This guide is for version 1.1: fixed schedules (a parent picks one schedule per period and the student attends every date), daily goals after each check-in, ending an emergency alert early, and a notice to parents when a scheduled day is missed. The app never asks for your phone's location.</p>
 <p>Find your role below. Each role has its own page: how to get in, what to try in order, and what to report.</p>
 <table class="fill"><tr><th>Test link</th><td></td></tr><tr><th>Test location</th><td></td></tr><tr><th>Test dates</th><td></td></tr><tr><th>Send reports to</th><td></td></tr></table>
 <section class="part">
@@ -60,7 +61,7 @@ pre.template { white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5pt/1.7 
 <h2>Test order</h2>
 <p>Some steps need others done first. Go in this order:</p>
 <ol>
-<li><strong>Director:</strong> set the location's hours, add a term and sessions, add staff accounts, put the Entrance QR on screen or print it.
+<li><strong>Director:</strong> set the location's hours, add a period and its schedules, add staff accounts, put the Entrance QR on screen or print it.
 </li>
 <li><strong>Parents:</strong> create a family account and invite a student.
 </li>
@@ -68,18 +69,18 @@ pre.template { white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5pt/1.7 
 </li>
 <li><strong>Staff:</strong> set up a membership for each student (Members). Nobody can enroll without one.
 </li>
-<li><strong>Parents:</strong> enroll students in sessions. <strong>Students:</strong> ask to join one.
+<li><strong>Parents:</strong> choose a schedule for each student.
 </li>
-<li><strong>Session day:</strong> students scan in and out, staff watch In the building and write daily notes, the director sends an announcement and an emergency alert drill.
+<li><strong>Schedule day:</strong> students scan in and out and set their goals, staff watch In the building and write daily notes, the director moves a date, sends an announcement and an emergency alert drill, then ends the alert.
 </li>
-<li><strong>Parents:</strong> read the daily note and download an hours log.
+<li><strong>Parents:</strong> read the daily note, check the missed-day notice, and download an hours log.
 </li></ol>
 </section>
 <section class="part">
 <h2>How to report a problem</h2>
 <p>Report anything that breaks, confuses you, or doesn't match this guide. One problem per report. Copy this:</p>
 <pre class="template">Role and phone:   (for example: Parent, iPhone 13, Home Screen app)
-Screen:           (for example: Schedule, Add a session)
+Screen:           (for example: Schedule, Choose a schedule)
 What happened:
 What you expected:
 Screenshot:       attached / none</pre>
@@ -88,7 +89,7 @@ Screenshot:       attached / none</pre>
 <section class="role">
 <p class="kicker">ELITE Spaces internal test · tester guide</p>
 <h2>Student</h2>
-<p>You're a homeschooled student with your own phone. You scan in and out, see your schedule, and ask a parent for sessions.</p>
+<p>You're a homeschooled student with your own phone. You scan in and out, see the schedule your parent picked, and set your goals for the day.</p>
 <h3>Get in</h3>
 <ol>
 <li>Your "parent" sends you an invite by text or email. Open the link <strong>on your phone</strong>. (No link? Open the test link, tap <strong>Have an invite code?</strong>, type the code, tap <strong>Continue</strong>.)
@@ -112,27 +113,31 @@ Screenshot:       attached / none</pre>
 <ol>
 <li><strong>Home.</strong> You should see <strong>Not checked in</strong>, a <strong>Scan to check in</strong> button and a <strong>Your membership</strong> card.
 </li>
-<li><strong>Ask for a session.</strong> Tap <strong>Schedule</strong>. Under <strong>Ask to join a session</strong>, tap <strong>Ask to join</strong> on one. It should change to <strong>Asked</strong>, and <strong>Your requests</strong> should say <strong>Waiting for a parent</strong>.
+<li><strong>Your schedule.</strong> Tap <strong>Schedule</strong>. Before your parent picks one it says <strong>Ask a parent to pick your schedule.</strong> Afterwards it shows your schedule (its days, time and period) and <strong>This week</strong>. You can't change it: only a parent enrolls.
 </li>
-<li><strong>Get the answer.</strong> When your parent decides, you get a notification. <strong>Your requests</strong> should change to <strong>Approved · enrolled</strong> or <strong>Declined</strong>. An approved session shows under <strong>Every week</strong>.
+<li><strong>Scan in.</strong> At the location, from 30 minutes before your schedule starts until it ends, tap <strong>Check in</strong>, then <strong>Scan to check in</strong>. Allow the camera and point it at the code by the entrance. You should see <strong>✓ Checked in</strong> with the time, the schedule, and "Your parents have been told." The app should never ask for your location.
 </li>
-<li><strong>Scan in.</strong> At the location, from 30 minutes before your session starts until it ends, tap <strong>Check in</strong>, then <strong>Scan to check in</strong>. Allow the camera, point it at the code by the entrance, and allow your location. You should see <strong>✓ Checked in</strong> with the time, the session, and "Your parents have been told."
+<li><strong>Set today's goals.</strong> Right after checking in, the app asks <strong>What are you working on today?</strong> Tap <strong>Set today's goals</strong>. Pick a <strong>Subject</strong>, tap one of the examples under <strong>Start from an example</strong> (you can change the words), then tap <strong>Add another goal</strong> for a second one (up to 3). Tap <strong>Save goals</strong>. Home now shows your goals with <strong>Edit</strong>.
+</li>
+<li><strong>Skip a day.</strong> On another day, after checking in, tap <strong>Skip today</strong> instead. You should see <strong>Skipped. You can still add goals from Home today.</strong> Home shows <strong>You skipped goals today.</strong> with <strong>Set goals</strong>.
 </li>
 <li><strong>Scan with the Camera app.</strong> Another time, open your phone's own Camera app and point it at the entrance code. It should open ELITE Spaces straight to check-in (and ask you to sign in first if you're signed out).
 </li>
 <li><strong>Scan twice by mistake.</strong> Right after checking in, scan again. It should ask before checking you out. Tap <strong>Stay checked in</strong>.
 </li>
-<li><strong>Scan out.</strong> When you leave, tap <strong>Scan to check out</strong>. You should see <strong>✓ Checked out</strong> with your total time.
+<li><strong>Scan out.</strong> When you leave, tap <strong>Scan to check out</strong>. You should see <strong>✓ Checked out</strong> with your total time. Scanning out doesn't ask about goals.
 </li>
-<li><strong>News.</strong> Open <strong>News</strong> and read the announcements. When the director sends the emergency alert drill, a red <strong>Emergency alert</strong> box pops up (or a notification, if the app is closed). Tap <strong>I have read this</strong>.
+<li><strong>News.</strong> Open <strong>News</strong> and read the announcements. When the director sends the emergency alert drill, a red <strong>Emergency alert</strong> box pops up (or a notification, if the app is closed). Tap <strong>I have read this</strong>. When the director ends it, you get an "All clear" notification and the alert is no longer pinned.
 </li></ol>
 <h3>Look for and report</h3>
 <ul>
-<li>A scan that takes more than about 2 seconds once your location is found.
+<li>A scan that takes more than about 2 seconds.
 </li>
-<li>A wrong refusal. These messages are correct only when true: <strong>We couldn't confirm you're in the building</strong> (you're outside), <strong>No session right now</strong> (no session starting within 30 minutes or under way), <strong>This code has expired</strong> (yesterday's code).
+<li>A wrong refusal. These messages are correct only when true: <strong>No session right now</strong> (nothing starting within 30 minutes or under way), <strong>[Schedule] doesn't meet today (moved to [day])</strong> (the director moved or skipped today's date), <strong>This code has expired</strong> (yesterday's code).
 </li>
-<li>Any time the camera or location prompt didn't appear, or the help steps didn't get you going again.
+<li>Any time the app asked for your location, or the camera prompt didn't appear, or the help steps didn't get you going again.
+</li>
+<li>Goals you couldn't save, or the goals question coming back after you already answered it that day.
 </li>
 <li>Notifications that didn't arrive, arrived twice, or arrived with the app closed but showed wrong details.
 </li>
@@ -142,7 +147,7 @@ Screenshot:       attached / none</pre>
 <section class="role">
 <p class="kicker">ELITE Spaces internal test · tester guide</p>
 <h2>Parent</h2>
-<p>You hold the family account. You invite your student, pick their sessions, and get check-ins, notes and hours.</p>
+<p>You hold the family account. You invite your student, choose their schedule, and get check-ins, notes, missed-day notices and hours.</p>
 <h3>Get in</h3>
 <ol>
 <li><strong>Install the app first:</strong>
@@ -165,27 +170,35 @@ Screenshot:       attached / none</pre>
 </li>
 <li><strong>Approve your student.</strong> When they set a password you get a notification, and Home shows <strong>[Name] is waiting for your approval</strong>. Tap <strong>Approve</strong>.
 </li>
-<li><strong>Enroll.</strong> Once staff have set up a membership, open <strong>Schedule</strong>. Under <strong>Add a session</strong>, tap <strong>Enroll</strong> on a day and time. It should appear under <strong>[Name]'s weekly sessions</strong>.
+<li><strong>Choose a schedule.</strong> Once staff have set up a membership, open <strong>Schedule</strong>. Under <strong>Choose a schedule</strong>, each schedule shows its days and time, how many days a week it meets, its period, and the seats left. Tap <strong>Enroll</strong> on one. It should appear under <strong>[Name]'s schedule</strong>, and you get a notification.
 </li>
-<li><strong>Answer a request.</strong> When your student asks for a session, <strong>Requests from your students</strong> appears on Schedule (and <strong>Session requests</strong> on Home). Approve one. If you can, decline another and check your student is told.
+<li><strong>A schedule that doesn't fit.</strong> A schedule that meets more days a week than the membership allows has its button turned off, with the reason under it. Check the reason makes sense.
 </li>
-<li><strong>Waitlist (with a second parent).</strong> On a session the director set to very few seats, fill it, then have the other parent tap <strong>Join waitlist</strong> (or <strong>Enroll</strong>, then <strong>Add [Name] to the waitlist</strong>). Drop a spot with <strong>Drop</strong>, then <strong>Drop [day]s</strong>. The waiting student should be enrolled automatically, and their parent notified.
+<li><strong>Switch.</strong> In the same period, tap <strong>Switch to this</strong> on a different schedule. It asks first and names the schedule that ends. Confirm: the new one replaces the old one, with one notification about both.
 </li>
-<li><strong>Session day.</strong> You should get a notification when your student checks in and when they check out. Home's <strong>Today</strong> card should match.
+<li><strong>Waitlist (with a second parent).</strong> On a schedule the director set to very few seats, fill it, then have the other parent tap <strong>Join waitlist</strong>. Their student keeps their current schedule until a seat opens. Drop the full schedule with <strong>Drop</strong>, then <strong>Drop [schedule]</strong>. The waiting student should be moved in automatically, and their parent notified.
 </li>
-<li><strong>Daily note.</strong> After staff post it, you get a notification. Open <strong>Notes</strong> to read the ratings and comment. Home also shows <strong>Today's notes</strong>.
+<li><strong>A moved date.</strong> When the director moves or skips one of your schedule's dates, you get a notification. <strong>This week</strong> on Schedule shows the new date.
+</li>
+<li><strong>Schedule day.</strong> You should get a notification when your student checks in and when they check out. Home's <strong>Today</strong> card should match.
+</li>
+<li><strong>Daily note.</strong> After staff post it, you get a notification. Open <strong>Notes</strong> to read the ratings, the comment and <strong>[Name]'s goals today</strong> (only when your student set goals). Home also shows <strong>Today's notes</strong>.
+</li>
+<li><strong>Missed day.</strong> Agree with your student that they skip one scheduled day. About 30 minutes after that day's schedule ends you get <strong>[Name] didn't check in today</strong>. Tap it: it opens <strong>Hours</strong> on that week, and the absence says <strong>Parents notified</strong>.
 </li>
 <li><strong>Hours.</strong> Open <strong>Hours</strong>. Switch between <strong>Week</strong>, <strong>Month</strong> and <strong>Term</strong>. Under <strong>Download a log</strong>, pick a range and tap <strong>Download PDF</strong>, then <strong>Download CSV</strong>. Open both.
 </li></ol>
 <h3>Look for and report</h3>
 <ul>
-<li>Any check-in or check-out notification that was missing, late, or had the wrong time or session.
+<li>Any check-in or check-out notification that was missing, late, or had the wrong time or schedule.
 </li>
 <li>An automatic check-out (student forgot to scan out) that isn't labeled as automatic.
 </li>
+<li>A missed-day notice for a day your student came in, a closed day or a skipped date, or one that came twice.
+</li>
 <li>Hours that don't match the times you saw, or a PDF/CSV you couldn't open or wouldn't hand to an evaluator.
 </li>
-<li>An enroll, waitlist or drop that said one thing and showed another.
+<li>An enroll, switch, waitlist or drop that said one thing and showed another.
 </li>
 <li>Anything in <strong>Family</strong> that's confusing: invite states, <strong>Resend</strong>, <strong>Cancel invite</strong>, <strong>Invite a guardian</strong>.
 </li></ul>
@@ -206,22 +219,22 @@ Screenshot:       attached / none</pre>
 </li>
 <li>Notifications: staff accounts don't get the <strong>Turn on notifications</strong> banner in this build. Watch the bell (top right) and the pop-ups while the app is open.
 </li></ol>
-<p>On a phone, <strong>Members</strong>, <strong>Sessions</strong> and <strong>People</strong> are under <strong>More</strong>.</p>
+<p>On a phone, <strong>Members</strong>, <strong>Schedules</strong> and <strong>People</strong> are under <strong>More</strong>.</p>
 <h3>Try these, in order</h3>
 <ol>
-<li><strong>Set up memberships.</strong> Open <strong>Members</strong>. Find a test student, tap <strong>Set up</strong>. Leave <strong>Status</strong> on <strong>Active</strong>, set <strong>Weekly session limit</strong> (try 3), <strong>Start date</strong> and <strong>Last day</strong>, tap <strong>Set up membership</strong>. Do this for every test student before parents enroll.
+<li><strong>Set up memberships.</strong> Open <strong>Members</strong>. Find a test student, tap <strong>Set up</strong>. Leave <strong>Status</strong> on <strong>Active</strong>, set <strong>Weekly limit (days a week)</strong> (try 3), <strong>Start date</strong> and <strong>Last day</strong>, tap <strong>Set up membership</strong>. Do this for every test student before parents enroll.
 </li>
 <li><strong>Open In the building.</strong> Check the counts: <strong>in the building</strong>, <strong>still expected</strong>, <strong>left today</strong>. The list refreshes on its own every 15 seconds or so.
 </li>
 <li><strong>Show the entrance code.</strong> Tap <strong>Entrance QR</strong>, then <strong>Full screen</strong> (or <strong>Print</strong>). It should say <strong>Students: scan to check in or out</strong> and <strong>Today's code · good until</strong> a time.
 </li>
-<li><strong>Check someone in by hand.</strong> Under <strong>Check someone in or out by hand</strong>, type a name in <strong>Student name</strong>, tap <strong>Check in</strong>, pick a <strong>Reason (optional)</strong> like <strong>Phone is dead</strong>, tap <strong>Check in</strong> (or <strong>Check in anyway</strong> if they have no session now). The row under <strong>Here</strong> should say <strong>Checked in by [your name]</strong>. Check them out the same way with <strong>Check out</strong>.
+<li><strong>Check someone in by hand.</strong> Under <strong>Check someone in or out by hand</strong>, type a name in <strong>Student name</strong>, tap <strong>Check in</strong>, pick a <strong>Reason (optional)</strong> like <strong>Phone is dead</strong>, tap <strong>Check in</strong> (or <strong>Check in anyway</strong> if they have no schedule now). The row under <strong>Here</strong> should say <strong>Checked in by [your name]</strong>. Check them out the same way with <strong>Check out</strong>.
 </li>
-<li><strong>Review a missed scan-out.</strong> Agree with a student that they won't scan out. After their session ends they appear under <strong>Needs review</strong>. Tap <strong>Time is right</strong>, or <strong>Fix time out</strong>, set <strong>Actual time out</strong>, tap <strong>Save time out</strong>.
+<li><strong>Review a missed scan-out.</strong> Agree with a student that they won't scan out. After their schedule ends they appear under <strong>Needs review</strong>. Tap <strong>Time is right</strong>, or <strong>Fix time out</strong>, set <strong>Actual time out</strong>, tap <strong>Save time out</strong>.
 </li>
-<li><strong>Write daily notes.</strong> Open <strong>Daily notes</strong>. For each student who came in, tap <strong>Needs work</strong>, <strong>Good</strong> or <strong>Great</strong> on every item, add a <strong>Comment (optional)</strong>, tap <strong>Post note</strong>. Try <strong>Save for later</strong> on one, then come back and post it. Edit a posted note with <strong>Edit note</strong> › <strong>Save changes</strong>.
+<li><strong>Write daily notes.</strong> Open <strong>Daily notes</strong>. The top card shows <strong>Goals: [n] set · [n] skipped · [n] not answered</strong>. Each student's card shows their <strong>Goals</strong> (or <strong>Skipped goals</strong> / <strong>No goals set</strong>) above the ratings. Tap <strong>Needs work</strong>, <strong>Good</strong> or <strong>Great</strong> on every item, reply to the goals in <strong>Comment (optional)</strong>, tap <strong>Post note</strong>. Try <strong>Save for later</strong> on one, then come back and post it. Edit a posted note with <strong>Edit note</strong> › <strong>Save changes</strong>.
 </li>
-<li><strong>Change a membership.</strong> In <strong>Members</strong>, open a student who holds sessions. Try to lower <strong>Weekly session limit</strong> below what they hold (it should refuse and explain). Then set <strong>Status</strong> to <strong>Inactive</strong>: the button should say <strong>Save and pause [n] sessions</strong>. Save, then set it back to <strong>Active</strong> and save again. Their sessions should come back, and the family should be told each time.
+<li><strong>Change a membership.</strong> In <strong>Members</strong>, open a student who holds a schedule. Try to lower <strong>Weekly limit (days a week)</strong> below the days their schedule meets (it should refuse and explain). Then set <strong>Status</strong> to <strong>Inactive</strong>: the button should say <strong>Save and pause</strong> with the schedule. Save, then set it back to <strong>Active</strong> and save again. The schedule should come back, and the family should be told each time.
 </li>
 <li><strong>People.</strong> Open <strong>People</strong> › <strong>Families</strong>. Search for a student or parent by name, email or phone.
 </li></ol>
@@ -231,17 +244,17 @@ Screenshot:       attached / none</pre>
 </li>
 <li>A manual entry that isn't saved with your name and reason.
 </li>
-<li>A note you couldn't post, or a parent who didn't get the notification after <strong>Post note</strong>.
+<li>Goals on a daily note that don't match what the student set, or a note you couldn't post, or a parent who didn't get the notification after <strong>Post note</strong>.
 </li>
 <li>Any screen that's slow or hard to use at the front desk with a line of students.
 </li>
-<li><strong>Sessions</strong> is read-only for staff, and only directors post in <strong>News</strong>. That's on purpose.
+<li><strong>Schedules</strong> is read-only for staff, and only directors post in <strong>News</strong>. That's on purpose.
 </li></ul>
 </section>
 <section class="role">
 <p class="kicker">ELITE Spaces internal test · tester guide</p>
 <h2>Director</h2>
-<p>You lead the location. You do everything staff do, plus the schedule, staff accounts, announcements, emergency alerts and reports.</p>
+<p>You lead the location. You do everything staff do, plus the schedules, staff accounts, announcements, emergency alerts and reports.</p>
 <h3>Get in</h3>
 <ol>
 <li>The test coordinator (HQ) gives you a <strong>temporary password</strong>. Open the test link and sign in with your work <strong>Email</strong> and that password.
@@ -252,33 +265,37 @@ Screenshot:       attached / none</pre>
 </li>
 <li>Notifications: director accounts don't get the <strong>Turn on notifications</strong> banner in this build. Watch the bell (top right) and the pop-ups while the app is open.
 </li></ol>
-<p>On a phone, <strong>News</strong>, <strong>Members</strong>, <strong>Sessions</strong> and <strong>People</strong> are under <strong>More</strong>.</p>
+<p>On a phone, <strong>News</strong>, <strong>Members</strong>, <strong>Schedules</strong> and <strong>People</strong> are under <strong>More</strong>.</p>
 <h3>Try these, in order</h3>
 <ol>
-<li><strong>Location settings.</strong> Open <strong>People</strong> › <strong>Location settings</strong>. Check <strong>Check-in radius (meters)</strong> (150 suits most buildings), <strong>New QR code each day at</strong>, <strong>Opens at</strong> and <strong>Closes at</strong>. Tap <strong>Save changes</strong>.
+<li><strong>Location settings.</strong> Open <strong>People</strong> › <strong>Location settings</strong>. Check <strong>New QR code each day at</strong>, <strong>Opens at</strong> and <strong>Closes at</strong>. Tap <strong>Save changes</strong>. (There is no check-in radius: a scan of today's code counts as being there.)
 </li>
-<li><strong>Term and sessions.</strong> Open <strong>Sessions</strong>. Tap <strong>Add a term</strong>, fill <strong>Name</strong>, <strong>First day</strong>, <strong>Last day</strong>, tap <strong>Add term</strong>. Then tap <strong>+ New session</strong>: <strong>Name</strong>, <strong>Days it meets</strong>, <strong>Starts</strong>, <strong>Ends</strong>, <strong>Seats per day</strong>, tap <strong>Create session</strong>. Make one session with only 1 or 2 seats so parents can test the waitlist.
+<li><strong>Period and schedules.</strong> Open <strong>Schedules</strong>. Tap <strong>Add a period</strong>, fill <strong>Name</strong> (or tap <strong>This month</strong> or <strong>Next month</strong> to fill the dates), <strong>First day</strong>, <strong>Last day</strong>, tap <strong>Add period</strong>. Periods can't overlap. Then tap <strong>+ New schedule</strong>: <strong>Name</strong> (like "Mornings MWF"), <strong>Days it meets</strong>, <strong>Starts</strong>, <strong>Ends</strong>, <strong>Seats</strong>, tap <strong>Publish schedule</strong>. Make one schedule with only 1 or 2 seats so parents can test the waitlist.
 </li>
 <li><strong>Staff accounts.</strong> Open <strong>People</strong> › <strong>Staff</strong>, tap <strong>Add a staff member</strong>, fill <strong>Full name</strong> and <strong>Work email</strong>, tap <strong>Create account</strong>. Copy the temporary password (it shows once) and give it to them. Try <strong>Reset password</strong>, <strong>Deactivate</strong> and <strong>Reactivate</strong> on a test account.
 </li>
 <li><strong>Entrance code.</strong> Open <strong>In the building</strong> › <strong>Entrance QR</strong> › <strong>Full screen</strong> on a screen by the door, or <strong>Print</strong> it. A printed copy works only until the time it shows.
 </li>
+<li><strong>Change one date.</strong> In <strong>Schedules</strong>, open a schedule families are enrolled in. Its days are now fixed (the boxes are turned off with a note). Under <strong>Dates</strong>, tap <strong>Move…</strong> on a coming date, pick the <strong>New date</strong>, add a <strong>Reason (optional)</strong>, tap <strong>Move this date</strong> › <strong>Move and tell families</strong>. Families should get one notification. Try <strong>Skip</strong> and <strong>Add a date</strong> too, then <strong>Undo</strong> one.
+</li>
 <li><strong>Announcement.</strong> Open <strong>News</strong> › <strong>New announcement</strong>. Pick <strong>Who should get this?</strong>, a <strong>Kind of post</strong>, a <strong>Title</strong> and <strong>Message</strong>, leave <strong>Send now</strong>, tap <strong>Review</strong>, then <strong>Post now</strong>. Also schedule one with <strong>Schedule for later</strong>. Watch <strong>Sent to</strong>, <strong>Delivered</strong> and <strong>Read</strong>, and tap <strong>Refresh numbers</strong>.
 </li>
 <li><strong>Emergency alert drill.</strong> Agree the time with everyone first. In <strong>News</strong>, tap <strong>Send emergency alert</strong>. Start the <strong>Headline</strong> with "TEST DRILL", fill <strong>What should people do?</strong>, tap <strong>Review alert</strong>, then <strong>Send alert now</strong>. Everyone with the app open should get a red pop-up, and everyone else a notification, including parents who muted announcements.
 </li>
-<li><strong>Closure and session changes.</strong> In <strong>Sessions</strong>, tap <strong>Add a closure</strong>, pick a <strong>Date</strong> (today or later), tap <strong>Close this day</strong> › <strong>Close and tell families</strong>. Then <strong>Reopen</strong> it. Tap a session in <strong>Weekly schedule</strong>, change <strong>Seats per day</strong>, tap <strong>Save changes</strong>. Families should be told.
+<li><strong>End the alert.</strong> On the pinned alert, tap <strong>End alert</strong> › <strong>End alert</strong>. It should stop being pinned, show <strong>Ended</strong> with the time, and everyone it went to should get an "All clear" notification. (An alert HQ sent to several locations can only be ended by HQ.)
 </li>
-<li><strong>Reports.</strong> Open <strong>Reports</strong>. Pick a <strong>Session</strong> and a range, tap <strong>Show report</strong>. Check <strong>By student</strong>, <strong>Visits</strong> and <strong>Absences</strong>, then <strong>Download CSV</strong> and <strong>Download PDF</strong>.
+<li><strong>Closure and schedule changes.</strong> In <strong>Schedules</strong>, tap <strong>Add a closure</strong>, pick a <strong>Date</strong> (today or later), tap <strong>Close this day</strong> › <strong>Close and tell families</strong>. Then <strong>Reopen</strong> it. Open a schedule, change <strong>Seats</strong>, tap <strong>Save changes</strong>. Families should be told.
+</li>
+<li><strong>Reports.</strong> Open <strong>Reports</strong>. Pick a <strong>Schedule</strong> and a range, tap <strong>Show report</strong>. Check <strong>By student</strong>, <strong>Visits</strong> and <strong>Absences</strong>, then <strong>Download CSV</strong> and <strong>Download PDF</strong>.
 </li></ol>
 <p>Also try the staff list (memberships, In the building, daily notes) if no one else covers it.</p>
 <h3>Look for and report</h3>
 <ul>
-<li>Families who should have been told about a closure, change or cancellation but weren't, or who were told twice.
+<li>Families who should have been told about a closure, a date change, a change or a cancellation but weren't, or who were told twice.
 </li>
 <li><strong>Sent to</strong>, <strong>Delivered</strong> or <strong>Read</strong> numbers that don't match what testers say they got.
 </li>
-<li>An emergency alert that didn't pop up for someone signed in, or that someone could mute.
+<li>An emergency alert that didn't pop up for someone signed in, that someone could mute, or that stayed pinned after you ended it.
 </li>
 <li>Report numbers that don't match In the building, Daily notes or a parent's Hours.
 </li>
@@ -288,15 +305,13 @@ Screenshot:       attached / none</pre>
 <section class="part">
 <h2>Already known (no need to report)</h2>
 <ul>
-<li>An emergency alert stays pinned as <strong>active now</strong> for 24 hours. There's no way to end it early yet.
+<li>Students don't see daily notes, and a student holds one schedule per period. Both are on purpose in this version.
 </li>
-<li>A missed session shows as <strong>Absent</strong>, but parents aren't notified.
+<li>A missed-day notice goes out only for a day with no check-in at all. A student who came to part of the day shows <strong>Absent</strong> in Hours for the part they missed, with no notice.
 </li>
-<li>Students don't see daily notes, and enrollment is weekly only (no single dates). Both are on purpose in this version.
+<li>After some buttons (<strong>Refresh numbers</strong>, <strong>Cancel invite</strong>, <strong>Deactivate</strong>), the screen jumps back to the top.
 </li>
-<li>After some buttons (<strong>Refresh numbers</strong>, <strong>Decline</strong>, <strong>Cancel invite</strong>, <strong>Deactivate</strong>), the screen jumps back to the top.
-</li>
-<li>The parent's check-out notification doesn't name the session (the check-in one does).
+<li>The parent's check-out notification doesn't name the schedule (the check-in one does).
 </li>
 <li>Home's <strong>Latest news</strong> doesn't update by itself when a normal announcement arrives (emergency alerts do).
 </li>
