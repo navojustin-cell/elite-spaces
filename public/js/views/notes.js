@@ -54,7 +54,7 @@
     /* Goals done or changed earlier in the week sit under the current 3, smaller. */
     .note-goals-label.note-goals-sub { margin: .55rem 0 .25rem; font-size: .82rem; color: var(--muted); }
     .note-goal-earlier { font-size: .88rem; }
-    .note-goal-earlier .goal-next { margin-left: .4rem; }
+    .note-goal-earlier .goal-next { margin-left: .4rem; white-space: nowrap; }
     /* Students' goal screens: phone first, one column, 44px+ targets (NF-7). */
     .goal-label { display: block; font-weight: 600; font-size: .95rem; margin: .75rem 0 .35rem; }
     .goal-subjects { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem; }
@@ -118,7 +118,7 @@
       h('span', { class: 'badge' }, g.subject_label), h('span', { class: 'sr-only' }, ', '), g.text, h('span', { class: 'sr-only' }, '. '),
       h('span', { class: CLOSED[g.status][1] + ' goal-answer' }, CLOSED[g.status][0] + ' ' +
         (g.closed_on === day ? 'today' : App.fmtDate(g.closed_on, { weekday: 'short', month: undefined, day: undefined }))),
-      h('span', { class: 'muted goal-next' }, h('span', { 'aria-hidden': 'true' }, '→ '), 'replaced by ' + g.replaced_by_label))))]];
+      h('span', { class: 'sr-only' }, ', '), h('span', { class: 'muted goal-next' }, h('span', { 'aria-hidden': 'true' }, '→ '), 'replaced by ' + g.replaced_by_label))))]];
   // Parents see the week's goals as they stood on the note's day; a week with none shows nothing.
   const parentGoals = (name, items, earlier, day) => items && items.length
     ? h('div', { class: 'note-goals' }, h('h3', { class: 'note-goals-label' }, first(name) + "'s goals this week"), weekGoals(items, earlier, day))
@@ -519,7 +519,7 @@
       own.textContent = s && s.examples.includes(g.text.trim()) ? "Now make it yours: change the chapter, unit or assignment to the one you're doing." : '';
     };
     // An example tapped over the student's own words (anything but an example, or the goal being
-    // changed) can be undone, until they type, pick a subject or the editor is drawn again.
+    // changed) can be undone, until they type, pick another subject or the editor is drawn again.
     const examplesAll = new Set(meta.subjects.flatMap(s => s.examples));
     let mine = null;
     const undo = h('button', { type: 'button', class: 'btn btn-ghost goal-undo', id: base + '-undo', 'aria-label': 'Undo: bring back what you typed' }, 'Undo');
@@ -533,7 +533,8 @@
       'aria-pressed': String(g.subject === s.id), disabled: taken.has(s.id),
       onclick: () => {
         if (was && s.id !== was.subject && text.value.trim() === was.text) { g.text = ''; text.value = ''; clear('text'); }
-        g.subject = s.id; dropUndo(); mark(); drawExamples(); clear('subject'); nudge(); changed();
+        if (s.id !== g.subject) dropUndo();
+        g.subject = s.id; mark(); drawExamples(); clear('subject'); nudge(); changed();
       },
     }, s.label, taken.has(s.id) && h('span', { class: 'goal-used' }, ' · ' + taken.get(s.id))));
     function mark() {

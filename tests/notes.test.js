@@ -1776,7 +1776,7 @@ test(['DG-2', 'DN-4', 'DN-3'], "a staff note card shows the student's goals this
   // Under them, smaller, the goals done or changed earlier this week, newest first, each with what took its place.
   assert.deepEqual(lists(goalsOf(leo)), [
     ['note-goal-list', ['Math, ' + MATH.text, 'History, ' + HIST.text, 'Art, ' + ART.text]],
-    ['note-goal-list note-goal-earlier', ['Science, ' + SCI.text + '. Changed today→ replaced by Art', 'English, ' + ENG.text + '. Done Thu→ replaced by History']]]);
+    ['note-goal-list note-goal-earlier', ['Science, ' + SCI.text + '. Changed today, → replaced by Art', 'English, ' + ENG.text + '. Done Thu, → replaced by History']]]);
   const earlierLabel = goalsOf(leo).find(n => n.tag === 'p' && n.textContent === 'Earlier this week');
   assert.deepEqual(earlierLabel.cls, ['note-goals-label', 'note-goals-sub']);
   const kidsOf = goalsOf(leo).childNodes;
@@ -1787,12 +1787,14 @@ test(['DG-2', 'DN-4', 'DN-3'], "a staff note card shows the student's goals this
   assert.deepEqual(earlierUl.findAll(n => n.tag === 'li').map(li => li.childNodes[0].cls.join(' ')), ['badge', 'badge'], 'a plain subject badge');
   assert.deepEqual(earlierUl.findAll(n => n.getAttribute('aria-hidden') === 'true').map(n => n.textContent), ['→ ', '→ ']);
   assert.match(tab.css(), /\.note-goal-earlier \{ font-size: \.88rem; \}/);
+  // "→ replaced by Art" stays on one line at 375px.
+  assert.match(tab.css(), /\.note-goal-earlier \.goal-next \{ margin-left: \.4rem; white-space: nowrap; \}/);
   assert.equal(words(goalsOf(sofia)), 'Goals this week No goals this week');
   // Thursday, as it stood then: Science still open, English done that day.
   view = await tab.open('daily-notes', THU);
   assert.deepEqual(lists(goalsOf(leo)), [
     ['note-goal-list', ['Math, ' + MATH.text + '. Still working on it', 'History, ' + HIST.text, 'Science, ' + SCI.text]],
-    ['note-goal-list note-goal-earlier', ['English, ' + ENG.text + '. Done today→ replaced by History']]]);
+    ['note-goal-list note-goal-earlier', ['English, ' + ENG.text + '. Done today, → replaced by History']]]);
   assert.deepEqual(goalsOf(leo).findAll(n => n.cls.includes('goal-answer')).map(b => [b.textContent, b.cls.includes('badge-ok')]),
     [['Still working on it', false], ['Done today', true]]);
   // Wednesday: nothing closed yet, so no "Earlier this week".
@@ -1833,7 +1835,7 @@ test(['DG-2', 'DN-5'], "a parent's note and Home card show the student's goals a
   const lists = box => box.findAll(n => n.tag === 'ul').map(ul => [ul.cls.join(' '), ul.findAll(n => n.tag === 'li').map(li => li.textContent)]);
   // The 3 as they stood at the end of that day, then what was changed earlier that week (here, that day).
   assert.deepEqual(lists(goalsOf(thu)), [['note-goal-list', ['Math, ' + MATH.text, 'English, ' + ENG.text, 'Art, ' + ART.text]],
-    ['note-goal-list note-goal-earlier', ['Science, ' + SCI.text + '. Changed today→ replaced by Art']]]);
+    ['note-goal-list note-goal-earlier', ['Science, ' + SCI.text + '. Changed today, → replaced by Art']]]);
   assert.ok(goalsOf(thu).find(n => n.tag === 'p' && n.textContent === 'Earlier this week'));
   assert.deepEqual(lists(goalsOf(wedLeo)), [['note-goal-list', ['Math, ' + MATH.text, 'English, ' + ENG.text, 'Science, ' + SCI.text]]]);
   assert.equal(goalsOf(wedLeo).find(n => n.textContent === 'Earlier this week'), undefined, 'nothing closed yet: no label');
@@ -2277,6 +2279,9 @@ test(['DG-1', 'NF-7'], "an example tapped over the student's own words can be un
   type(view, 'goal-text', mine);
   await tab.click(example(MATH.text));
   assert.ok(undo());
+  // A tap on the subject already picked changes nothing, so Undo stays.
+  await tab.click(subjectChip(view, 'Math'));
+  assert.deepEqual([text().value, !!undo()], [MATH.text, true]);
   await tab.click(subjectChip(view, 'English'));
   assert.equal(undo(), undefined);
   // So does a redraw.
@@ -2396,7 +2401,7 @@ test(['DG-2', 'DN-5'], "a parent's Home card shows each student's goals this wee
   const lists = box => box.findAll(n => n.tag === 'ul').map(ul => [ul.cls.join(' '), ul.findAll(n => n.tag === 'li').map(li => li.textContent)]);
   // The 3 open now with today's answers, then what was done or changed earlier this week.
   assert.deepEqual(lists(leoLi), [['note-goal-list', ['Math, ' + MATH.text + '. Still working on it', 'History, ' + HIST.text, 'Science, ' + SCI.text]],
-    ['note-goal-list note-goal-earlier', ['English, ' + ENG.text + '. Done today→ replaced by History']]]);
+    ['note-goal-list note-goal-earlier', ['English, ' + ENG.text + '. Done today, → replaced by History']]]);
   assert.ok(leoLi.find(n => n.tag === 'p' && n.textContent === 'Earlier this week'));
   const see = leoLi.find(n => n.tag === 'a');
   assert.deepEqual([see.textContent, see.getAttribute('aria-label'), see.getAttribute('href')], ['See updates', 'See updates for Leo Garcia', '#/week-goals/' + leo.id]);
@@ -2420,7 +2425,7 @@ test(['DG-2', 'DN-5'], "a parent's Home card shows each student's goals this wee
   fri = await tab.card('notes-week-goals');
   const friLeo = fri.findAll(n => n.tag === 'li' && n.parentNode.cls.includes('list')).find(li => li.find(n => n.tag === 'strong').textContent === 'Leo Garcia');
   assert.deepEqual(lists(friLeo), [['note-goal-list', ['Math, ' + MATH.text, 'History, ' + HIST.text, 'Art, ' + ART.text]],
-    ['note-goal-list note-goal-earlier', ['Science, ' + SCI.text + '. Changed today→ replaced by Art', 'English, ' + ENG.text + '. Done Thu→ replaced by History']]]);
+    ['note-goal-list note-goal-earlier', ['Science, ' + SCI.text + '. Changed today, → replaced by Art', 'English, ' + ENG.text + '. Done Thu, → replaced by History']]]);
   const none = await tab.open('week-goals', String(sofia.id));
   assert.match(words(none), /Sofia hasn't set this week's goals yet\./);
 });
