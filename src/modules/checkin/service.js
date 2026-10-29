@@ -198,11 +198,12 @@ const duration = mins => (Math.floor(mins / 60) ? Math.floor(mins / 60) + 'h ' :
 // "Mon, Nov 2" for a location-local date.
 const dayName = (loc, date) => time.local(loc, time.toMs(loc, date, '12:00')).toFormat('ccc, LLL d');
 
-// "today at 1:00 PM", "tomorrow at 1:00 PM" or "Fri, Oct 16 at 1:00 PM".
+// "today at 1:00 PM", "tomorrow, Thu Oct 15, at 1:00 PM" or "Fri, Oct 16, at 1:00 PM".
 function when(loc, ms, now) {
-  const d = time.localDate(loc, ms), today = time.localDate(loc, now);
-  const day = d === today ? 'today' : d === time.addDays(today, 1) ? 'tomorrow' : time.local(loc, ms).toFormat('ccc, LLL d');
-  return day + ' at ' + clockTime(loc, ms);
+  const d = time.localDate(loc, ms), today = time.localDate(loc, now), at = ' at ' + clockTime(loc, ms);
+  if (d === today) return 'today' + at;
+  if (d === time.addDays(today, 1)) return 'tomorrow, ' + time.local(loc, ms).toFormat('ccc LLL d') + ',' + at;
+  return time.local(loc, ms).toFormat('ccc, LLL d') + ',' + at;
 }
 
 // Why a scan found no slot right now, and what to do next (CI-3).
@@ -331,6 +332,8 @@ function status(ctx, student, ms) {
   const inNow = v && v.check_out_at == null ? slotIn(ctx, loc, v, ms) : null;
   return {
     id: student.id, name: student.name, location: publicLocation(loc),
+    // The location's date, for the top of the Check in screen ("Wednesday, Oct 28"); NF-4, dev clock included.
+    today, today_label: time.local(loc, ms).toFormat('cccc, LLL d'),
     state: !v ? 'none' : v.check_out_at == null ? 'here' : 'left',
     // Sessions paused by a lapsed membership (MB-5), so the screen can say why none are coming up. A slot
     // left paused while the membership is valid (an ended term or over the cap, D-16a) is not that.

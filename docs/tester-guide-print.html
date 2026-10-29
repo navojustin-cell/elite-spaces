@@ -40,7 +40,7 @@ pre.template { white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5pt/1.7 
 <main>
 <h1>ELITE Spaces internal test: tester guide</h1>
 <p>This is the first test of the ELITE Spaces app (PRD rollout step 1). It runs at one location, and staff play every part: students, parents, staff and the director. Everything you enter is test data.</p>
-<p>This guide is for version 1.1: fixed schedules (a parent picks one schedule per period and the student attends every date), daily goals after each check-in, ending an emergency alert early, and a notice to parents when a scheduled day is missed. The app never asks for your phone's location.</p>
+<p>This guide is for version 1.1: fixed schedules (a parent picks one schedule per period and the student attends every date), weekly top 3 goals (set at the first check-in of the week, then a quick update at each check-in), ending an emergency alert early, and a notice to parents when a scheduled day is missed. The app never asks for your phone's location.</p>
 <p>Find your role below. Each role has its own page: how to get in, what to try in order, and what to report.</p>
 <table class="fill"><tr><th>Test link</th><td></td></tr><tr><th>Test location</th><td></td></tr><tr><th>Test dates</th><td></td></tr><tr><th>Send reports to</th><td></td></tr></table>
 <section class="part">
@@ -89,7 +89,7 @@ Screenshot:       attached / none</pre>
 <section class="role">
 <p class="kicker">ELITE Spaces internal test · tester guide</p>
 <h2>Student</h2>
-<p>You're a homeschooled student with your own phone. You scan in and out, see the schedule your parent picked, and set your goals for the day.</p>
+<p>You're a homeschooled student with your own phone. You scan in and out, see the schedule your parent picked, and set your top 3 goals for the week.</p>
 <h3>Get in</h3>
 <ol>
 <li>Your "parent" sends you an invite by text or email. Open the link <strong>on your phone</strong>. (No link? Open the test link, tap <strong>Have an invite code?</strong>, type the code, tap <strong>Continue</strong>.)
@@ -115,11 +115,11 @@ Screenshot:       attached / none</pre>
 </li>
 <li><strong>Your schedule.</strong> Tap <strong>Schedule</strong>. Before your parent picks one it says <strong>Ask a parent to pick your schedule.</strong> Afterwards it shows your schedule (its days, time and period) and <strong>This week</strong>. You can't change it: only a parent enrolls.
 </li>
-<li><strong>Scan in.</strong> At the location, from 30 minutes before your schedule starts until it ends, tap <strong>Check in</strong>, then <strong>Scan to check in</strong>. Allow the camera and point it at the code by the entrance. You should see <strong>✓ Checked in</strong> with the time, the schedule, and "Your parents have been told." The app should never ask for your location.
+<li><strong>Scan in.</strong> At the location, from 30 minutes before your schedule starts until it ends, tap <strong>Check in</strong>, then <strong>Scan to check in</strong>. Allow the camera and point it at the code by the entrance. You should see <strong>✓ Checked in</strong> with the time, the schedule, and "Your parents have been told." The top of the Check in screen shows today's date (for example <strong>Wednesday, Oct 28</strong>). The app should never ask for your location.
 </li>
-<li><strong>Set today's goals.</strong> Right after checking in, the app asks <strong>What are you working on today?</strong> Tap <strong>Set today's goals</strong>. Pick a <strong>Subject</strong>, tap one of the examples under <strong>Start from an example</strong> (you can change the words), then tap <strong>Add another goal</strong> for a second one (up to 3). Tap <strong>Save goals</strong>. Home now shows your goals with <strong>Edit</strong>.
+<li><strong>Set your 3 goals for the week.</strong> Right after your first check-in of the week, the app asks <strong>Set your 3 goals for this week</strong>. Tap <strong>Set my 3 goals</strong>. On <strong>Goal 1 of 3</strong>, tap a subject, then tap an example under <strong>Tap an example to use it</strong> and change the words to fit your work. Tap <strong>Next</strong>. Do the same for goals 2 and 3 (each one a different subject), then tap <strong>Save my 3 goals</strong>. You should see <strong>You're set for today.</strong> and Home shows your 3 goals. Try a goal that's too short, like "Do math": it should say <strong>Say what you'll finish: the chapter, the assignment or the problems.</strong> right under the box and keep what you typed. There is no Skip.
 </li>
-<li><strong>Skip a day.</strong> On another day, after checking in, tap <strong>Skip today</strong> instead. You should see <strong>Skipped. You can still add goals from Home today.</strong> Home shows <strong>You skipped goals today.</strong> with <strong>Set goals</strong>.
+<li><strong>The daily update.</strong> On a later day that week, after checking in, tap <strong>Update my goals</strong>. Each goal has its own card asking <strong>Still working on this?</strong>: tap <strong>Yes</strong>, <strong>Done</strong> or <strong>Change</strong> on each one. <strong>Done</strong> and <strong>Change</strong> ask for your next goal (same rules). When every goal is answered you see <strong>✓ You're set for today.</strong> Scanning out and back in that day doesn't ask again. Next Monday you set 3 new goals.
 </li>
 <li><strong>Scan with the Camera app.</strong> Another time, open your phone's own Camera app and point it at the entrance code. It should open ELITE Spaces straight to check-in (and ask you to sign in first if you're signed out).
 </li>
@@ -137,7 +137,7 @@ Screenshot:       attached / none</pre>
 </li>
 <li>Any time the app asked for your location, or the camera prompt didn't appear, or the help steps didn't get you going again.
 </li>
-<li>Goals you couldn't save, or the goals question coming back after you already answered it that day.
+<li>Goals you couldn't save, a good goal refused, a message that didn't show right by the field, or the goals question coming back after you answered every goal that day.
 </li>
 <li>Notifications that didn't arrive, arrived twice, or arrived with the app closed but showed wrong details.
 </li>
@@ -182,7 +182,7 @@ Screenshot:       attached / none</pre>
 </li>
 <li><strong>Schedule day.</strong> You should get a notification when your student checks in and when they check out. Home's <strong>Today</strong> card should match.
 </li>
-<li><strong>Daily note.</strong> After staff post it, you get a notification. Open <strong>Notes</strong> to read the ratings, the comment and <strong>[Name]'s goals today</strong> (only when your student set goals). Home also shows <strong>Today's notes</strong>.
+<li><strong>Daily note.</strong> After staff post it, you get a notification. Open <strong>Notes</strong> to read the ratings, the comment and <strong>[Name]'s goals this week</strong> (as they stood that day, with that day's answers). Home also shows <strong>Today's notes</strong> and <strong>This week's goals</strong>; tap <strong>See updates</strong> to read every daily <strong>Still working on it</strong>, <strong>Done</strong> and <strong>Changed</strong>. (Demo data: daily answers exist only for visit days before today, so early in the week <strong>See updates</strong> can say <strong>No daily updates yet</strong>; last week's answers show in that week's posted daily notes.)
 </li>
 <li><strong>Missed day.</strong> Agree with your student that they skip one scheduled day. About 30 minutes after that day's schedule ends you get <strong>[Name] didn't check in today</strong>. Tap it: it opens <strong>Hours</strong> on that week, and the absence says <strong>Parents notified</strong>.
 </li>
@@ -232,7 +232,7 @@ Screenshot:       attached / none</pre>
 </li>
 <li><strong>Review a missed scan-out.</strong> Agree with a student that they won't scan out. After their schedule ends they appear under <strong>Needs review</strong>. Tap <strong>Time is right</strong>, or <strong>Fix time out</strong>, set <strong>Actual time out</strong>, tap <strong>Save time out</strong>.
 </li>
-<li><strong>Write daily notes.</strong> Open <strong>Daily notes</strong>. The top card shows <strong>Goals: [n] set · [n] skipped · [n] not answered</strong>. Each student's card shows their <strong>Goals</strong> (or <strong>Skipped goals</strong> / <strong>No goals set</strong>) above the ratings. Tap <strong>Needs work</strong>, <strong>Good</strong> or <strong>Great</strong> on every item, reply to the goals in <strong>Comment (optional)</strong>, tap <strong>Post note</strong>. Try <strong>Save for later</strong> on one, then come back and post it. Edit a posted note with <strong>Edit note</strong> › <strong>Save changes</strong>.
+<li><strong>Write daily notes.</strong> Open <strong>Daily notes</strong>. The top card shows <strong>Goals this week: [n] set · [n] not set</strong>. Each student's card shows their <strong>Goals this week</strong> with that day's answer (<strong>Still working on it</strong>, <strong>Done today</strong> or <strong>Changed today</strong>), or <strong>No goals this week</strong>, above the ratings. Tap <strong>Needs work</strong>, <strong>Good</strong> or <strong>Great</strong> on every item, reply to the goals in <strong>Comment (optional)</strong>, tap <strong>Post note</strong>. Try <strong>Save for later</strong> on one, then come back and post it. Edit a posted note with <strong>Edit note</strong> › <strong>Save changes</strong>.
 </li>
 <li><strong>Change a membership.</strong> In <strong>Members</strong>, open a student who holds a schedule. Try to lower <strong>Weekly limit (days a week)</strong> below the days their schedule meets (it should refuse and explain). Then set <strong>Status</strong> to <strong>Inactive</strong>: the button should say <strong>Save and pause</strong> with the schedule. Save, then set it back to <strong>Active</strong> and save again. The schedule should come back, and the family should be told each time.
 </li>

@@ -2,7 +2,7 @@
 
 This is the first test of the ELITE Spaces app (PRD rollout step 1). It runs at one location, and staff play every part: students, parents, staff and the director. Everything you enter is test data.
 
-This guide is for version 1.1: fixed schedules (a parent picks one schedule per period and the student attends every date), daily goals after each check-in, ending an emergency alert early, and a notice to parents when a scheduled day is missed. The app never asks for your phone's location.
+This guide is for version 1.1: fixed schedules (a parent picks one schedule per period and the student attends every date), weekly top 3 goals (set at the first check-in of the week, then a quick update at each check-in), ending an emergency alert early, and a notice to parents when a scheduled day is missed. The app never asks for your phone's location.
 
 Find your role below. Each role has its own page: how to get in, what to try in order, and what to report.
 
@@ -51,7 +51,7 @@ Take the screenshot the moment it happens, before you tap anything else.
 
 ## Student
 
-You're a homeschooled student with your own phone. You scan in and out, see the schedule your parent picked, and set your goals for the day.
+You're a homeschooled student with your own phone. You scan in and out, see the schedule your parent picked, and set your top 3 goals for the week.
 
 ### Get in
 
@@ -68,9 +68,9 @@ You're a homeschooled student with your own phone. You scan in and out, see the 
 
 1. **Home.** You should see **Not checked in**, a **Scan to check in** button and a **Your membership** card.
 2. **Your schedule.** Tap **Schedule**. Before your parent picks one it says **Ask a parent to pick your schedule.** Afterwards it shows your schedule (its days, time and period) and **This week**. You can't change it: only a parent enrolls.
-3. **Scan in.** At the location, from 30 minutes before your schedule starts until it ends, tap **Check in**, then **Scan to check in**. Allow the camera and point it at the code by the entrance. You should see **✓ Checked in** with the time, the schedule, and "Your parents have been told." The app should never ask for your location.
-4. **Set today's goals.** Right after checking in, the app asks **What are you working on today?** Tap **Set today's goals**. Pick a **Subject**, tap one of the examples under **Start from an example** (you can change the words), then tap **Add another goal** for a second one (up to 3). Tap **Save goals**. Home now shows your goals with **Edit**.
-5. **Skip a day.** On another day, after checking in, tap **Skip today** instead. You should see **Skipped. You can still add goals from Home today.** Home shows **You skipped goals today.** with **Set goals**.
+3. **Scan in.** At the location, from 30 minutes before your schedule starts until it ends, tap **Check in**, then **Scan to check in**. Allow the camera and point it at the code by the entrance. You should see **✓ Checked in** with the time, the schedule, and "Your parents have been told." The top of the Check in screen shows today's date (for example **Wednesday, Oct 28**). The app should never ask for your location.
+4. **Set your 3 goals for the week.** Right after your first check-in of the week, the app asks **Set your 3 goals for this week**. Tap **Set my 3 goals**. On **Goal 1 of 3**, tap a subject, then tap an example under **Tap an example to use it** and change the words to fit your work. Tap **Next**. Do the same for goals 2 and 3 (each one a different subject), then tap **Save my 3 goals**. You should see **You're set for today.** and Home shows your 3 goals. Try a goal that's too short, like "Do math": it should say **Say what you'll finish: the chapter, the assignment or the problems.** right under the box and keep what you typed. There is no Skip.
+5. **The daily update.** On a later day that week, after checking in, tap **Update my goals**. Each goal has its own card asking **Still working on this?**: tap **Yes**, **Done** or **Change** on each one. **Done** and **Change** ask for your next goal (same rules). When every goal is answered you see **✓ You're set for today.** Scanning out and back in that day doesn't ask again. Next Monday you set 3 new goals.
 6. **Scan with the Camera app.** Another time, open your phone's own Camera app and point it at the entrance code. It should open ELITE Spaces straight to check-in (and ask you to sign in first if you're signed out).
 7. **Scan twice by mistake.** Right after checking in, scan again. It should ask before checking you out. Tap **Stay checked in**.
 8. **Scan out.** When you leave, tap **Scan to check out**. You should see **✓ Checked out** with your total time. Scanning out doesn't ask about goals.
@@ -81,7 +81,7 @@ You're a homeschooled student with your own phone. You scan in and out, see the 
 - A scan that takes more than about 2 seconds.
 - A wrong refusal. These messages are correct only when true: **No session right now** (nothing starting within 30 minutes or under way), **[Schedule] doesn't meet today (moved to [day])** (the director moved or skipped today's date), **This code has expired** (yesterday's code).
 - Any time the app asked for your location, or the camera prompt didn't appear, or the help steps didn't get you going again.
-- Goals you couldn't save, or the goals question coming back after you already answered it that day.
+- Goals you couldn't save, a good goal refused, a message that didn't show right by the field, or the goals question coming back after you answered every goal that day.
 - Notifications that didn't arrive, arrived twice, or arrived with the app closed but showed wrong details.
 - You won't see daily notes. That's on purpose in this version.
 
@@ -112,7 +112,7 @@ On a phone, **News** and **Family** are under **More** in the bottom bar.
 6. **Waitlist (with a second parent).** On a schedule the director set to very few seats, fill it, then have the other parent tap **Join waitlist**. Their student keeps their current schedule until a seat opens. Drop the full schedule with **Drop**, then **Drop [schedule]**. The waiting student should be moved in automatically, and their parent notified.
 7. **A moved date.** When the director moves or skips one of your schedule's dates, you get a notification. **This week** on Schedule shows the new date.
 8. **Schedule day.** You should get a notification when your student checks in and when they check out. Home's **Today** card should match.
-9. **Daily note.** After staff post it, you get a notification. Open **Notes** to read the ratings, the comment and **[Name]'s goals today** (only when your student set goals). Home also shows **Today's notes**.
+9. **Daily note.** After staff post it, you get a notification. Open **Notes** to read the ratings, the comment and **[Name]'s goals this week** (as they stood that day, with that day's answers). Home also shows **Today's notes** and **This week's goals**; tap **See updates** to read every daily **Still working on it**, **Done** and **Changed**. (Demo data: daily answers exist only for visit days before today, so early in the week **See updates** can say **No daily updates yet**; last week's answers show in that week's posted daily notes.)
 10. **Missed day.** Agree with your student that they skip one scheduled day. About 30 minutes after that day's schedule ends you get **[Name] didn't check in today**. Tap it: it opens **Hours** on that week, and the absence says **Parents notified**.
 11. **Hours.** Open **Hours**. Switch between **Week**, **Month** and **Term**. Under **Download a log**, pick a range and tap **Download PDF**, then **Download CSV**. Open both.
 
@@ -148,7 +148,7 @@ On a phone, **Members**, **Schedules** and **People** are under **More**.
 3. **Show the entrance code.** Tap **Entrance QR**, then **Full screen** (or **Print**). It should say **Students: scan to check in or out** and **Today's code · good until** a time.
 4. **Check someone in by hand.** Under **Check someone in or out by hand**, type a name in **Student name**, tap **Check in**, pick a **Reason (optional)** like **Phone is dead**, tap **Check in** (or **Check in anyway** if they have no schedule now). The row under **Here** should say **Checked in by [your name]**. Check them out the same way with **Check out**.
 5. **Review a missed scan-out.** Agree with a student that they won't scan out. After their schedule ends they appear under **Needs review**. Tap **Time is right**, or **Fix time out**, set **Actual time out**, tap **Save time out**.
-6. **Write daily notes.** Open **Daily notes**. The top card shows **Goals: [n] set · [n] skipped · [n] not answered**. Each student's card shows their **Goals** (or **Skipped goals** / **No goals set**) above the ratings. Tap **Needs work**, **Good** or **Great** on every item, reply to the goals in **Comment (optional)**, tap **Post note**. Try **Save for later** on one, then come back and post it. Edit a posted note with **Edit note** › **Save changes**.
+6. **Write daily notes.** Open **Daily notes**. The top card shows **Goals this week: [n] set · [n] not set**. Each student's card shows their **Goals this week** with that day's answer (**Still working on it**, **Done today** or **Changed today**), or **No goals this week**, above the ratings. Tap **Needs work**, **Good** or **Great** on every item, reply to the goals in **Comment (optional)**, tap **Post note**. Try **Save for later** on one, then come back and post it. Edit a posted note with **Edit note** › **Save changes**.
 7. **Change a membership.** In **Members**, open a student who holds a schedule. Try to lower **Weekly limit (days a week)** below the days their schedule meets (it should refuse and explain). Then set **Status** to **Inactive**: the button should say **Save and pause** with the schedule. Save, then set it back to **Active** and save again. The schedule should come back, and the family should be told each time.
 8. **People.** Open **People** › **Families**. Search for a student or parent by name, email or phone.
 

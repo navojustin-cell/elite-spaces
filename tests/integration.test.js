@@ -167,41 +167,54 @@ test(['SC-5', 'CI-3', 'EN-7', 'AT-2'], 'flow 1: a parent enrolls, the director m
     [['2026-11-24', 'attended', 'moved', '2026-11-23']]);
 });
 
-test(['DG-1', 'DG-2', 'DN-2', 'DN-5'], "flow 2: a student checks in and sets 2 goals, staff see them on Daily notes and post the note, and the parent's note shows them", async () => {
+test(['DG-1', 'DG-2', 'DN-2', 'DN-5'], "flow 2: a student checks in and sets 3 goals for the week; the next check-in asks about each one, and staff, the posted note and the parent's goals page all show the answers", async () => {
   const w = await world(at(LA, '2026-10-01', '09:00'));
   const { t, loc, fam, staff } = w;
   assert.equal((await w.enroll()).status, 201);
+  const me = t.as(fam.student);
+  const goals = [
+    { subject: 'math', text: 'Finish the Chapter 5 practice problems and check my answers with the key.' },
+    { subject: 'english', text: 'Read chapters 6 to 8 of my novel and write a paragraph on each.' },
+    { subject: 'science', text: "Finish the lab report for this week's experiment, with the data table and graph." },
+  ];
+  // Wednesday: before the check-in there is nothing to set.
   setClock(t, '2026-10-14', '13:05');
-  // Before the check-in there is nothing to set.
-  const early = await t.as(fam.student).put('/api/notes/goals/today', { goals: [{ subject: 'math', text: 'Finish the practice set' }] });
+  const early = await me.put('/api/notes/goals/week', { goals });
   assert.deepEqual([early.status, early.body.error], [400, 'no_visit_today']);
   assert.equal((await w.scan()).body.action, 'checkin');
-  const asked = await t.as(fam.student).get('/api/notes/goals/today');
-  assert.deepEqual([asked.body.checked_in, asked.body.status], [true, 'none']);
-  const set = await t.as(fam.student).put('/api/notes/goals/today', { goals: [
-    { subject: 'math', text: 'Finish the practice set for my current lesson' },
-    { subject: 'english', text: 'Write the first draft of my essay' },
-  ] });
-  assert.equal(set.status, 200, JSON.stringify(set.body));
-  assert.equal(set.body.status, 'set');
+  assert.deepEqual((await me.get('/api/notes/goals/week')).body.state, 'set');
+  const set = await me.put('/api/notes/goals/week', { goals });
+  assert.deepEqual([set.status, set.body.state, set.body.week_start], [200, 'done', '2026-10-12'], JSON.stringify(set.body));
+  const [m, e, s] = set.body.goals.map(g => g.id);
 
-  const day = await t.as(staff).get(`/api/notes/day?location=${loc.id}&date=2026-10-14`);
-  assert.deepEqual(day.body.goal_counts, { set: 1, skipped: 0, none: 0 });
+  // Friday: the check-in asks about each goal on its own.
+  setClock(t, '2026-10-16', '13:05');
+  assert.equal((await w.scan()).body.action, 'checkin');
+  assert.deepEqual((await me.get('/api/notes/goals/week')).body.goals.map(g => g.asks), [true, true, true]);
+  assert.equal((await me.post('/api/notes/goals/week/check', { answers: [{ goalId: m, answer: 'yes' }] })).body.state, 'update');
+  assert.equal((await me.post('/api/notes/goals/week/check', { answers: [{ goalId: e, answer: 'done', subject: 'history',
+    text: 'Read Unit 3 and answer all of the review questions at the end.' }] })).body.state, 'update');
+  const done = await me.post('/api/notes/goals/week/check', { answers: [{ goalId: s, answer: 'change', subject: 'art',
+    text: 'Sketch three thumbnail ideas for my next portfolio piece.' }] });
+  assert.deepEqual([done.body.state, done.body.goals.map(g => g.subject)], ['done', ['math', 'history', 'art']]);
+
+  // Staff see the week with the day's answers on Daily notes, and post the note.
+  const day = await t.as(staff).get(`/api/notes/day?location=${loc.id}&date=2026-10-16`);
+  assert.deepEqual(day.body.goal_counts, { set: 1, none: 0 });
   const entry = day.body.students.find(x => x.id === fam.student.id);
-  assert.deepEqual([entry.goals.status, entry.goals.items.map(g => [g.subject_label, g.text])], ['set', [
-    ['Math', 'Finish the practice set for my current lesson'], ['English', 'Write the first draft of my essay']]]);
-  // Parents see goals only inside a posted note.
-  assert.equal((await t.as(fam.parent).get('/api/notes/today')).body.students[0].note, null);
+  assert.deepEqual(entry.goals.map(g => [g.subject_label, g.answer]), [['Math', 'yes'], ['English', 'done'], ['History', null], ['Science', 'change'], ['Art', null]]);
   const ratings = Object.fromEntries(day.body.items.map(i => [i.id, 3]));
-  const post = await t.as(staff).put(`/api/notes/students/${fam.student.id}/2026-10-14`,
-    { ratings, comment: 'Nice work finishing the practice set.', post: true });
+  const post = await t.as(staff).put(`/api/notes/students/${fam.student.id}/2026-10-16`,
+    { ratings, comment: 'Nice work finishing the English reading.', post: true });
   assert.equal(post.status, 200);
   const note = (await t.as(fam.parent).get('/api/notes/today')).body.students[0].note;
-  assert.deepEqual(note.goals.map(g => [g.subject, g.text]), [
-    ['math', 'Finish the practice set for my current lesson'], ['english', 'Write the first draft of my essay']]);
-  const feed = await t.as(fam.parent).get('/api/notes/feed');
-  assert.equal(feed.status, 200);
-  assert.equal(JSON.stringify(feed.body).includes('Write the first draft of my essay'), true);
+  assert.deepEqual(note.goals.map(g => [g.subject, g.status, g.answer]), [
+    ['math', 'open', 'yes'], ['english', 'done', 'done'], ['history', 'open', null], ['science', 'replaced', 'change'], ['art', 'open', null]]);
+
+  // The parent's goals page has the week and every answer, any time.
+  const page = await t.as(fam.parent).get('/api/notes/goals/student/' + fam.student.id);
+  assert.deepEqual(page.body.checks.map(c => [c.date, c.answer]), [['2026-10-16', 'yes'], ['2026-10-16', 'done'], ['2026-10-16', 'change']]);
+  assert.deepEqual(page.body.goals.filter(g => g.status === 'open').map(g => g.subject), ['math', 'history', 'art']);
 });
 
 test(['AT-5'], 'flow 3: a Monday date ending 4:00 PM with no visit: nothing at 4:20, one missed_day per active parent at 4:31, and nothing more on the next run', async () => {
@@ -302,9 +315,9 @@ test(['NF-1'], 'every Home card loads for every role, including HQ with no home 
   const newParent = t.fx.user('parent', { location: loc });
   const week = 'from=2026-10-12&to=2026-10-18';
   const calls = {
-    student: [fam.student, ['/api/checkin/status', '/api/notes/goals/today', '/api/enrollment/students',
+    student: [fam.student, ['/api/checkin/status', '/api/notes/goals/week', '/api/enrollment/students',
       `/api/enrollment/students/${fam.student.id}/schedule`, '/api/membership/mine', '/api/announcements/feed?limit=10']],
-    parent: [fam.parent, ['/api/checkin/status', '/api/accounts/family', '/api/notes/today',
+    parent: [fam.parent, ['/api/checkin/status', '/api/accounts/family', '/api/notes/today', `/api/notes/goals/student/${fam.student.id}`,
       '/api/enrollment/students', `/api/enrollment/students/${fam.student.id}/schedule`, '/api/membership/mine', '/api/attendance/students',
       '/api/announcements/feed?limit=10']],
     newParent: [newParent, ['/api/checkin/status', '/api/accounts/family', '/api/notes/today',

@@ -9,11 +9,13 @@
 // update the note in place ("Edited") without a second notification.
 // Parents browse posted notes by date. Students don't see notes in v1 (D-2).
 //
-// Daily goals (S-8, D-50, D-51): after a check-in at their home location a student
-// sets 1-3 goals for that day (a subject plus up to 280 characters), or skips the
-// day. Staff see each student's goals and status on the day list; parents see the
-// goals only inside the posted note, read live. Staff answer goals in the note's
-// comment; there is no separate thread. Subjects and examples are in goals.js.
+// Weekly top 3 goals (S-8, D-57, D-51): at their first check-in of the week a student
+// sets exactly 3 goals (a subject plus one to three sentences, each a different subject),
+// and at each later check-in answers Yes, Done or Change for each open goal. There is no
+// skip. Staff see each student's goals and that day's answers on the day list; parents
+// see them inside each posted note (as of that day) and any time from the goals route.
+// Staff answer goals in the note's comment; there is no separate thread. Subjects,
+// examples and the text check are in goals.js; reading and writing a week in week.js.
 //
 // Routes, mounted at /api/notes:
 //   GET   /items                       the checklist (staff and up)
@@ -26,10 +28,12 @@
 //   GET   /note/:id                    one posted note, so a "note is ready" notification opens its day (parents)
 //   GET   /today                       today's posted note for each linked student, and whether the day's
 //                                      session is still to come (parents)
-//   GET   /goals/subjects              the goal subjects and their examples (signed in)
-//   GET   /goals/today                 the signed-in student's goals for their location's today (students)
-//   PUT   /goals/today                 set or replace today's goals (students, after a check-in that day)
-//   POST  /goals/today/skip            skip today's goals while not answered (students, after a check-in that day)
+//   GET   /goals/subjects              the goal subjects, their examples and the tip (signed in)
+//   POST  /goals/check-text            judge one goal's text before the next step: { ok, message } (students)
+//   GET   /goals/week                  the signed-in student's week: open goals, today's answers, what's asked (students)
+//   PUT   /goals/week                  set the week's 3 goals (students, after a check-in that day)
+//   POST  /goals/week/check            today's Yes / Done / Change for open goals (students, after a check-in that day)
+//   GET   /goals/student/:id           a student's week and every daily answer, read-only (linked parents, staff there, HQ)
 
 const express = require('express');
 const { DateTime } = require('luxon');
@@ -41,6 +45,7 @@ const { tx } = require('../../db');
 const { bad, conflict, forbidden, notFound } = require('../../errors');
 const dates = require('../sessions/dates');
 const goals = require('./goals');
+const week = require('./week');
 
 const SCALE = { 1: 'Needs work', 2: 'Good', 3: 'Great' }; // D-8
 const MAX_COMMENT = 2000;
@@ -106,25 +111,14 @@ function ratingsToEdit(db, note) {
   return currentItems(db).map(i => ({ item_id: i.id, label: i.label, rating: saved.has(i.id) ? saved.get(i.id) : null }));
 }
 
-// A student's goal record for one local date (D-50): status 'none' (not answered),
-// 'set' with its 1-3 goals, or 'skipped'.
-function goalDay(db, studentId, date) {
-  const day = db.prepare('SELECT status FROM daily_goal_days WHERE student_id = ? AND local_date = ?').get(studentId, date);
-  const items = day && day.status === 'set'
-    ? db.prepare('SELECT position, subject, text FROM daily_goals WHERE student_id = ? AND local_date = ? ORDER BY position')
-      .all(studentId, date).map(g => ({ position: g.position, subject: g.subject, subject_label: goals.subjectLabel(g.subject), text: g.text }))
-    : [];
-  return { status: day ? day.status : 'none', items };
-}
-
-// One row of the staff attendance list (DN-4), with the student's goals for the day (D-50).
+// One row of the staff attendance list (DN-4), with the student's goals as of that day (D-57).
 function dayEntry(db, student, loc, date) {
   const note = noteFor(db, student.id, date);
   return {
     id: student.id,
     name: student.name,
     visits: visitsFor(db, student.id, loc.id, date),
-    goals: goalDay(db, student.id, date),
+    goals: week.goalsOn(db, student.id, date),
     status: note ? note.status : 'none',
     comment: note ? note.comment : null,
     ratings: ratingsToEdit(db, note),
@@ -148,7 +142,7 @@ function slotEnds(ctx, s, date) {
 }
 
 // What a parent sees (DN-5): date, location, visits, ratings in words, comment, who posted, "Edited",
-// and the day's goals when the student set them (D-50), read live so a later edit that day shows.
+// and the week's goals as they stood that day, with that day's answers (D-57).
 function parentNote(db, n) {
   return {
     id: n.id, student_id: n.student_id, student_name: n.student_name, local_date: n.local_date,
@@ -156,7 +150,7 @@ function parentNote(db, n) {
     posted_at: n.posted_at, posted_by_name: n.posted_by_name, edited_at: n.edited_at,
     ratings: savedRatings(db, n.id).map(r => ({ label: r.label, rating: r.rating, word: SCALE[r.rating] })),
     visits: visitsFor(db, n.student_id, n.location_id, n.local_date),
-    goals: goalDay(db, n.student_id, n.local_date).items,
+    goals: week.goalsOn(db, n.student_id, n.local_date),
   };
 }
 
@@ -241,8 +235,8 @@ module.exports = {
       // Notes still to post come first; the sort is stable, so names stay in order.
       students.sort((a, b) => (a.status === 'posted') - (b.status === 'posted'));
       const posted = students.filter(s => s.status === 'posted').length;
-      const goal_counts = { set: 0, skipped: 0, none: 0 };
-      for (const s of students) goal_counts[s.goals.status]++;
+      const goal_counts = { set: 0, none: 0 };
+      for (const s of students) goal_counts[s.goals.length ? 'set' : 'none']++;
       res.json({ location: loc, date, today, items: currentItems(db), scale: SCALE, posted, total: students.length, goal_counts, students });
     });
 
@@ -385,60 +379,38 @@ module.exports = {
       res.json({ students });
     });
 
-    // ---------- students: today's goals (D-50, DG-1, DG-2) ----------
+    // ---------- weekly top 3 goals (D-57, DG-1..DG-3) ----------
     r.get('/goals/subjects', auth.requireRole(), (_req, res) => {
-      res.json({ subjects: goals.SUBJECTS, max_goals: goals.MAX_GOALS, text_max: goals.TEXT_MAX });
+      res.json({ subjects: goals.SUBJECTS, goals_per_week: goals.GOALS_PER_WEEK, text_max: goals.TEXT_MAX,
+        max_sentences: goals.MAX_SENTENCES, tip: goals.TIP });
     });
 
-    // The signed-in student's today at their home location, and whether they have
-    // checked in there today. There is no student id in the path: a student only
-    // ever reads or writes their own goals, and only for that day.
-    function goalToday(user) {
-      const loc = db.prepare('SELECT id, name, timezone FROM locations WHERE id = ?').get(user.location_id);
-      if (!loc) throw notFound('No home location.');
-      const date = time.localDate(loc, ctx.clock.now());
-      const checkedIn = !!db.prepare('SELECT 1 FROM visits WHERE student_id = ? AND location_id = ? AND local_date = ?').get(user.id, loc.id, date);
-      return { loc, date, checkedIn };
-    }
-    const goalBody = (user, date, checkedIn) => {
-      const g = goalDay(db, user.id, date);
-      return { date, checked_in: checkedIn, status: g.status, goals: g.items };
-    };
-    const noVisit = () => bad('no_visit_today', "Check in first, then set today's goals.");
-
-    r.get('/goals/today', auth.requireRole('student'), (req, res) => {
-      const { date, checkedIn } = goalToday(req.user);
-      res.json(goalBody(req.user, date, checkedIn));
+    // One step of setting the week: the same check every route uses, so its message shows by the text box.
+    r.post('/goals/check-text', auth.requireRole('student'), (req, res) => {
+      const body = req.body || {};
+      res.json(goals.checkGoalText(body.text, { subject: body.subject }));
     });
 
-    // Sets today's goals, replacing any earlier ones that day; a skipped day becomes set.
-    r.put('/goals/today', auth.requireRole('student'), (req, res) => {
-      const { loc, date, checkedIn } = goalToday(req.user);
-      if (!checkedIn) throw noVisit();
-      const list = goals.validate((req.body || {}).goals);
-      const now = ctx.clock.now();
-      tx(db, () => {
-        db.prepare(`INSERT INTO daily_goal_days (student_id, local_date, location_id, status, updated_at) VALUES (?,?,?,'set',?)
-          ON CONFLICT(student_id, local_date) DO UPDATE SET status = 'set', location_id = excluded.location_id, updated_at = excluded.updated_at`)
-          .run(req.user.id, date, loc.id, now);
-        db.prepare('DELETE FROM daily_goals WHERE student_id = ? AND local_date = ?').run(req.user.id, date);
-        const put = db.prepare('INSERT INTO daily_goals (student_id, local_date, position, subject, text) VALUES (?,?,?,?,?)');
-        list.forEach((g, i) => put.run(req.user.id, date, i + 1, g.subject, g.text));
-      });
-      res.json(goalBody(req.user, date, checkedIn));
+    // There is no student id in these paths: a student only ever reads or writes their own week.
+    r.get('/goals/week', auth.requireRole('student'), (req, res) => {
+      res.json(week.studentWeek(db, req.user, ctx.clock.now()).body);
+    });
+    r.put('/goals/week', auth.requireRole('student'), (req, res) => {
+      week.setWeek(ctx, req.user, req.body || {});
+      res.json(week.studentWeek(db, req.user, ctx.clock.now()).body);
+    });
+    r.post('/goals/week/check', auth.requireRole('student'), (req, res) => {
+      week.answer(ctx, req.user, req.body || {});
+      res.json(week.studentWeek(db, req.user, ctx.clock.now()).body);
     });
 
-    // Skip is allowed only while the day is not answered; set goals can be edited, not skipped.
-    r.post('/goals/today/skip', auth.requireRole('student'), (req, res) => {
-      const { loc, date, checkedIn } = goalToday(req.user);
-      if (!checkedIn) throw noVisit();
-      const g = goalDay(db, req.user.id, date);
-      if (g.status === 'set') throw conflict('already_set', "You already set today's goals. You can edit them instead.");
-      if (g.status === 'none') {
-        db.prepare("INSERT INTO daily_goal_days (student_id, local_date, location_id, status, updated_at) VALUES (?,?,?,'skipped',?)")
-          .run(req.user.id, date, loc.id, ctx.clock.now());
-      }
-      res.json({ status: 'skipped' });
+    // Read-only, for mentors: linked parents, staff at the student's location, HQ (NF-1).
+    r.get('/goals/student/:id', auth.requireRole('parent', 'staff'), (req, res) => {
+      const id = Number(req.params.id);
+      auth.assertSeeStudent(ctx, req.user, id);
+      const student = db.prepare("SELECT id, name FROM users WHERE id = ? AND role = 'student'").get(id);
+      if (!student) throw notFound('No such student.');
+      res.json(week.history(db, student, ctx.clock.now()));
     });
 
     return r;

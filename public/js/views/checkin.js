@@ -1,6 +1,7 @@
 /* Check-in views (PRD 1, CI-1..CI-7):
-   - student "Check in": camera scan with jsQR, one button for in and out; after a check-in it asks
-     for today's goals through the notes API (/api/notes/goals/today, D-50)
+   - student "Check in": today's date at the location, camera scan with jsQR, one button for in and out;
+     after a check-in (and while checked in) it asks for this week's goals through the notes API
+     (/api/notes/goals/week, D-57): set 3, or the daily update, or "You're set for today"
    - #/scan/<locationId>/<code>: the link a phone camera opens from the entrance QR; finishes the scan
    - staff "In the building": here / expected / left, manual check-in and check-out, visits needing review
    - "Entrance QR": today's code full screen (or printed), refreshing itself
@@ -33,6 +34,9 @@
     .ci-dialog::backdrop { background: rgba(15, 19, 27, .55); }
     .ci-dialog form { padding: 16px; }
     .ci-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+    .ci-today { font-size: 1.05rem; font-weight: 700; color: var(--text); margin: 0 0 .15rem; }
+    .ci-goals h2 { font-size: 1.15rem; margin: 0 0 .35rem; }
+    .ci-goals p { margin: 0 0 .75rem; }
     .ci-hideable[hidden] { display: none !important; }
     @media print {
       body:has(.ci-qr-stage) #topbar, body:has(.ci-qr-stage) #nav, body:has(.ci-qr-stage) #devbar, .ci-noprint { display: none !important; }
@@ -101,18 +105,20 @@
   }
 
   // ---------- the scan panel (student Check in view and the #/scan link) ----------
-  function scanPanel(el, { auto } = {}) {
-    let status = null, now = App.now();
+  // `today` is the page head's date line, filled from the server's status (the location's date, NF-4).
+  function scanPanel(el, { auto, today } = {}) {
+    let status = null, now = App.now(), goalsAsked = false, goalsSeq = 0;
     let stopCamera = null;
     const statusBox = h('div', { class: 'card' }, h('p', { class: 'muted' }, 'Loading your status…'));
     const result = h('div', { role: 'status', 'aria-live': 'polite' });
+    const goalsBox = h('div', { class: 'ci-goals' });
     const camBox = h('div');
     const scanBtn = h('button', { class: 'btn btn-primary btn-lg btn-block ci-hideable', type: 'button', onclick: startCamera },
       h('span', { 'aria-hidden': 'true' }, '📷'), h('span', { class: 'ci-scan-label' }, 'Scan to check in'));
     // Staff can check a student in or out by hand; the line follows the button (check out while here).
     const helpLine = h('p', { class: 'muted small', style: 'margin:0' }, 'Having trouble? Ask staff at the front desk to check you in.');
     const devBtn = App.me && App.me.dev && h('button', { class: 'btn btn-block', type: 'button', onclick: simulate }, 'Simulate scan (dev)');
-    el.append(statusBox, result, camBox,
+    el.append(statusBox, result, goalsBox, camBox,
       h('div', { class: 'card' }, scanBtn,
         helpLine,
         devBtn && h('div', { style: 'margin-top:.75rem' }, devBtn)));
@@ -124,6 +130,9 @@
         now = r.now;
       } catch (e) { statusBox.replaceChildren(h('p', { class: 'notice notice-danger', style: 'margin:0' }, e.message)); return; }
       if (!status) return;
+      if (today) today.textContent = status.today_label;
+      // Still checked in: keep asking for the week's goals until they're answered (D-57).
+      if (status.state === 'here' && !goalsAsked) askGoals();
       statusBox.replaceChildren(h('div', { class: 'ci-status' },
         h('div', { class: 'grow' }, h('strong', null, status.state === 'here' ? "You're checked in" : status.state === 'left' ? "You've checked out" : 'Not checked in'),
           h('div', { class: 'muted small' }, statusLine(status, true, now))),
@@ -157,33 +166,28 @@
       result.replaceChildren(box);
       box.setAttribute('tabindex', '-1');
       box.focus({ preventScroll: false });
-      // After a check-in (never a check-out) the student is asked for today's goals (D-50, DG-3).
+      // After a check-in (never a check-out) the student is asked for the week's goals (D-57, DG-3).
       if (r.action === 'checkin') askGoals();
+      else { goalsAsked = true; goalsSeq++; goalsBox.replaceChildren(); }
     }
-    // Today's goals, from the notes module: not answered -> set or skip; set -> the subjects and Edit.
+    // This week's goals, from the notes module: none yet -> set 3; an open goal not answered today ->
+    // the daily update; otherwise "You're set for today". Each opens My goals (#/goals) in one tap.
     // A failed load shows nothing: the check-in itself already worked.
     async function askGoals() {
-      const box = h('div', { class: 'card' });
-      result.append(box);
+      goalsAsked = true;
+      const n = ++goalsSeq;
       let g;
-      try { g = await App.api.get('/api/notes/goals/today'); } catch (_) { box.remove(); return; }
-      if (!box.isConnected) return;
-      if (g.status === 'set') {
-        box.append(h('p', { style: 'margin:0 0 .5rem' }, h('strong', null, "Today's goals: "), g.goals.map(x => x.subject_label).join(' · ')),
-          h('a', { class: 'btn', href: '#/goals', 'aria-label': "Edit today's goals" }, 'Edit'));
-        return;
-      }
-      if (g.status !== 'none') { box.remove(); return; }
-      const skip = h('button', { class: 'btn', type: 'button', onclick: async e => {
-        await App.run(e.currentTarget, async () => {
-          await App.api.post('/api/notes/goals/today/skip', {});
-          const done = h('p', { style: 'margin:0', tabindex: '-1' }, 'Skipped. You can still add goals from Home today.');
-          box.replaceChildren(done);
-          done.focus(); // the Skip button is gone, so focus stays on the answer
-        });
-      } }, 'Skip today');
-      box.append(h('h2', null, 'What are you working on today?'),
-        h('div', { class: 'ci-actions' }, h('a', { class: 'btn btn-primary', href: '#/goals' }, "Set today's goals"), skip));
+      try { g = await App.api.get('/api/notes/goals/week'); } catch (_) { return; }
+      if (n !== goalsSeq) return; // checked out meanwhile: a check-out never asks
+      const go = (label, primary) => h('a', { class: primary ? 'btn btn-primary btn-lg btn-block' : 'btn', href: '#/goals' }, label);
+      goalsBox.replaceChildren(h('div', { class: 'card' }, ...(g.state === 'set'
+        ? [h('h2', null, 'Set your 3 goals for this week'), h('p', { class: 'muted' }, 'It takes a minute. Your mentors check in on them.'),
+          go('Set my 3 goals', true)]
+        : g.state === 'update'
+          ? [h('h2', null, 'Still working on your goals?'), h('p', { class: 'muted' }, 'Tap Yes, Done or Change for each one.'),
+            go('Update my goals', true)]
+          : [h('p', null, h('strong', null, h('span', { 'aria-hidden': 'true' }, '✓ '), "You're set for today.")),
+            h('p', { class: 'muted' }, 'This week: ' + g.goals.map(x => x.subject_label).join(' · ')), go('See my goals')])));
     }
     // A second scan soon after checking in (or out) asks before undoing it, with the shell's
     // confirm: the safe answer ("Stay checked in") comes first and has focus.
@@ -291,9 +295,10 @@
   App.register({
     id: 'checkin', title: 'Check in', icon: '📷', roles: ['student'], order: 10,
     async render(el) {
-      el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Check in'),
+      const today = h('p', { class: 'ci-today' });
+      el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Check in'), today,
         h('p', null, 'Scan the code at the entrance when you arrive and again when you leave.'))));
-      scanPanel(el);
+      scanPanel(el, { today });
     },
   });
 
@@ -313,9 +318,10 @@
       }
       // A refresh of this page must not repeat the scan.
       history.replaceState(null, '', '#/checkin');
-      el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Check in'))));
-      if (!target.locationId || !target.code) return scanPanel(el);
-      scanPanel(el, { auto: target });
+      const today = h('p', { class: 'ci-today' });
+      el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Check in'), today)));
+      if (!target.locationId || !target.code) return scanPanel(el, { today });
+      scanPanel(el, { auto: target, today });
     },
   });
 

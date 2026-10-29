@@ -73,3 +73,10 @@ enrollments (MIG-1 and D-54 were retired on Oct 28, 2026). A v1 database must be
 - **On Render:** the demo service (free plan, no disk, `ELITE_SEED_DEMO=1`) starts a fresh demo database on every
   deploy, so deploying v1.1 is the reseed. A service with a disk keeps its file across deploys: delete
   `/var/data/elite-spaces.db` (Shell tab) before the v1.1 deploy so it starts empty and the demo seed runs again.
+
+## Upgrading to weekly goals (Oct 28, 2026)
+Weekly top 3 goals (D-57) replace the daily goals: `schema/070_notes.sql` no longer has `daily_goal_days` or
+`daily_goals`; the new tables are `goal_weeks`, `week_goals` and `goal_checks`. Every database before this is demo
+data (Justin, Oct 28), so it is reseeded, not converted, the same way as above: `npm run seed` locally, and on Render
+a fresh demo deploy (or delete `/var/data/elite-spaces.db` first on a service with a disk). An old file keeps its
+unused daily tables until it is reseeded; nothing reads them.

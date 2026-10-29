@@ -11,7 +11,10 @@ and the last fix-and-verify pass. None of them blocks the gate.
 - An "include audit log of staff edits" option on attendance exports.
 - Notification settings beyond muting announcements.
 
-- **Daily check-in goals (Justin, Oct 21, 2026; to design later).** After scanning in, a student picks the
+- **AI goal coach and counselor summaries: later, after privacy/legal sign-off; hook = checkGoalText + goal history tables.**
+  (`checkGoalText` in `src/modules/notes/goals.js`; `goal_weeks`, `week_goals`, `goal_checks` in `schema/070_notes.sql`; D-57.)
+
+- **Daily check-in goals (Justin, Oct 21, 2026). Built as weekly top 3 goals on Oct 28, 2026 (D-57).** After scanning in, a student picks the
   subject they're working on (Math, English, ...). The app offers example goals for that subject, and the student
   writes a sentence or two about what they're doing (studying, a project). Up to 3 goals, optional, not required
   daily. Mentors and staff can see it and comment, so they can check in on anyone who needs help. Over time it

@@ -202,7 +202,7 @@ test(['CI-3'], 'the check-in window opens 30 minutes before the start and closes
   const late = await t.scan(ivy);
   assert.equal(late.status, 403);
   assert.equal(late.body.error, 'no_session');
-  assert.equal(late.body.message, "You don't have a session right now. Your next one is Fri, Oct 16 at 1:00 PM. Staff can check you in if needed.");
+  assert.equal(late.body.message, "You don't have a session right now. Your next one is Fri, Oct 16, at 1:00 PM. Staff can check you in if needed.");
   assert.equal(visitsOf(t, ivy).length, 0);
 });
 
@@ -231,7 +231,7 @@ test(['CI-3'], 'no check-in without a live enrollment that day: paused, other we
   const closed = await t.scan();
   assert.equal(closed.status, 403);
   assert.equal(closed.body.error, 'no_session');
-  assert.equal(closed.body.message, 'Irvine is closed today (Staff training), so there are no sessions. Your next one is Wed, Oct 21 at 1:00 PM.');
+  assert.equal(closed.body.message, 'Irvine is closed today (Staff training), so there are no sessions. Your next one is Wed, Oct 21, at 1:00 PM.');
   assert.equal(visitsOf(t, t.fam.student).length, 0);
 });
 
@@ -885,7 +885,7 @@ test(['NF-1'], "families see only their own students' status today", async () =>
   const theirs = await t.as(other.parent).get('/api/checkin/status');
   assert.deepEqual(theirs.body.students.map(s => [s.id, s.state]).sort(), other.students.map(s => [s.id, 'none']).sort());
   assert.deepEqual(theirs.body.students.map(s => s.next.start_at), [at(LA, '2026-10-16', '13:00'), at(LA, '2026-10-16', '13:00')]);
-  assert.equal(theirs.body.students[0].next.when, 'Fri, Oct 16 at 1:00 PM');
+  assert.equal(theirs.body.students[0].next.when, 'Fri, Oct 16, at 1:00 PM');
   const self = await t.as(other.students[0]).get('/api/checkin/status');
   assert.deepEqual(self.body.students.map(s => s.id), [other.students[0].id]);
   for (const u of [t.staff, t.fx.hq()]) assert.equal((await t.as(u).get('/api/checkin/status')).status, 403, u.role);
@@ -1363,7 +1363,7 @@ test(['CI-3'], 'a scan on a closure day says the center is closed, names the rea
   const leoR = await t.scan(leo);
   assert.equal(leoR.status, 403);
   assert.equal(leoR.body.error, 'no_session');
-  assert.equal(leoR.body.message, 'Irvine is closed today, so there are no sessions. Your next one is Fri, Oct 16 at 1:00 PM.');
+  assert.equal(leoR.body.message, 'Irvine is closed today, so there are no sessions. Your next one is Fri, Oct 16, at 1:00 PM.');
   const niaR = await t.scan(nia);
   assert.deepEqual([niaR.status, niaR.body.error, niaR.body.message], [403, 'no_session', 'Irvine is closed today, so there are no sessions.']);
   assert.equal(visitsOf(t, leo).length + visitsOf(t, nia).length, 0);
@@ -1372,7 +1372,7 @@ test(['CI-3'], 'a scan on a closure day says the center is closed, names the rea
   t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(t.loc.id, '2026-10-21', 'Staff training');
   setClock(t, '13:05', '2026-10-15');
   const thu = await t.scan(leo);
-  assert.equal(thu.body.message, "You don't have a session right now. Your next one is tomorrow at 1:00 PM. Staff can check you in if needed.");
+  assert.equal(thu.body.message, "You don't have a session right now. Your next one is tomorrow, Fri Oct 16, at 1:00 PM. Staff can check you in if needed.");
 });
 
 test(['CI-3', 'SC-3'], "the status says when today is a closure day, with its reason, so the Check in screen can say so (L31)", async () => {
@@ -1525,7 +1525,7 @@ class El {
 
 // One tab running the real shell and the check-in view (read from ROOT, so the
 // mutation runner's copy is the one exercised) against the test server.
-// `stub` answers some requests itself ({ 'GET /api/notes/goals/today': () => [200, body] }), for the
+// `stub` answers some requests itself ({ 'GET /api/notes/goals/week': () => [200, body] }), for the
 // notes module a scoped run doesn't load; `requests` lists every request the tab sent.
 function shellTab(t, { stub = {}, navigator = {} } = {}) {
   const vm = require('vm'), fs = require('fs'), path = require('path'), crypto = require('crypto');
@@ -1644,7 +1644,7 @@ test(['CI-4', 'CI-5', 'CI-3'], 'the Check in screen offers staff help to check o
   const open = await screen();
   assert.deepEqual(help(open), ['Having trouble? Ask staff at the front desk to check you in.']);
   t.db.prepare('INSERT INTO closures (location_id, date, reason) VALUES (?,?,?)').run(t.loc.id, '2026-10-21', 'Power outage');
-  const closedText = 'Closed today Irvine is closed today (Power outage), so there are no sessions. Your next one is Wed, Oct 28 at 1:00 PM.';
+  const closedText = 'Closed today Irvine is closed today (Power outage), so there are no sessions. Your next one is Wed, Oct 28, at 1:00 PM.';
   const closedLine = 'Irvine is closed today (Power outage). There are no sessions to check in to.';
   const lines = tab => tab.main().findAll(n => n.tag === 'p' && /Having trouble\?|closed today/.test(n.textContent)).map(n => n.textContent);
   assert.equal(await simulate(open), closedText);
@@ -1781,7 +1781,7 @@ test(['CI-3', 'SC-5'], 'a whole-schedule enrollment checks in on every meeting d
   const tue = await t.scan();
   assert.equal(tue.status, 403);
   assert.equal(tue.body.error, 'no_session');
-  assert.equal(tue.body.message, "You don't have a session right now. Your next one is tomorrow at 1:00 PM. Staff can check you in if needed.");
+  assert.equal(tue.body.message, "You don't have a session right now. Your next one is tomorrow, Wed Oct 21, at 1:00 PM. Staff can check you in if needed.");
   assert.equal(visitsOf(t, t.fam.student).length, 3);
 });
 
@@ -1797,8 +1797,8 @@ test(['SC-5', 'CI-3'], 'an added date checks in, linked to the schedule; a skipp
   const mon = await t.scan();
   assert.equal(mon.status, 403);
   assert.equal(mon.body.error, 'no_session');
-  assert.equal(mon.body.message, "Afternoon Study doesn't meet today (moved to Tue, Oct 20). Your next one is tomorrow at 1:00 PM. Staff can check you in if needed.");
-  assert.equal((await t.scan(fay)).body.message, "You don't have a session right now. Your next one is Fri, Oct 23 at 1:00 PM. Staff can check you in if needed.");
+  assert.equal(mon.body.message, "Afternoon Study doesn't meet today (moved to Tue, Oct 20). Your next one is tomorrow, Tue Oct 20, at 1:00 PM. Staff can check you in if needed.");
+  assert.equal((await t.scan(fay)).body.message, "You don't have a session right now. Your next one is Fri, Oct 23, at 1:00 PM. Staff can check you in if needed.");
   assert.equal((await t.scan(nia)).body.message, "You don't have a session right now. Staff can check you in if needed.");
   assert.equal(visitsOf(t, t.fam.student).length, 0);
   assert.equal(t.fx.notifications(t.fam.parent).length, 0);
@@ -1813,7 +1813,7 @@ test(['SC-5', 'CI-3'], 'an added date checks in, linked to the schedule; a skipp
   assert.equal(t.fx.notifications(t.fam.parent, 'checkin')[0].body, 'Afternoon Study, until 4:00 PM.');
   // a plain skip says so, without a move
   setClock(t, '13:05', '2026-10-21');
-  assert.equal((await t.scan()).body.message, "Afternoon Study doesn't meet today. Your next one is Fri, Oct 23 at 1:00 PM. Staff can check you in if needed.");
+  assert.equal((await t.scan()).body.message, "Afternoon Study doesn't meet today. Your next one is Fri, Oct 23, at 1:00 PM. Staff can check you in if needed.");
 });
 
 test(['SC-5', 'CI-5', 'CI-7'], 'the status, In the building, a manual check-in and the auto-checkout all follow the changed dates', async () => {
@@ -1827,7 +1827,7 @@ test(['SC-5', 'CI-5', 'CI-7'], 'the status, In the building, a manual check-in a
   setClock(t, '12:00', '2026-10-19');
   assert.deepEqual((await building()).expected, []);
   const next = (await status()).next;
-  assert.deepEqual([next.date, next.start_at, next.when], ['2026-10-20', at(LA, '2026-10-20', '13:00'), 'tomorrow at 1:00 PM']);
+  assert.deepEqual([next.date, next.start_at, next.when], ['2026-10-20', at(LA, '2026-10-20', '13:00'), 'tomorrow, Tue Oct 20, at 1:00 PM']);
   const refused = await t.as(t.staff).post('/api/checkin/manual-checkin', { studentId: leo.id });
   assert.equal(refused.status, 409);
   assert.equal(refused.body.error, 'no_session');
@@ -1852,7 +1852,7 @@ test(['SC-5', 'CI-5', 'CI-7'], 'the status, In the building, a manual check-in a
   }
 });
 
-// ---------------------------------------------------------------- v1.1 screens: no location, today's goals (D-49, D-50)
+// ---------------------------------------------------------------- v1.1 screens: no location, this week's goals, today's date (D-49, D-57)
 
 test(['CI-2', 'NF-5'], "the Check in screen sends the code only and never asks for the phone's location", async () => {
   const t = await setup({ dev: true });
@@ -1883,7 +1883,7 @@ test(['CI-2', 'NF-5'], "the dev scan button doesn't suggest a location check (D-
 
 test(['CI-4', 'NF-7'], 'a second scan soon after asks with the shell confirm: the safe answer comes first and has focus, on the Check in screen and the #/scan link', async () => {
   const t = await setup({ dev: true });
-  const tab = shellTab(t, { stub: { 'GET /api/notes/goals/today': () => [200, { status: 'skipped', goals: [] }] } });
+  const tab = shellTab(t, { stub: { 'GET /api/notes/goals/week': () => [200, { state: 'done', checked_in: true, goals: [] }] } });
   await tab.open(t.fam.student, '#/checkin');
   const simulate = async () => {
     byTag(tab.main(), 'button').find(b => /Simulate scan/.test(b.textContent)).click();
@@ -1916,44 +1916,86 @@ test(['CI-4', 'NF-7'], 'a second scan soon after asks with the shell confirm: th
   assert.equal(visitsOf(t, t.fam.student).length, 1);
 });
 
-test(['DG-3', 'CI-2'], "after a check-in (never a check-out) the Check in screen asks for today's goals through the notes API", async () => {
+test(['DG-3', 'CI-2'], "after a check-in (never a check-out) the Check in screen asks for this week's goals through the notes API: set 3, the daily update, or set for today", async () => {
   const t = await setup({ dev: true });
-  let goals = { date: '2026-10-14', checked_in: true, status: 'none', goals: [] };
-  const stub = {
-    'GET /api/notes/goals/today': () => [200, goals],
-    'POST /api/notes/goals/today/skip': () => { goals = Object.assign({}, goals, { status: 'skipped' }); return [200, { status: 'skipped' }]; },
-  };
-  const tab = shellTab(t, { stub });
+  const three = [['math', 'Math'], ['english', 'English'], ['science', 'Science']].map(([subject, subject_label], i) =>
+    ({ id: i + 1, position: i + 1, subject, subject_label, text: 'Finish the practice problems and check every answer.' }));
+  let week = { today: '2026-10-14', week_start: '2026-10-12', week_end: '2026-10-18', checked_in: true, state: 'set', goals: [] };
+  const tab = shellTab(t, { stub: { 'GET /api/notes/goals/week': () => [200, week] } });
   await tab.open(t.fam.student, '#/checkin');
-  const result = () => tab.main().find(n => n.getAttribute('role') === 'status');
+  const box = () => tab.main().find(n => n.cls.includes('ci-goals'));
   const simulate = async () => {
     byTag(tab.main(), 'button').find(b => /Simulate scan/.test(b.textContent)).click();
     await tab.settle();
-    return words(result());
+    return words(tab.main().find(n => n.getAttribute('role') === 'status'));
   };
-  const asked = () => tab.requests.filter(r => r.url.startsWith('/api/notes/')).map(r => r.method + ' ' + r.url);
-  // not answered: Set today's goals (#/goals) or Skip today
-  assert.match(await simulate(), /^✓ Checked in 1:05 PM .* What are you working on today\? Set today's goals Skip today$/);
-  assert.equal(result().find(n => n.tag === 'a' && /Set today's goals/.test(n.textContent)).getAttribute('href'), '#/goals');
-  byTag(result(), 'button').find(b => b.textContent === 'Skip today').click();
-  await tab.settle();
-  assert.deepEqual(asked(), ['GET /api/notes/goals/today', 'POST /api/notes/goals/today/skip']);
-  assert.match(words(result()), /Skipped\. You can still add goals from Home today\.$/);
-  // a check-out asks nothing
+  const asked = () => tab.requests.filter(r => r.url.startsWith('/api/notes/')).length;
+  const link = () => box().find(n => n.tag === 'a');
+  assert.equal(asked(), 0, 'not checked in yet: nothing asked');
+  assert.equal(words(box()), '');
+
+  // No goals this week yet: set 3, one big button to #/goals.
+  assert.match(await simulate(), /^✓ Checked in 1:05 PM/);
+  assert.equal(words(box()), 'Set your 3 goals for this week It takes a minute. Your mentors check in on them. Set my 3 goals');
+  assert.deepEqual([link().getAttribute('href'), link().cls.includes('btn-primary')], ['#/goals', true]);
+  assert.equal(asked(), 1);
+
+  // A check-out asks nothing, and clears the question.
   setClock(t, '15:00');
-  assert.doesNotMatch(await simulate(), /goals|working on/);
-  assert.equal(asked().length, 2);
-  // an answered day shows nothing when skipped, and the subjects with Edit when set
-  setClock(t, '15:10');
-  assert.match(await simulate(), /^✓ Checked in 3:10 PM .*Your parents have been told\.$/);
-  goals = { date: '2026-10-14', checked_in: true, status: 'set', goals: [
-    { position: 1, subject: 'math', subject_label: 'Math', text: 'Finish the practice set' },
-    { position: 2, subject: 'english', subject_label: 'English', text: 'Write the first draft of my essay' }] };
-  setClock(t, '15:20');
   assert.match(await simulate(), /^✓ Checked out/);
-  setClock(t, '15:30');
-  assert.match(await simulate(), /Today's goals: Math · English Edit$/);
-  assert.equal(result().find(n => n.tag === 'a' && n.textContent === 'Edit').getAttribute('href'), '#/goals');
+  assert.equal(words(box()), '');
+  assert.equal(asked(), 1);
+
+  // Checking back in with goals from an earlier day not answered today: the daily update.
+  week = Object.assign({}, week, { state: 'update', goals: three.map(g => Object.assign({ asks: true, answer: null }, g)) });
+  setClock(t, '15:10');
+  assert.match(await simulate(), /^✓ Checked in 3:10 PM/);
+  assert.equal(words(box()), 'Still working on your goals? Tap Yes, Done or Change for each one. Update my goals');
+  assert.equal(link().getAttribute('href'), '#/goals');
+
+  // Every goal answered today: no question, just the confirmation and the subjects.
+  week = Object.assign({}, week, { state: 'done', goals: three.map(g => Object.assign({ asks: false, answer: 'yes' }, g)) });
+  const again = shellTab(t, { stub: { 'GET /api/notes/goals/week': () => [200, week] } });
+  await again.open(t.fam.student, '#/checkin'); // still checked in: the screen asks on its own
+  const goals = again.main().find(n => n.cls.includes('ci-goals'));
+  assert.equal(words(goals), "✓ You're set for today. This week: Math · English · Science See my goals");
+  assert.equal(goals.find(n => n.tag === 'a').getAttribute('href'), '#/goals');
+
+  // A screen opened after checking out doesn't ask.
+  setClock(t, '15:20');
+  assert.equal((await t.scan(t.fam.student, { confirm: true })).body.action, 'checkout');
+  const left = shellTab(t, { stub: { 'GET /api/notes/goals/week': () => [200, week] } });
+  await left.open(t.fam.student, '#/checkin');
+  assert.equal(left.requests.filter(r => r.url.startsWith('/api/notes/')).length, 0);
+});
+
+test(['CI-3', 'NF-4'], "the top of the Check in screen shows the location's date, from the server, on the screen and the entrance link", async () => {
+  const t = await setup({ dev: true });
+  const today = tab => tab.main().find(n => n.cls.includes('ci-today')).textContent;
+  const mine = async u => { const s = (await t.as(u).get('/api/checkin/status')).body.students[0]; return [s.today, s.today_label]; };
+  assert.deepEqual(await mine(t.fam.student), ['2026-10-14', 'Wednesday, Oct 14']);
+  assert.deepEqual(await mine(t.fam.parent), ['2026-10-14', 'Wednesday, Oct 14']);
+  let tab = shellTab(t);
+  await tab.open(t.fam.student, '#/checkin');
+  assert.equal(today(tab), 'Wednesday, Oct 14');
+  // 10:30 PM in Los Angeles is already Thursday in UTC: the screen still says Wednesday.
+  setClock(t, '22:30');
+  tab = shellTab(t);
+  await tab.open(t.fam.student, '#/checkin');
+  assert.equal(today(tab), 'Wednesday, Oct 14');
+  // A Toronto student at the same moment is on Thursday.
+  const tor = t.fx.location({ name: 'Toronto', timezone: 'America/Toronto' });
+  const eli = rename(t, t.fx.family(tor).student, 'Eli Tremblay');
+  assert.deepEqual(await mine(t.fam.student), ['2026-10-14', 'Wednesday, Oct 14']);
+  assert.deepEqual(await mine(eli), ['2026-10-15', 'Thursday, Oct 15']);
+  tab = shellTab(t);
+  await tab.open(eli, '#/checkin');
+  assert.equal(today(tab), 'Thursday, Oct 15');
+  // The entrance link's screen has it too.
+  setClock(t, '13:05', '2026-10-16');
+  tab = shellTab(t);
+  await tab.open(t.fam.student, `#/scan/${t.loc.id}/${t.code()}`);
+  assert.equal(today(tab), 'Friday, Oct 16');
 });
 
 test(['CI-7', 'NF-5'], "a manual check-in's reasons no longer offer a failed location check", async () => {
