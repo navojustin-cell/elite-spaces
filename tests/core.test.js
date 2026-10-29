@@ -460,6 +460,35 @@ test(['CORE', 'NF-7'], 'navigation: Home is the current page right after sign-in
   assert.deepEqual(current(), ['#/notes'], 'the page it moved to is marked current');
 });
 
+test(['CORE', 'NF-7'], 'Skip to content only moves focus to <main>: the page on screen stays, with what was typed; a new page starts scrolled to the top', async () => {
+  const t = await makeApp();
+  const p = t.fx.family(t.fx.location()).parent;
+  const scrolls = [];
+  const tab = shellTab(t, '', { scrollTo: (x, y) => scrolls.push([x, y]) });
+  let draws = 0;
+  tab.App.register({ id: 'form', title: 'Form', roles: ['parent'], order: 10, render(el, params) { draws++; el.append(tab.el('input', { id: 'typed' }), params.join('/')); } });
+  tab.signIn(p);
+  await tab.start();
+  await tab.go('#/form/2');
+  assert.deepEqual(scrolls, [[0, 0]], 'a new page starts at its top');
+  const input = tab.doc.getElementById('typed');
+  input.typed = 'half a goal';
+  const drawn = draws;
+  // The skip link is <a href="#main">: the browser sets the address to #main.
+  await tab.go('#main');
+  assert.equal(tab.location.hash, '#/form/2', 'the address goes back to the page on screen');
+  assert.equal(draws, drawn, 'the page is not drawn again');
+  assert.equal(tab.doc.getElementById('typed'), input);
+  assert.equal(input.typed, 'half a goal');
+  assert.equal(tab.doc.activeElement, tab.main());
+  assert.deepEqual(scrolls, [[0, 0]], 'skipping to the content does not jump to the top');
+  // Before sign-in too: a scan link's address is kept.
+  const out = shellTab(t, '#/scan/1/abc');
+  await out.start();
+  await out.go('#main');
+  assert.equal(out.location.hash, '#/scan/1/abc');
+});
+
 test(['CORE', 'NF-7'], "the sign-out button's screen-reader name starts with the first name it shows (WCAG 2.5.3, fix list 2026-10-21 item 17)", async () => {
   const t = await makeApp();
   const morgan = t.fx.staff(t.fx.location(), { name: 'Morgan Lee' });

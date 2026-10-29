@@ -466,14 +466,15 @@
     return { id: parts[0], params: parts.slice(1) };
   }
 
-  let renderSeq = 0, shown = null; // shown: the id of the view on screen
+  let renderSeq = 0, shown = null, shownHash = ''; // shown: the id of the view on screen; shownHash: its address
   async function render() {
     const main = document.getElementById('main');
-    if (!App.me) { shown = null; return renderSignIn(main); }
+    if (!App.me) { shown = null; shownHash = location.hash; return renderSignIn(main); }
     let { id, params } = currentRoute();
     let view = App.views.find(v => v.id === id && App.allowed(v.roles));
     if (!view) { view = navViews()[0] || App.views.find(v => v.id === 'inbox'); if (id !== view.id) { history.replaceState(null, '', '#/' + view.id); } }
     shown = view.id;
+    shownHash = location.hash;
     if (view.id !== 'home' && bannerState === 'showing') { bannerState = 'done'; session.set(NOTIFY_SESSION, '1'); }
     // Leaving the Inbox: once its items are read on the server, the bell drops to match.
     if (view.id !== 'inbox' && inboxReads) { const reads = inboxReads; inboxReads = null; reads.then(updateBell); }
@@ -495,9 +496,18 @@
     }
   }
   window.addEventListener('hashchange', async () => {
+    // "Skip to content" (index.html, href="#main") only moves focus: the address goes back to
+    // the page on screen, which stays as it is (a half-done form isn't lost).
+    if (location.hash === '#main') {
+      history.replaceState(null, '', shownHash || '#/');
+      document.getElementById('main').focus();
+      return;
+    }
     // After a pause, make sure this tab still acts as the account it shows before drawing the next page.
     if (App.me && Date.now() - checkedAt > RECHECK_MS && await checkAccount()) return;
     render(); document.getElementById('main').focus({ preventScroll: true });
+    // A new page starts at its top, not where the last one was scrolled to.
+    if (window.scrollTo) window.scrollTo(0, 0);
   });
 
   // ---------- sign-in ----------

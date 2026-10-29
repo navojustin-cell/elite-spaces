@@ -34,6 +34,14 @@ module.exports = [
     find: 'clock_fixed: ctx.clock.isFixed()', repl: 'clock_fixed: true' },
 
   // ---- the shell (public/js/app.js) ----
+  { name: 'Skip to content routes to #main and redraws the page', covers: ['CORE', 'NF-7'], file: 'public/js/app.js',
+    find: "if (location.hash === '#main') {", repl: 'if (false) {' },
+  { name: 'Skip to content leaves the address at #main', covers: ['CORE', 'NF-7'], file: 'public/js/app.js',
+    find: "history.replaceState(null, '', shownHash || '#/');", repl: '' },
+  { name: 'Skip to content forgets a scan address on the sign-in screen', covers: ['CORE', 'NF-7'], file: 'public/js/app.js',
+    find: 'if (!App.me) { shown = null; shownHash = location.hash; return renderSignIn(main); }', repl: 'if (!App.me) { shown = null; return renderSignIn(main); }' },
+  { name: "a new page keeps the last page's scroll position", covers: ['CORE', 'NF-7'], file: 'public/js/app.js',
+    find: 'if (window.scrollTo) window.scrollTo(0, 0);', repl: '' },
   { name: 'App.confirm opens with focus on the risky button', covers: ['CORE', 'NF-7'], file: 'public/js/app.js',
     find: 'cancel.focus();', repl: 'ok.focus();' },
   { name: 'App.confirm puts the risky button first', covers: ['CORE', 'NF-7'], file: 'public/js/app.js',

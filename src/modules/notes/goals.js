@@ -16,6 +16,8 @@ const MAX_SENTENCES = 3;
 // Shown above the examples, and the refusal for a goal that is too short (D-57).
 const TIP = "Say what you'll finish: the chapter, the assignment or the problems.";
 const SAME_SUBJECT = 'Pick a different subject for each goal. Doing more than one thing in a subject? Put it all in that goal.';
+// The refusal for a Change that leaves the goal as it was.
+const UNCHANGED = 'Change something first, or tap Cancel to keep it.';
 
 // Each example models a good goal for a high schooler: specific, and something they can finish this week.
 const SUBJECTS = [
@@ -41,20 +43,23 @@ const words = text => text.split(/\s+/).filter(Boolean).length;
 const sentences = text => text.split(/[.!?]+(?=\s|$)/).filter(s => s.trim()).length;
 
 // Judges one goal's text: { ok, message }. `subject` is for a future coach; today's rules don't use it.
-function checkGoalText(text, { subject } = {}) {
+// `was` is the goal a Change replaces ({ subject, text }): the same subject and text isn't a change.
+function checkGoalText(text, { subject, was } = {}) {
   const t = typeof text === 'string' ? text.trim() : '';
+  if (was && was.subject === subject && was.text === t) return { ok: false, message: UNCHANGED };
   if (words(t) < MIN_WORDS) return { ok: false, message: TIP };
   if (sentences(t) > MAX_SENTENCES) return { ok: false, message: `Keep it to ${MAX_SENTENCES} sentences or fewer.` };
   if (t.length > TEXT_MAX) return { ok: false, message: `Keep it to ${TEXT_MAX} characters or fewer.` };
   return { ok: true, message: '' };
 }
 
-// One goal from a body, checked and trimmed: { subject, text }. `prefix` names it in a list ("Goal 2: ").
-function readGoal(g, prefix = '') {
+// One goal from a body, checked and trimmed: { subject, text }. `prefix` names it in a list ("Goal 2: ");
+// `was` is the goal a Change replaces.
+function readGoal(g, prefix = '', was = null) {
   const subject = g && typeof g.subject === 'string' ? g.subject : '';
   if (!LABELS.has(subject)) throw bad('bad_subject', prefix + 'Pick a subject.');
   const text = g && typeof g.text === 'string' ? g.text.trim() : '';
-  const check = checkGoalText(text, { subject });
+  const check = checkGoalText(text, { subject, was });
   if (!check.ok) throw bad('goal_text', prefix + check.message);
   return { subject, text };
 }
@@ -70,4 +75,4 @@ function readWeek(raw) {
   return out;
 }
 
-module.exports = { SUBJECTS, GOALS_PER_WEEK, TEXT_MAX, MAX_SENTENCES, TIP, SAME_SUBJECT, subjectLabel, checkGoalText, readGoal, readWeek };
+module.exports = { SUBJECTS, GOALS_PER_WEEK, TEXT_MAX, MAX_SENTENCES, TIP, SAME_SUBJECT, UNCHANGED, subjectLabel, checkGoalText, readGoal, readWeek };

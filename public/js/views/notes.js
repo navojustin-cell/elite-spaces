@@ -73,6 +73,11 @@
     .goal-answers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .4rem; }
     .goal-form { margin-top: .85rem; padding-top: .75rem; border-top: 1px solid var(--line); }
     .goal-form h3 { margin: 0; font-size: 1.05rem; }
+    .goal-same { margin: .4rem 0 0; }
+    .goal-own { color: var(--text); font-weight: 600; margin: .35rem 0 0; }
+    .goal-own:empty { display: none; }
+    /* Focus moves to these on a new step or form; the sticky top bar must not cover them. */
+    .goal-steps, .goal-form h3, #goal-done { scroll-margin-top: 84px; }
     h2:focus, h3:focus { outline: 3px solid var(--focus); outline-offset: 2px; }
     @media (min-width: 700px) {
       .note-rate { grid-template-columns: minmax(10rem, 1fr) minmax(0, 1.7fr); align-items: center; gap: 1rem; }
@@ -477,9 +482,10 @@
 
   // ======================================================== students: My goals (#/goals)
   // One goal's editor: subject buttons, the tip, one or two examples to tap, and the text box.
-  // A subject another open goal uses is shown but can't be picked (D-57). Errors show right under
-  // the subject buttons or the text box, and never clear what was typed. `g` is { subject, text }.
-  function goalEditor(base, meta, g, taken) {
+  // A subject another open goal uses is shown but can't be picked (D-57), with the tip to put
+  // more than one thing in that goal. Errors show right under the subject buttons or the text
+  // box, and never clear what was typed. `g` is { subject, text }; `changed` runs after each edit.
+  function goalEditor(base, meta, g, taken, changed = () => {}) {
     const subjErr = h('p', { class: 'goal-error', id: base + '-subject-err', 'aria-live': 'polite' });
     const textErr = h('p', { class: 'goal-error', id: base + '-text-err', 'aria-live': 'polite' });
     const text = h('textarea', { id: base + '-text', rows: '3', maxlength: String(meta.text_max), 'aria-describedby': base + '-text-err' });
@@ -488,12 +494,18 @@
       (field === 'subject' ? subjErr : textErr).textContent = '';
       if (field === 'text') text.setAttribute('aria-invalid', 'false');
     };
-    text.addEventListener('input', () => { g.text = text.value; clear('text'); });
+    // While the box holds an example word for word, a nudge to make it the student's own.
+    const own = h('p', { class: 'goal-own', id: base + '-own', 'aria-live': 'polite' });
+    const nudge = () => {
+      const s = meta.subjects.find(x => x.id === g.subject);
+      own.textContent = s && s.examples.includes(g.text.trim()) ? "Now make it yours: change the chapter, unit or assignment to the one you're doing." : '';
+    };
+    text.addEventListener('input', () => { g.text = text.value; clear('text'); nudge(); changed(); });
     const examples = h('div');
     const chips = meta.subjects.map(s => h('button', {
       type: 'button', class: 'btn' + (g.subject === s.id ? ' btn-primary' : ''), 'data-subject': s.id,
       'aria-pressed': String(g.subject === s.id), disabled: taken.has(s.id),
-      onclick: () => { g.subject = s.id; mark(); drawExamples(); clear('subject'); },
+      onclick: () => { g.subject = s.id; mark(); drawExamples(); clear('subject'); nudge(); changed(); },
     }, s.label, taken.has(s.id) && h('span', { class: 'goal-used' }, ' · ' + taken.get(s.id))));
     function mark() {
       chips.forEach(b => { const on = b.dataset.subject === g.subject; b.classList.toggle('btn-primary', on); b.setAttribute('aria-pressed', String(on)); });
@@ -502,20 +514,22 @@
     function drawExamples() {
       const s = meta.subjects.find(x => x.id === g.subject);
       examples.replaceChildren(...(s ? [
-        h('p', { class: 'goal-label', id: base + '-ex' }, 'Tap an example to use it'),
+        h('p', { class: 'goal-label', id: base + '-ex' }, 'Tap an example, then make it yours'),
         h('div', { class: 'goal-examples', role: 'group', 'aria-labelledby': base + '-ex' }, s.examples.map(x =>
-          h('button', { type: 'button', class: 'btn', onclick: () => { g.text = x; text.value = x; clear('text'); text.focus(); } }, x))),
+          h('button', { type: 'button', class: 'btn', onclick: () => { g.text = x; text.value = x; clear('text'); nudge(); changed(); text.focus(); } }, x))),
       ] : []));
     }
     drawExamples();
-    const el = h('div', { class: 'goal-editor' },
-      h('p', { class: 'goal-label', id: base + '-subject-label' }, 'Pick a subject'),
+    nudge();
+    const kids = [h('p', { class: 'goal-label', id: base + '-subject-label' }, 'Pick a subject'),
       h('div', { class: 'goal-subjects', role: 'group', 'aria-labelledby': base + '-subject-label', 'aria-describedby': base + '-subject-err' }, chips),
       subjErr,
+      taken.size > 0 && h('p', { class: 'muted small goal-same' }, 'Doing more than one thing in a subject? Put it all in that goal.'),
       h('p', { class: 'goal-tip' }, meta.tip),
       examples,
       h('label', { class: 'goal-label', for: base + '-text' }, 'Your goal ', h('span', { class: 'muted', style: 'font-weight:400' }, '(up to 3 sentences)')),
-      text, textErr);
+      text, textErr, own];
+    const el = h('div', { class: 'goal-editor' }, kids);
     // Shows a refusal next to its field and moves focus there.
     function show(field, message) {
       if (field === 'subject') {
@@ -530,19 +544,59 @@
     }
     return { el, show };
   }
+  // A student's own goals: each open one says where it stands today, and finished ones say
+  // which day they were done ("✓ Done Fri"), so finishing a goal shows.
+  const MINE = { yes: 'Still working on it', fresh: 'New today', ask: 'Not answered yet' };
+  const goalLine = (g, chip, cls) => h('li', null, h('span', { class: 'badge badge-accent' }, g.subject_label), h('span', { class: 'sr-only' }, ', '), g.text,
+    h('span', { class: 'sr-only' }, '. '), h('span', { class: cls + ' goal-answer' }, chip));
+  const myGoalList = items => h('ul', { class: 'note-goal-list' }, items.map(g =>
+    goalLine(g, MINE[g.answer === 'yes' ? 'yes' : g.asks ? 'ask' : 'fresh'], 'badge')));
+  const doneList = items => h('ul', { class: 'note-goal-list' }, items.map(g =>
+    goalLine(g, '✓ Done ' + App.fmtDate(g.done_on, { weekday: 'short', month: undefined, day: undefined }), 'badge badge-ok')));
+  const doneCard = items => h('section', { class: 'card', 'aria-labelledby': 'goal-done-h' }, h('h2', { id: 'goal-done-h' }, 'Done this week'), doneList(items));
+
   // Which field a refusal from the server belongs to.
   const fieldOf = code => (code === 'bad_subject' || code === 'same_subject' ? 'subject' : code === 'goal_text' ? 'text' : null);
 
+  // The half-set week, kept on this device per student and week until it's saved, so leaving
+  // the screen or reloading never loses it. Kept in memory too, for a browser that blocks storage.
+  const drafts = new Map();
+  const draftStore = {
+    get(k) {
+      if (drafts.has(k)) return drafts.get(k);
+      try { return JSON.parse(window.localStorage.getItem(k)); } catch (_) { return null; }
+    },
+    set(k, v) { drafts.set(k, v); try { window.localStorage.setItem(k, JSON.stringify(v)); } catch (_) { /* memory only */ } },
+    del(k) { drafts.delete(k); try { window.localStorage.removeItem(k); } catch (_) { /* memory only */ } },
+    // Drops this student's drafts from other weeks, so none outlives its week on a shared device.
+    prune(prefix, k) {
+      try {
+        const ls = window.localStorage;
+        for (let i = ls.length - 1; i >= 0; i--) { const d = ls.key(i); if (d && d.startsWith(prefix) && d !== k) ls.removeItem(d); }
+      } catch (_) { /* memory only */ }
+    },
+  };
+  const blank = () => [0, 1, 2].map(() => ({ subject: '', text: '' }));
+  // A stored draft, or null when it isn't one this screen wrote.
+  const readDraft = d => (d && Array.isArray(d.picks) && d.picks.length === 3 && Number.isInteger(d.step) && d.step >= 0 && d.step < 3 &&
+    d.picks.every(x => x && typeof x.subject === 'string' && typeof x.text === 'string')
+    ? { step: d.step, picks: d.picks.map(x => ({ subject: x.subject, text: x.text })) } : null);
+
   // Setting the week: 3 short steps, "Goal 1 of 3", each checked by the server before the next.
-  function setFlow(el, meta) {
-    const picks = [0, 1, 2].map(() => ({ subject: '', text: '' }));
-    let step = 0;
-    const box = h('section', { class: 'card', 'aria-labelledby': 'goal-step' });
+  function setFlow(el, meta, wk) {
+    const key = 'elite.goals.' + App.me.user.id + '.' + wk.week_start;
+    draftStore.prune('elite.goals.' + App.me.user.id + '.', key);
+    const saved = readDraft(draftStore.get(key));
+    const picks = saved ? saved.picks : blank();
+    let step = saved ? saved.step : 0;
+    const keep = () => draftStore.set(key, { step, picks });
+    const box = h('section', { class: 'card goal-steps', 'aria-labelledby': 'goal-step' });
     el.append(box);
     function draw(moved, errField, errMessage) {
       const n = step + 1, last = n === picks.length, p = picks[step];
+      keep();
       const taken = new Map(picks.map((x, i) => [x.subject, 'Goal ' + (i + 1)]).filter(([sub], i) => sub && i !== step));
-      const ed = goalEditor('goal', meta, p, taken);
+      const ed = goalEditor('goal', meta, p, taken, keep);
       const next = h('button', { type: 'button', class: 'btn btn-primary btn-lg btn-block' }, last ? 'Save my 3 goals' : 'Next');
       next.addEventListener('click', () => App.run(next, async () => {
         if (!p.subject) return ed.show('subject', 'Pick a subject.');
@@ -558,6 +612,7 @@
           step = Number(m[1]) - 1;
           return draw(true, fieldOf(e.code), m[2]);
         }
+        draftStore.del(key);
         App.toast("You're set for today.");
         App.go('home');
       }));
@@ -570,18 +625,24 @@
         h('div', { class: 'goal-nav' }, next,
           step > 0 && h('button', { type: 'button', class: 'btn btn-block', onclick: () => { step--; draw(true); } }, 'Back'))];
       box.replaceChildren(...kids.filter(Boolean));
+      // A new step starts at the top of its card, clear of the sticky top bar (scroll-margin-top).
+      if (moved && box.scrollIntoView) box.scrollIntoView({ block: 'start' });
       if (errField) ed.show(errField, errMessage);
-      else if (moved) title.focus();
+      else if (moved) title.focus({ preventScroll: true });
     }
     draw(false);
   }
 
+  // Not checked in yet: the next step, one tap away.
+  const checkInButton = () => h('a', { class: 'btn btn-primary btn-lg btn-block', href: '#/checkin', style: 'margin-bottom:12px' }, 'Go to Check in');
+
   // The daily update: one card per open goal, "Still working on this?" with Yes, Done and Change.
-  // Each goal is answered on its own; there is no button that answers them all (D-57).
+  // Each goal is answered on its own; there is no button that answers them all (D-57). A goal
+  // added today isn't asked about; it can only be changed. Below: the goals done this week.
   function updateFlow(el, meta, wk) {
     const status = h('div', { role: 'status', 'aria-live': 'polite' });
-    const list = h('div');
-    el.append(status, list);
+    const list = h('div'), doneBox = h('div');
+    el.append(status, ...(wk.checked_in ? [] : [checkInButton()]), list, doneBox);
     let form = null; // { id, answer, draft } while a Done or Change form is open
     function draw() {
       const left = wk.goals.filter(g => g.asks).length;
@@ -589,6 +650,7 @@
         : wk.state === 'done' ? h('p', { class: 'notice notice-ok', id: 'goal-done', tabindex: '-1' }, h('span', { 'aria-hidden': 'true' }, '✓ '), "You're set for today.")
           : h('p', { class: 'notice' }, 'Still working on these? Answer each goal. ' + left + ' to go.'));
       list.replaceChildren(...wk.goals.map(card));
+      doneBox.replaceChildren(...(wk.done.length ? [doneCard(wk.done)] : []));
     }
     // After an answer: say so when the day is done, else move on to the next goal still asked about.
     function after(was, id) {
@@ -598,9 +660,11 @@
         return focusId('goal-done');
       }
       const nextAsk = wk.goals.find(g => g.asks);
-      focusId(nextAsk ? 'goal-yes-' + nextAsk.id : 'goal-yes-' + id);
+      focusFirst(nextAsk ? nextAsk.id : id);
     }
     const focusId = id => { const t = document.getElementById(id); if (t) t.focus(); };
+    // A goal card's first answer button: Yes, or Change on a goal added today.
+    const focusFirst = id => focusId(document.getElementById('goal-yes-' + id) ? 'goal-yes-' + id : 'goal-change-' + id);
     const send = answer => App.api.post('/api/notes/goals/week/check', { answers: [answer] });
 
     function card(g) {
@@ -610,7 +674,8 @@
           h('span', { class: 'muted small' }, 'Goal ' + g.position)),
         h('p', { class: 'goal-text' }, g.text));
       if (!wk.checked_in) return art;
-      const q = g.answer === 'yes' ? '✓ Still working on it' : g.asks ? 'Still working on this?' : 'Added today';
+      const fresh = !g.asks && !g.answer; // added today: nothing to ask yet
+      const q = g.answer === 'yes' ? '✓ Still working on it' : fresh ? 'New today. Want to change it?' : 'Still working on this?';
       const yes = h('button', { type: 'button', id: 'goal-yes-' + g.id, class: 'btn' + (g.answer === 'yes' ? ' btn-primary' : ''), 'aria-pressed': String(g.answer === 'yes') }, 'Yes');
       yes.addEventListener('click', () => App.run(yes, async () => {
         const was = wk.state;
@@ -618,11 +683,17 @@
         form = null;
         after(was, g.id);
       }));
-      const open = answer => () => { form = { id: g.id, answer, draft: { subject: '', text: '' } }; draw(); focusId('goal-form-' + g.id); };
+      // Change starts from the goal as it is, so a small fix isn't a fresh start; Done starts empty.
+      const open = answer => () => {
+        form = { id: g.id, answer, draft: answer === 'change' ? { subject: g.subject, text: g.text } : { subject: '', text: '' } };
+        draw(); focusId('goal-form-' + g.id);
+      };
+      const chosen = answer => !!(form && form.id === g.id && form.answer === answer);
+      const pick = (answer, label) => h('button', { type: 'button', id: 'goal-' + answer + '-' + g.id, class: 'btn' + (chosen(answer) ? ' btn-primary' : ''),
+        'aria-pressed': String(chosen(answer)), onclick: open(answer) }, label);
       art.append(h('p', { class: 'goal-q', id: qId }, q),
-        h('div', { class: 'goal-answers', role: 'group', 'aria-labelledby': qId + ' ' + subjId }, yes,
-          h('button', { type: 'button', class: 'btn' + (form && form.id === g.id && form.answer === 'done' ? ' btn-primary' : ''), onclick: open('done') }, 'Done'),
-          h('button', { type: 'button', class: 'btn' + (form && form.id === g.id && form.answer === 'change' ? ' btn-primary' : ''), onclick: open('change') }, 'Change')));
+        h('div', { class: 'goal-answers', role: 'group', 'aria-labelledby': qId + ' ' + subjId },
+          fresh ? [pick('change', 'Change')] : [yes, pick('done', 'Done'), pick('change', 'Change')]));
       if (form && form.id === g.id) art.append(nextGoalForm(g));
       return art;
     }
@@ -649,7 +720,7 @@
         h('h3', { id: 'goal-form-' + g.id, tabindex: '-1' }, f.answer === 'done' ? "Nice work! What's your next goal?" : "What's your new goal?"),
         ed.el,
         h('div', { class: 'goal-nav' }, save,
-          h('button', { type: 'button', class: 'btn btn-block', onclick: () => { form = null; draw(); focusId('goal-yes-' + g.id); } }, 'Cancel')));
+          h('button', { type: 'button', class: 'btn btn-block', onclick: () => { form = null; draw(); focusFirst(g.id); } }, 'Cancel')));
     }
     draw();
   }
@@ -661,10 +732,10 @@
       el.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'My goals'), h('p', null, 'This week: ' + weekText(wk)))));
       if (wk.state !== 'set') return updateFlow(el, meta, wk);
       if (!wk.checked_in) {
-        el.append(h('div', { class: 'card empty' }, 'Check in first, then set your 3 goals for this week.'));
+        el.append(h('div', { class: 'card empty' }, 'Check in first, then set your 3 goals for this week.'), checkInButton());
         return;
       }
-      setFlow(el, meta);
+      setFlow(el, meta, wk);
     },
   });
 
@@ -678,7 +749,8 @@
         ? h('a', { class: 'btn btn-primary btn-lg btn-block', href: '#/goals' }, 'Set my 3 goals')
         : h('p', { class: 'muted small', style: 'margin:0' }, "You'll set them after you check in."));
     } else {
-      card.append(goalList(g.goals));
+      card.append(myGoalList(g.goals));
+      if (g.done.length) card.append(h('h3', { class: 'note-goals-label', style: 'margin-top:.75rem' }, 'Done this week'), doneList(g.done));
       card.append(...(g.checked_in && g.state === 'update'
         ? [h('p', { style: 'margin:.75rem 0 .5rem' }, 'Still working on these?'), h('a', { class: 'btn btn-primary btn-lg btn-block', href: '#/goals' }, 'Update my goals')]
         : [g.checked_in && h('p', { class: 'notice notice-ok', style: 'margin:.75rem 0 .5rem' }, h('span', { 'aria-hidden': 'true' }, '✓ '), "You're set for today."),

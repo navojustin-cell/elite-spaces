@@ -818,7 +818,7 @@ test(['DG-1', 'DG-2'], 'a student sets exactly 3 goals for the week, in 3 differ
   const me = w.t.as(leo);
   w.visit(leo, w.A, YESTERDAY);
   w.visit(leo, w.B); // a visit somewhere else isn't a check-in at his home location
-  const empty = Object.assign({ today: TODAY }, WEEK, { checked_in: false, state: 'set', goals: [] });
+  const empty = Object.assign({ today: TODAY }, WEEK, { checked_in: false, state: 'set', goals: [], done: [] });
   assert.deepEqual((await me.get('/api/notes/goals/week')).body, empty);
   const early = await me.put('/api/notes/goals/week', { goals: [MATH, ENG, SCI] });
   assert.deepEqual([early.status, early.body.error, early.body.message], [400, 'no_visit_today', 'Check in first, then set your goals.']);
@@ -852,7 +852,7 @@ test(['DG-1', 'DG-2'], 'a student sets exactly 3 goals for the week, in 3 differ
   assert.deepEqual(set.body, Object.assign({ today: TODAY }, WEEK, { checked_in: true, state: 'done', goals: [
     ['math', 'Math', MATH.text], ['other', 'Other', ENG.text], ['science', 'Science', SCI.text]].map(([subject, subject_label, text], i) => ({
     id: set.body.goals[i].id, week_id: set.body.goals[0].week_id, position: i + 1, subject, subject_label, text, status: 'open',
-    created_on: TODAY, done_on: null, replaced_on: null, replaced_by: null, answer: null, asks: false })) }), 'goals set today are not asked about today');
+    created_on: TODAY, done_on: null, replaced_on: null, replaced_by: null, answer: null, asks: false })), done: [] }), 'goals set today are not asked about today');
   assert.deepEqual((await me.get('/api/notes/goals/week')).body, set.body);
   assert.deepEqual(w.t.db.prepare('SELECT student_id, location_id, week_start FROM goal_weeks').all().map(r => [r.student_id, r.location_id, r.week_start]),
     [[leo.id, w.A.id, '2026-10-12']]);
@@ -935,6 +935,23 @@ test(['DG-1', 'DG-2'], 'each later check-in that week asks about each open goal 
   // Friday: every open goal is asked again, including the ones added Thursday.
   wk = await nextDay(w, leo, FRI);
   assert.deepEqual([wk.state, wk.goals.map(g => g.asks)], ['update', [true, true, true]]);
+  // The student's week lists the goals done so far (English, Thursday), not the replaced Math one.
+  assert.deepEqual(wk.done.map(g => [g.id, g.subject, g.text, g.status, g.done_on, g.replaced_by]), [[e, 'english', ENG.text, 'done', THU, newHist]]);
+});
+
+test(['DG-2'], 'a Change has to change something: the same subject and text is refused by the goal check, a new subject with the same words is a change', async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  const set = await setWeek(w, leo);
+  const s = set.goals[2].id;
+  await nextDay(w, leo, THU);
+  const UNCHANGED = 'Change something first, or tap Cancel to keep it.';
+  const same = await answer(w, leo, { goalId: s, answer: 'change', subject: 'science', text: '  ' + SCI.text + ' ' });
+  assert.deepEqual([same.status, same.body.error, same.body.message], [400, 'goal_text', UNCHANGED]);
+  assert.deepEqual([checkRows(w, leo), goalRows(w, leo).length], [[], 3]);
+  const moved = await answer(w, leo, { goalId: s, answer: 'change', subject: 'art', text: SCI.text });
+  assert.equal(moved.status, 200, JSON.stringify(moved.body));
+  assert.deepEqual(moved.body.goals.map(g => g.subject), ['math', 'english', 'art']);
 });
 
 test(['DG-1'], 'the week is Monday to Sunday; the next week starts fresh and last week stays as it was', async () => {
@@ -1207,7 +1224,8 @@ class El {
   addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
   dispatch(type) { for (const fn of this.on[type] || []) fn({ type, target: this, currentTarget: this, preventDefault() {} }); }
   click() { if (!this.disabled) this.dispatch('click'); }
-  focus() { this.doc.focused = this; }
+  focus(opts) { this.doc.focused = this; this.doc.focusOpts = opts; }
+  scrollIntoView(opts) { this.doc.scrolled = [this, opts]; }
   append(...kids) {
     for (const k of kids) {
       const n = k instanceof El ? k : new El(this.doc, null, String(k));
@@ -1240,8 +1258,9 @@ class El {
 }
 
 // One browser tab running the real shell and notes view (read from ROOT, so the
-// mutation runner's copy is the one exercised) against the test server.
-function notesTab(t) {
+// mutation runner's copy is the one exercised) against the test server. `extras` go on
+// window (a localStorage shared by two tabs is one browser, so a new tab is a reload).
+function notesTab(t, extras = {}) {
   let cookie = '';
   const pending = new Set(), requests = [], replaced = [];
   const doc = { addEventListener() {} };
@@ -1271,6 +1290,7 @@ function notesTab(t) {
   };
   const win = { document: doc, Node: El, fetch: fetchAs, Response, URL, URLSearchParams, console, navigator: {}, location: { hash: '' },
     history: { replaceState(_s, _t, url) { replaced.push(url); } }, addEventListener() {}, setTimeout: (fn, ms) => setTimeout(fn, ms).unref() };
+  Object.defineProperties(win, Object.getOwnPropertyDescriptors(extras));
   win.window = win;
   vm.createContext(win);
   for (const f of ['public/js/app.js', 'public/js/views/notes.js']) vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), win, { filename: f });
@@ -1284,7 +1304,7 @@ function notesTab(t) {
   };
   const mount = async draw => { const box = el('div'); main.replaceChildren(box); await draw(box); await settle(); return box; };
   return {
-    App, requests, replaced, settle, main, css: () => doc.head.textContent,
+    App, requests, replaced, settle, main, doc, css: () => doc.head.textContent,
     async signIn(user) {
       const token = crypto.randomBytes(16).toString('hex');
       t.ctx.sessions.set(token, user.id);
@@ -1778,15 +1798,33 @@ test(['DG-2', 'DN-5'], "a parent's note and Home card show the student's goals a
   assert.equal(grow[idx].findAll(n => n.tag === 'li').length, 4);
 });
 
+test(['DG-2', 'NF-7'], 'the daily update before checking in says to check in, with a button to the Check in screen; after checking in the button is gone', async () => {
+  const w = await world();
+  const leo = w.fa.students[0];
+  await setWeek(w, leo);
+  w.t.clock.set(at(LA, THU, '08:00'));
+  const tab = notesTab(w.t);
+  await tab.signIn(leo);
+  let view = await tab.open('goals');
+  assert.ok(words(view).includes('Check in to update your goals today.'), words(view));
+  const go = view.find(n => n.tag === 'a' && n.textContent === 'Go to Check in');
+  assert.deepEqual([go && go.getAttribute('href'), go && go.cls.includes('btn-lg')], ['#/checkin', true]);
+  await nextDay(w, leo, THU);
+  view = await tab.open('goals');
+  assert.equal(view.find(n => n.tag === 'a' && n.textContent === 'Go to Check in'), undefined);
+});
+
 test(['DG-1', 'DG-2', 'NF-7'], "setting the week's goals is one short flow, Goal 1 of 3: tap a subject, tap an example to fill the box, errors by the field, and no skip", async () => {
   const w = await world();
   const leo = w.fa.students[0];
   const tab = notesTab(w.t);
   await tab.signIn(leo);
 
-  // Before checking in: the message and no form.
+  // Before checking in: the message, a button to the Check in screen, and no form.
   let view = await tab.open('goals');
-  assert.match(words(view), /^My goals This week: Mon, Oct 12 – Sun, Oct 18 Check in first, then set your 3 goals for this week\.$/);
+  assert.match(words(view), /^My goals This week: Mon, Oct 12 – Sun, Oct 18 Check in first, then set your 3 goals for this week\. Go to Check in$/);
+  const go = view.find(n => n.tag === 'a' && n.textContent === 'Go to Check in');
+  assert.deepEqual([go.getAttribute('href'), go.cls.includes('btn-lg')], ['#/checkin', true]);
   assert.equal(view.find(n => n.tag === 'textarea'), undefined);
 
   w.visit(leo, w.A);
@@ -1817,8 +1855,18 @@ test(['DG-1', 'DG-2', 'NF-7'], "setting the week's goals is one short flow, Goal
   const examples = view.find(n => n.cls.includes('goal-examples'));
   assert.deepEqual([examples.getAttribute('role'), examples.findAll(n => n.tag === 'button').map(b => b.textContent)],
     ['group', [MATH.text, 'Redo the quiz problems I missed and write down what I got wrong.']]);
+  assert.equal(byId(view, 'goal-ex').textContent, 'Tap an example, then make it yours');
+  const own = () => byId(view, 'goal-own').textContent;
+  assert.equal(own(), '');
   await tab.click(buttonIn(examples, MATH.text));
   assert.equal(text().value, MATH.text);
+  // An example as it stands: a nudge to make it the student's own, until the words change.
+  assert.equal(own(), "Now make it yours: change the chapter, unit or assignment to the one you're doing.");
+  assert.equal(byId(view, 'goal-own').getAttribute('aria-live'), 'polite');
+  type(view, 'goal-text', 'Finish the Chapter 7 practice problems and check my answers with the key.');
+  assert.equal(own(), '');
+  // No subject is taken on goal 1, so no tip about putting more in one goal.
+  assert.equal(view.find(n => n.cls.includes('goal-same')), undefined);
   // Too short: the tip, right under the box, and what was typed stays.
   type(view, 'goal-text', 'Do math');
   await tab.click(buttonIn(view, 'Next'));
@@ -1828,10 +1876,17 @@ test(['DG-1', 'DG-2', 'NF-7'], "setting the week's goals is one short flow, Goal
   assert.equal(step(), 'Goal 1 of 3');
   type(view, 'goal-text', MATH.text);
   assert.equal(errorText(view, 'goal-text-err'), '', 'typing clears it');
+  tab.doc.scrolled = null;
   await tab.click(buttonIn(view, 'Next'));
 
-  // Goal 2: Math is taken by goal 1, so it can't be picked again.
+  // Goal 2: Math is taken by goal 1, so it can't be picked again, and the tip says to put more Math in goal 1.
   assert.equal(step(), 'Goal 2 of 3');
+  // The new step's card scrolls to its top (clear of the sticky bar), and focus on its heading doesn't scroll again.
+  assert.deepEqual([tab.doc.scrolled[0].cls.join(' '), JSON.stringify(tab.doc.scrolled[1])], ['card goal-steps', '{"block":"start"}']);
+  assert.equal(tab.doc.focused, byId(view, 'goal-step'));
+  assert.equal(JSON.stringify(tab.doc.focusOpts), '{"preventScroll":true}');
+  assert.match(tab.css(), /\.goal-steps, \.goal-form h3, #goal-done \{ scroll-margin-top: 84px; \}/);
+  assert.equal(view.find(n => n.cls.includes('goal-same')).textContent, 'Doing more than one thing in a subject? Put it all in that goal.');
   assert.deepEqual(strays(view), [], 'no stray false under the progress dots');
   assert.deepEqual([subjectChip(view, 'Math').disabled, words(subjectChip(view, 'Math'))], [true, 'Math · Goal 1']);
   assert.equal(text().value, '');
@@ -1884,6 +1939,81 @@ test(['DG-1', 'NF-7'], 'a refusal of the whole week goes back to the goal it nam
   assert.equal(tab.hash(), '');
 });
 
+// A localStorage like a browser's: strings in, strings out.
+const fakeStorage = () => {
+  const m = new Map();
+  return { m, getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k),
+    get length() { return m.size; }, key: i => [...m.keys()][i] ?? null };
+};
+
+test(['DG-1', 'NF-7'], 'a half-set week is kept on the device for that student and week: leaving the screen or reloading picks up at the same goal with what was typed, and saving clears it', async () => {
+  const w = await world();
+  const [leo, sofia] = w.fa.students;
+  w.visit(leo, w.A);
+  w.visit(sofia, w.A);
+  const localStorage = fakeStorage();
+  // A draft left from last week, and another student's: last week's goes when Leo opens the screen.
+  const lastWeek = 'elite.goals.' + leo.id + '.2026-10-05', hersKey = 'elite.goals.' + sofia.id + '.' + WEEK.week_start;
+  localStorage.setItem(lastWeek, JSON.stringify({ step: 2, picks: [ART, HIST, SCI] }));
+  localStorage.setItem(hersKey, JSON.stringify({ step: 0, picks: [{ subject: '', text: '' }, { subject: '', text: '' }, { subject: '', text: '' }] }));
+  const fill = async (tab, view, label, text, next = 'Next') => {
+    await tab.click(subjectChip(view, label));
+    type(view, 'goal-text', text);
+    if (next) await tab.click(buttonIn(view, next));
+  };
+  let tab = notesTab(w.t, { localStorage });
+  await tab.signIn(leo);
+  let view = await tab.open('goals');
+  assert.deepEqual([localStorage.getItem(lastWeek), byId(view, 'goal-step').textContent], [null, 'Goal 1 of 3']);
+  assert.notEqual(localStorage.getItem(hersKey), null, "another student's draft stays");
+  await fill(tab, view, 'Math', MATH.text);
+  await fill(tab, view, 'English', 'Read chapters 6 to 8', null); // half typed on goal 2
+  const key = 'elite.goals.' + leo.id + '.' + WEEK.week_start;
+  assert.deepEqual(JSON.parse(localStorage.getItem(key)), { step: 1, picks: [MATH, { subject: 'english', text: 'Read chapters 6 to 8' }, { subject: '', text: '' }] });
+
+  // Away to Home and back: the same goal, as it was.
+  const at2 = v => [byId(v, 'goal-step').textContent, byId(v, 'goal-text').value, pressedOf(v.find(n => n.cls.includes('goal-subjects')))];
+  view = await tab.open('goals');
+  assert.deepEqual(at2(view), ['Goal 2 of 3', 'Read chapters 6 to 8', ['English']]);
+  // A reload (a new tab on the same device): the same.
+  tab = notesTab(w.t, { localStorage });
+  await tab.signIn(leo);
+  view = await tab.open('goals');
+  assert.deepEqual(at2(view), ['Goal 2 of 3', 'Read chapters 6 to 8', ['English']]);
+  await tab.click(buttonIn(view, 'Back'));
+  assert.equal(byId(view, 'goal-text').value, MATH.text);
+  // Another student on this device starts from scratch.
+  const other = notesTab(w.t, { localStorage });
+  await other.signIn(sofia);
+  const hers = await other.open('goals');
+  assert.deepEqual([byId(hers, 'goal-step').textContent, byId(hers, 'goal-text').value], ['Goal 1 of 3', '']);
+
+  // Saving the week clears it.
+  await tab.click(buttonIn(view, 'Next'));
+  type(view, 'goal-text', ENG.text);
+  await tab.click(buttonIn(view, 'Next'));
+  await fill(tab, view, 'Science', SCI.text, 'Save my 3 goals');
+  assert.deepEqual(goalRows(w, leo).map(g => g.subject), ['math', 'english', 'science']);
+  assert.equal(localStorage.getItem(key), null);
+
+  // Something else under the key (an older screen, a hand edit) is ignored.
+  localStorage.setItem('elite.goals.' + sofia.id + '.' + WEEK.week_start, JSON.stringify({ step: 7, picks: 'x' }));
+  const fresh = notesTab(w.t, { localStorage });
+  await fresh.signIn(sofia);
+  const v2 = await fresh.open('goals');
+  assert.deepEqual([byId(v2, 'goal-step').textContent, byId(v2, 'goal-text').value], ['Goal 1 of 3', '']);
+
+  // A browser that blocks storage still keeps it while the app is open.
+  const blocked = notesTab(w.t, { get localStorage() { throw new Error('SecurityError'); } });
+  await blocked.signIn(sofia);
+  let v3 = await blocked.open('goals');
+  await fill(blocked, v3, 'Art', ART.text);
+  v3 = await blocked.open('goals');
+  assert.deepEqual([byId(v3, 'goal-step').textContent, byId(v3, 'goal-text').value], ['Goal 2 of 3', '']);
+  await blocked.click(buttonIn(v3, 'Back'));
+  assert.equal(byId(v3, 'goal-text').value, ART.text);
+});
+
 test(['DG-1', 'DG-2', 'NF-7'], 'the daily update is one card per goal with Yes, Done and Change; each goal is answered on its own, Done and Change ask for the next goal, then "You\'re set for today"', async () => {
   const w = await world();
   const leo = w.fa.students[0];
@@ -1891,9 +2021,22 @@ test(['DG-1', 'DG-2', 'NF-7'], 'the daily update is one card per goal with Yes, 
   const tab = notesTab(w.t);
   await tab.signIn(leo);
 
-  // The day the goals were set there is nothing to answer.
+  // The day the goals were set there is nothing to answer: each goal says it's new, and can only be changed.
   let view = await tab.open('goals');
   assert.match(words(view.find(n => n.getAttribute('role') === 'status')), /^✓ You're set for today\.$/);
+  assert.deepEqual(view.findAll(n => n.tag === 'article').map(a => words(a)), [
+    `Math Goal 1 ${MATH.text} New today. Want to change it? Change`,
+    `English Goal 2 ${ENG.text} New today. Want to change it? Change`,
+    `Science Goal 3 ${SCI.text} New today. Want to change it? Change`]);
+  assert.equal(view.find(n => n.cls.includes('goal-answers')).getAttribute('aria-labelledby').split(' ').map(id => byId(view, id).textContent).join(' · '),
+    'New today. Want to change it? · Math');
+  // Change opens on the goal as it is; Cancel puts focus back on that card's Change.
+  const mathChange = buttonIn(view.findAll(n => n.tag === 'article')[0], 'Change');
+  await tab.click(mathChange);
+  assert.deepEqual([byId(view, `goal-${goalRows(w, leo)[0].id}-text`).value, pressedOf(view.find(n => n.cls.includes('goal-form')).find(n => n.cls.includes('goal-subjects')))],
+    [MATH.text, ['Math']]);
+  await tab.click(buttonIn(view, 'Cancel'));
+  assert.equal(tab.doc.focused, byId(view, 'goal-change-' + goalRows(w, leo)[0].id));
   await nextDay(w, leo, THU);
   view = await tab.open('goals');
   const status = () => words(view.find(n => n.getAttribute('role') === 'status'));
@@ -1913,15 +2056,24 @@ test(['DG-1', 'DG-2', 'NF-7'], 'the daily update is one card per goal with Yes, 
   assert.equal(status(), 'Still working on these? Answer each goal. 2 to go.');
   assert.deepEqual([words(cardOf('Math').find(n => n.cls.includes('goal-q'))), pressedOf(cardOf('Math'))], ['✓ Still working on it', ['Yes']]);
 
-  // Change on English: the form for the new goal, with the other goals' subjects taken.
+  // Change on English: the form for the new goal, starting from the goal as it is, with the other goals' subjects taken.
+  const answersOf = subject => cardOf(subject).find(n => n.cls.includes('goal-answers'));
   await tab.click(buttonIn(cardOf('English'), 'Change'));
+  assert.deepEqual(pressedOf(answersOf('English')), ['Change'], 'the chosen answer is pressed for screen readers too');
   let form = cardOf('English').find(n => n.cls.includes('goal-form'));
+  const eId = goalRows(w, leo)[1].id;
   assert.equal(form.find(n => n.tag === 'h3').textContent, "What's your new goal?");
   assert.deepEqual(form.findAll(n => n.tag === 'button' && n.disabled).map(b => words(b)), ['Math · Goal 1', 'Science · Goal 3']);
+  assert.deepEqual([pressedOf(form.find(n => n.cls.includes('goal-subjects'))), byId(view, `goal-${eId}-text`).value], [['English'], ENG.text]);
+  // Saving it unchanged isn't a change: the goal check says so, by the text, and what's there stays.
   await tab.click(buttonIn(form, 'Save new goal'));
-  assert.equal(errorText(view, 'goal-' + goalRows(w, leo)[1].id + '-subject-err'), 'Pick a subject.');
+  assert.equal(errorText(view, `goal-${eId}-text-err`), 'Change something first, or tap Cancel to keep it.');
+  assert.equal(byId(view, `goal-${eId}-text`).value, ENG.text);
+  assert.equal(goalRows(w, leo).length, 3, 'nothing changed');
+  // A small fix in the same subject is fine; this one, though, is too short.
+  type(view, `goal-${eId}-text`, ENG.text + ' Then outline my essay.');
+  assert.equal(errorText(view, `goal-${eId}-text-err`), '');
   await tab.click(subjectChip(form, 'History'));
-  const eId = goalRows(w, leo)[1].id;
   type(view, `goal-${eId}-text`, 'Read history');
   await tab.click(buttonIn(form, 'Save new goal'));
   assert.equal(errorText(view, `goal-${eId}-text-err`), TIP, 'the server says why, under the box');
@@ -1930,18 +2082,29 @@ test(['DG-1', 'DG-2', 'NF-7'], 'the daily update is one card per goal with Yes, 
   await tab.click(buttonIn(form, 'Save new goal'));
   assert.equal(status(), 'Still working on these? Answer each goal. 1 to go.');
   assert.deepEqual(cards().map(a => a.find(n => n.cls.includes('badge-accent')).textContent), ['Math', 'History', 'Science']);
-  assert.equal(words(cardOf('History').find(n => n.cls.includes('goal-q'))), 'Added today');
+  assert.equal(words(cardOf('History').find(n => n.cls.includes('goal-q'))), 'New today. Want to change it?');
+  assert.deepEqual(answersOf('History').findAll(n => n.tag === 'button').map(b => b.textContent), ['Change'], 'nothing to answer about a goal added today');
 
-  // Done on Science: "Nice work!", and its next goal.
+  // Done on Science: "Nice work!", and its next goal, from scratch.
   await tab.click(buttonIn(cardOf('Science'), 'Done'));
+  assert.deepEqual(pressedOf(answersOf('Science')), ['Done']);
   form = cardOf('Science').find(n => n.cls.includes('goal-form'));
+  const sId = goalRows(w, leo)[2].id;
   assert.equal(form.find(n => n.tag === 'h3').textContent, "Nice work! What's your next goal?");
+  assert.deepEqual([pressedOf(form.find(n => n.cls.includes('goal-subjects'))), byId(view, `goal-${sId}-text`).value], [[], '']);
+  assert.equal(view.find(n => n.id === 'goal-done-h'), undefined, 'nothing done yet this week');
+  await tab.click(buttonIn(form, 'Save new goal'));
+  assert.equal(errorText(view, `goal-${sId}-subject-err`), 'Pick a subject.');
   await tab.click(subjectChip(form, 'Art'));
   await tab.click(buttonIn(form.find(n => n.cls.includes('goal-examples')), 'Sketch three thumbnail ideas for my next portfolio piece.'));
   await tab.click(buttonIn(form, 'Save new goal'));
   assert.equal(status(), "✓ You're set for today.");
   assert.deepEqual(lastToast(tab), ["You're set for today.", false]);
   assert.deepEqual(cards().map(a => a.find(n => n.cls.includes('badge-accent')).textContent), ['Math', 'History', 'Art']);
+  // The finished goal stays in view, under Done this week.
+  const done = byId(view, 'goal-done-h').parentNode;
+  assert.equal(done.getAttribute('aria-labelledby'), 'goal-done-h');
+  assert.deepEqual(done.findAll(n => n.tag === 'li').map(li => li.textContent), ['Science, ' + SCI.text + '. ✓ Done Thu']);
   // One answer per request, each for one goal.
   const sent = tab.requests.filter(r => r.url === '/api/notes/goals/week/check' && r.status === 200);
   assert.equal(sent.length, 3);
@@ -1964,7 +2127,9 @@ test(['DG-1', 'DG-2'], "a student's Home card asks for the week's goals until th
 
   await setWeek(w, leo);
   box = await tab.card('notes-goals');
-  assert.deepEqual(box.findAll(n => n.tag === 'li').map(li => li.textContent), ['Math, ' + MATH.text, 'English, ' + ENG.text, 'Science, ' + SCI.text]);
+  // Every goal has a status chip: new today, not answered yet, or still working on it.
+  assert.deepEqual(box.findAll(n => n.tag === 'li').map(li => li.textContent),
+    ['Math, ' + MATH.text + '. New today', 'English, ' + ENG.text + '. New today', 'Science, ' + SCI.text + '. New today']);
   assert.match(words(box), /✓ You're set for today\. See my goals$/);
   assert.equal(link(box, 'See my goals').getAttribute('href'), '#/goals');
 
@@ -1972,12 +2137,22 @@ test(['DG-1', 'DG-2'], "a student's Home card asks for the week's goals until th
   w.t.clock.set(at(LA, THU, '08:00'));
   box = await tab.card('notes-goals');
   assert.doesNotMatch(words(box), /set for today|Still working/);
+  assert.equal(box.findAll(n => n.tag === 'li')[0].textContent, 'Math, ' + MATH.text + '. Not answered yet');
   await nextDay(w, leo, THU);
   box = await tab.card('notes-goals');
   assert.match(words(box), /Still working on these\? Update my goals$/);
-  await answer(w, leo, { goalId: goalRows(w, leo)[0].id, answer: 'yes' });
+  const [m, e] = goalRows(w, leo).map(g => g.id);
+  await answer(w, leo, { goalId: m, answer: 'yes' });
   box = await tab.card('notes-goals');
   assert.equal(box.findAll(n => n.tag === 'li')[0].textContent, 'Math, ' + MATH.text + '. Still working on it');
+  assert.equal(box.find(n => n.tag === 'h3'), undefined, 'nothing done yet');
+  // A finished goal stays on the card, under Done this week, with the day.
+  await answer(w, leo, { goalId: e, answer: 'done', subject: 'history', text: HIST.text });
+  box = await tab.card('notes-goals');
+  assert.deepEqual(box.findAll(n => n.tag === 'li').map(li => li.textContent), ['Math, ' + MATH.text + '. Still working on it',
+    'History, ' + HIST.text + '. New today', 'Science, ' + SCI.text + '. Not answered yet', 'English, ' + ENG.text + '. ✓ Done Thu']);
+  assert.equal(box.find(n => n.tag === 'h3').textContent, 'Done this week');
+  assert.deepEqual(strays(box), []);
 });
 
 test(['DG-2', 'DN-5'], "a parent's Home card shows each student's goals this week any time, and See updates lists every daily answer by day", async () => {

@@ -39,6 +39,7 @@ function goalsOn(db, studentId, date) {
 
 // The signed-in student's week today. state: 'set' (no 3 goals yet), 'update' (an open goal from
 // an earlier day has no answer today) or 'done'. A goal added today isn't asked about until tomorrow.
+// `done` lists the week's finished goals.
 function studentWeek(db, user, now) {
   const loc = home(db, user.id);
   if (!loc) throw notFound('No home location.');
@@ -47,7 +48,10 @@ function studentWeek(db, user, now) {
   const open = goalsOn(db, user.id, today).filter(g => g.status === 'open')
     .map(g => Object.assign(g, { asks: g.created_on < today && !g.answer }));
   const state = open.length < goals.GOALS_PER_WEEK ? 'set' : open.some(g => g.asks) ? 'update' : 'done';
-  return { loc, body: { today, week_start: start, week_end: time.addDays(start, 6), checked_in: checkedIn, state, goals: open } };
+  // The goals finished so far this week, so the student sees what they got done.
+  const w = weekOf(db, user.id, today);
+  const done = w ? db.prepare("SELECT * FROM week_goals WHERE week_id = ? AND status = 'done' ORDER BY done_on, position, id").all(w.id).map(shape) : [];
+  return { loc, body: { today, week_start: start, week_end: time.addDays(start, 6), checked_in: checkedIn, state, goals: open, done } };
 }
 
 const noVisit = () => bad('no_visit_today', 'Check in first, then set your goals.');
@@ -85,7 +89,7 @@ function answer(ctx, user, body) {
     if (seen.has(g.id)) throw bad('twice', 'Answer each goal once.');
     seen.add(g.id);
     if (!ANSWERS.includes(a.answer)) throw bad('bad_answer', 'Answer Yes, Done or Change.');
-    return { g, answer: a.answer, next: a.answer === 'yes' ? null : goals.readGoal(a) };
+    return { g, answer: a.answer, next: a.answer === 'yes' ? null : goals.readGoal(a, '', a.answer === 'change' ? g : null) };
   });
   const subjects = wk.goals.map(g => { const p = plan.find(x => x.g.id === g.id); return p && p.next ? p.next.subject : g.subject; });
   if (new Set(subjects).size !== subjects.length) throw bad('same_subject', goals.SAME_SUBJECT);
